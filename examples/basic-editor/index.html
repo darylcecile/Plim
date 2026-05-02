@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Plim Notion-style editor example</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <main class="notion-shell">
+      <header class="topbar" aria-label="Example controls">
+        <div class="brand">
+          <strong>Plim</strong>
+          <span>Notion-style editor example</span>
+        </div>
+        <div class="topbar-actions">
+          <button id="save-snapshot" class="ghost-button" type="button">Save</button>
+          <button id="reset-snapshot" class="ghost-button" type="button">Reset</button>
+          <details class="developer-details">
+            <summary>Developer details</summary>
+            <div class="developer-panel">
+              <section>
+                <h2>Command lab</h2>
+                <div class="toolbar" aria-label="Editor commands">
+                  <button id="insert-paragraph" type="button">+ Text</button>
+                  <button id="insert-todo" type="button">☐ To-do</button>
+                  <button id="insert-quote" type="button">❝ Quote</button>
+                  <button id="apply-markdown" type="button" disabled>Apply markdown helper</button>
+                </div>
+                <label class="quick-input">
+                  <span>Slash and markdown helper</span>
+                  <input
+                    id="quick-input"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="/to or # "
+                    aria-describedby="input-hint"
+                  />
+                </label>
+                <p id="input-hint" class="hint"></p>
+              </section>
+
+              <section>
+                <h2>Selection</h2>
+                <p id="selection-announcement">Select a block in the editor.</p>
+              </section>
+              <section>
+                <h2>Block definition</h2>
+                <pre id="block-definition"></pre>
+              </section>
+              <section>
+                <h2>Client database query</h2>
+                <p id="database-summary"></p>
+                <ul id="database-results"></ul>
+              </section>
+              <section>
+                <h2>Persistence</h2>
+                <p id="persistence-status"></p>
+              </section>
+            </div>
+          </details>
+        </div>
+      </header>
+
+      <section class="document-shell" aria-label="Editable Plim document">
+        <div class="document-hint" id="editor-instructions">
+          Click anywhere and type. Press <kbd>Enter</kbd> for a new block, or type <kbd>/</kbd> inside a block for commands.
+        </div>
+        <div id="editor" class="editor-host" aria-label="Editable Plim document" aria-describedby="editor-instructions"></div>
+        <div class="insert-strip" aria-label="Quick insert blocks">
+          <span>Insert</span>
+          <button id="insert-paragraph-inline" class="plain-button" type="button">Text</button>
+          <button id="insert-todo-inline" class="plain-button" type="button">To-do</button>
+          <button id="insert-quote-inline" class="plain-button" type="button">Quote</button>
+        </div>
+      </section>
+
+      <div id="slash-menu" class="slash-menu" aria-label="Slash command suggestions"></div>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

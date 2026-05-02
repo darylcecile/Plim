@@ -1,0 +1,272 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    min-width: 320px;
+    min-height: 100vh;
+    overflow-x: hidden;
+    background:
+      radial-gradient(circle at 18% 0%, rgb(244 244 245 / 0.9), transparent 26rem),
+      #fff;
+    color: #37352f;
+    font-family: theme("fontFamily.sans");
+  }
+
+  button,
+  input,
+  [contenteditable="true"] {
+    font: inherit;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  code {
+    @apply rounded bg-[#f7f6f3] px-1.5 py-0.5 text-[0.85em] text-[#37352f];
+  }
+
+  kbd {
+    @apply rounded-[0.35rem] border border-[#d3d3d3] border-b-2 bg-[#fafafa] px-[0.35rem] py-[0.05rem] text-[0.85em] text-[#37352f];
+  }
+}
+
+@layer components {
+  .notion-shell {
+    @apply min-h-screen;
+  }
+
+  .topbar {
+    @apply sticky top-0 z-20 flex h-[3.25rem] items-center justify-between gap-4 border-b border-[rgb(55_53_47_/_0.09)] bg-white/90 px-4 backdrop-blur-[14px];
+  }
+
+  .brand {
+    @apply flex min-w-0 items-baseline gap-2 text-[#37352f];
+  }
+
+  .brand span {
+    @apply truncate text-sm text-[rgb(55_53_47_/_0.64)];
+  }
+
+  .topbar-actions {
+    @apply flex items-center gap-2;
+  }
+
+  .ghost-button,
+  .toolbar button {
+    @apply rounded-md border-0 bg-transparent px-2 py-1.5 text-sm text-[#37352f];
+  }
+
+  .ghost-button:hover,
+  .toolbar button:hover,
+  .developer-details summary:hover {
+    @apply bg-[rgb(55_53_47_/_0.08)];
+  }
+
+  .developer-details {
+    @apply relative;
+  }
+
+  .developer-details summary {
+    @apply cursor-pointer select-none list-none rounded-md px-2 py-1.5 text-sm text-[rgb(55_53_47_/_0.72)];
+  }
+
+  .developer-details summary::-webkit-details-marker {
+    @apply hidden;
+  }
+
+  .developer-panel {
+    @apply absolute right-0 top-[calc(100%+0.5rem)] z-30 grid max-h-[calc(100vh-5rem)] w-[min(31rem,calc(100vw-2rem))] gap-3 overflow-auto rounded-xl border border-[rgb(55_53_47_/_0.12)] bg-white p-3 shadow-[0_16px_48px_rgb(15_23_42_/_0.16)];
+  }
+
+  .developer-panel section {
+    @apply min-w-0 rounded-lg border border-[rgb(55_53_47_/_0.08)] p-3;
+  }
+
+  .developer-panel h2 {
+    @apply mb-2 mt-0 text-[0.82rem] font-semibold uppercase tracking-[0.04em] text-[#37352f];
+  }
+
+  .developer-panel pre {
+    @apply m-0 max-h-52 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[#f7f6f3] p-3 text-xs text-[#37352f];
+  }
+
+  .developer-copy {
+    @apply my-0 text-sm leading-6 text-[rgb(55_53_47_/_0.68)];
+  }
+
+  .react-runtime-stats {
+    @apply grid gap-2 text-sm;
+  }
+
+  .react-runtime-stat {
+    @apply flex items-center justify-between gap-4 rounded-lg bg-[#f7f6f3] px-3 py-2;
+  }
+
+  .react-runtime-stat dt {
+    @apply text-[rgb(55_53_47_/_0.58)];
+  }
+
+  .react-runtime-stat dd {
+    @apply m-0 font-medium text-[#37352f];
+  }
+
+  .document-shell {
+    @apply mx-auto w-[min(100%,860px)] px-8 pb-24 pt-[4.5rem];
+  }
+
+  .document-hint {
+    @apply mb-6 w-fit max-w-full rounded-lg bg-[#f7f6f3] px-3 py-2 text-sm text-[rgb(55_53_47_/_0.58)];
+  }
+
+  .react-tailwind-editor {
+    @apply min-h-[34rem] text-[#37352f] outline-none;
+  }
+
+  .plim-block {
+    @apply relative my-[0.05rem] grid min-h-8 grid-cols-[0_minmax(0,1fr)] items-start rounded-[0.35rem] outline-none;
+  }
+
+  .plim-block:focus-visible {
+    @apply ring-0;
+  }
+
+  .plim-block--page {
+    @apply block min-h-0 bg-transparent;
+  }
+
+  .page-title {
+    @apply mb-5 mt-0 min-h-[1.15em] whitespace-pre-wrap text-[clamp(2.6rem,7vw,4.25rem)] font-extrabold leading-[1.05] tracking-[-0.055em] text-[#37352f] outline-none;
+  }
+
+  .page-title:empty::before,
+  .editable-block-text:empty::before {
+    content: attr(data-placeholder);
+    @apply pointer-events-none text-[rgb(55_53_47_/_0.28)];
+  }
+
+  .block-affordance {
+    @apply flex justify-end gap-[0.15rem] pr-[0.35rem] pt-[0.15rem] opacity-0 transition-opacity duration-100;
+  }
+
+  .plim-block:hover > .block-affordance,
+  .plim-block.is-selected > .block-affordance,
+  .plim-block--selected > .block-affordance,
+  .plim-block:focus-within > .block-affordance {
+    @apply opacity-100;
+  }
+
+  .block-affordance button {
+    @apply grid h-[1.35rem] w-[1.35rem] place-items-center rounded border-0 bg-transparent text-[rgb(55_53_47_/_0.38)] leading-none;
+  }
+
+  .block-affordance button:hover {
+    @apply bg-[rgb(55_53_47_/_0.08)] text-[rgb(55_53_47_/_0.70)];
+  }
+
+  .block-content {
+    @apply min-w-0 rounded-[0.35rem] px-1 py-[0.15rem];
+  }
+
+  .plim-block.is-selected > .block-content,
+  .plim-block--selected > .block-content {
+    @apply bg-[rgb(35_131_226_/_0.10)];
+  }
+
+  .editable-block-text {
+    @apply block min-h-[1.45em] break-words text-[#37352f] outline-none whitespace-break-spaces leading-[1.55] caret-[#37352f];
+  }
+
+  .editable-block-text:focus {
+    @apply shadow-none;
+  }
+
+  .plim-block--heading_1 h2 {
+    @apply mb-1 mt-3 text-3xl font-bold leading-tight tracking-[-0.03em] text-[#37352f];
+  }
+
+  .plim-block--heading_2 h3 {
+    @apply mb-1 mt-2 text-2xl font-semibold leading-snug tracking-[-0.025em] text-[#37352f];
+  }
+
+  .plim-block--heading_3 h4 {
+    @apply mb-0.5 mt-1.5 text-xl font-semibold leading-snug tracking-[-0.015em] text-[#37352f];
+  }
+
+  .plim-block--paragraph p {
+    @apply m-0;
+  }
+
+  .plim-block--quote blockquote {
+    @apply my-1 border-l-[3px] border-[rgb(55_53_47_/_0.22)] pl-4 text-[rgb(55_53_47_/_0.74)];
+  }
+
+  .todo-row {
+    @apply flex cursor-text items-start gap-[0.55rem];
+  }
+
+  .todo-row input {
+    @apply mt-[0.32rem] h-4 w-4 accent-[#2383e2];
+  }
+
+  .todo-row .editable-block-text {
+    @apply flex-1;
+  }
+
+  .list-row {
+    @apply flex items-start gap-[0.45rem];
+  }
+
+  .list-marker {
+    @apply inline-flex min-h-[1.45em] flex-[0_0_1.1rem] justify-center text-[rgb(55_53_47_/_0.82)] leading-[1.55];
+  }
+
+  .list-row .editable-block-text {
+    @apply flex-1;
+  }
+
+  .insert-strip {
+    @apply mt-7 ml-[4.5rem] flex items-center gap-1 text-sm text-[rgb(55_53_47_/_0.42)] hover:text-[rgb(55_53_47_/_0.68)];
+  }
+
+  .toolbar {
+    @apply flex flex-wrap gap-1;
+  }
+
+  .plim-editor__live-region {
+    @apply sr-only;
+  }
+}
+
+@media (max-width: 720px) {
+  .brand span {
+    display: none;
+  }
+
+  .document-shell {
+    @apply px-4 pb-16 pt-10;
+  }
+
+  .plim-block {
+    @apply grid-cols-[3rem_minmax(0,1fr)];
+  }
+
+  .block-affordance {
+    @apply pr-[0.1rem];
+  }
+
+  .insert-strip {
+    @apply ml-12;
+  }
+}

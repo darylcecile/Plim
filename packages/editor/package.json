@@ -1,0 +1,26 @@
+{
+  "name": "@plim/editor",
+  "version": "0.0.0",
+  "description": "Browser-safe Plim editor runtime, transactions, commands, rendering, and persistence adapters.",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@plim/model": "workspace:*"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts"
+}
