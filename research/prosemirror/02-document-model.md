@@ -907,8 +907,11 @@ doc (Node, type=doc, content=Fragment[size=10])
       └── TextNode "world"  (size=5, marks=[strong])
 ```
 
-* `doc.nodeSize` = 2 + 11 = 13.
-* `doc.content.size` = 11 (paragraph.nodeSize) — wait: `paragraph.nodeSize` = 2 + 11 = 13? No: paragraph’s *content* is 6 + 5 = 11; paragraph.nodeSize = 2 + 11 = 13; doc.content.size = 13.
+* `doc.nodeSize` = 2 + 13 = 15 (`doc` opens, paragraph spans 13 with its own
+  open/close tokens, `doc` closes).
+* `doc.content.size` = 13 (the paragraph's `nodeSize`).
+* `paragraph.nodeSize` = 2 + 11 = 13 (paragraph open + 6 + 5 + paragraph close).
+* `paragraph.content.size` = 11 (text-only positions inside the paragraph).
 
 Now:
 
@@ -969,3 +972,400 @@ A few principles worth carrying forward:
 4. **Open depths on slices.** This is the single non-obvious idea that makes paragraph-spanning copy-paste *actually work* without losing structure. Any next-gen editor that supports rich block structure needs the equivalent.
 5. **Marks as canonical sorted sets, not flags.** Storing marks as a sorted, exclusion-respecting `readonly Mark[]` means `sameSet` is O(n) and structural sharing of mark arrays is easy.
 6. **Schema-checked content via a compiled NFA/DFA.** See companion file. The split between "what the model can express" and "what the schema permits" is what allows transforms to remain general while documents remain valid.
+
+---
+
+## 14. Addenda — gap fills
+
+The following sections fill in topics elided from the main body. Each
+sub-section is keyed to a specific gap from the audit.
+
+### 14.1 `Node.replace`, `canReplace`, `canReplaceWith`, `canAppend` — by example
+
+`Node.replace($from, $to, slice)` is in §2.4; the schema-validity helpers
+in §2.5 deserve a worked example because their `start`/`end` parameters
+on `canReplace` are unintuitive.
+
+`canReplace(from, to, replacement, start = 0, end = replacement.childCount)`
+asks: "Can I cut out `[from, to)` of *this* node's content, and splice in
+`replacement.content[start..end)`, while still satisfying my content
+expression?" The `start`/`end` parameters let the caller insert *only a
+sub-range of* a fragment without first slicing it (saving an allocation).
+
+```ts
+// Replace children 1..3 of `doc` with the second paragraph from `other`.
+let other = otherDoc.content        // Fragment with multiple children
+doc.canReplace(1, 3, other, 1, 2)   // start=1, end=2 → take just other.child(1)
+```
+
+The implementation (`prosemirror-model/src/node.ts:276-286`) walks the
+`ContentMatch` over `[0..from)`, then over `replacement[start..end)`,
+then over `[to..content.size)`, and checks `validEnd`. Mark legality is
+verified via `allowsMarks` for each replacement child.
+
+`canReplaceWith(from, to, type, marks?)` is the single-type shortcut.
+`canAppend(other)` is `canReplace(childCount, childCount, other.content)`
+plus a `compatibleContent` fast path for empty `other`.
+
+### 14.2 `Node.check()` — debugging "Invalid content" errors
+
+`check()` (§2.7) is the canonical schema-validation entry point. Every
+step's `apply` runs validity checks via `nodeType.checkContent` /
+`checkAttrs` (which `check` orchestrates). When a transform throws
+`Invalid content for node X: …`, the chain is:
+
+```
+tr.step(...) → step.apply(doc) → builds new doc → newDoc.check()
+   → newDoc.type.checkContent(newDoc.content)
+   → contentMatch.matchFragment(content) returns null OR !validEnd
+   → throws RangeError("Invalid content for node X: …")
+```
+
+To reproduce/debug:
+
+```ts
+node.check()                      // throws; surfaces the offender
+node.type.validContent(node.content)  // returns boolean (no throw)
+node.contentMatchAt(i)            // inspect the DFA state at child i
+node.canReplaceWith(i, i, candidate.type)  // try a candidate before stepping
+```
+
+`check()` recurses over children, so calling it on the root after a
+custom transform is the cheapest way to find a bad subtree during
+development. It is *not* run in production paths automatically; steps
+run their own targeted checks.
+
+### 14.3 `Fragment.from`, `fromArray`, `fromJSON`, `findDiffStart`, `findDiffEnd`
+
+§3 covers `fromArray` and `fromJSON`. The other factory and the diff
+helpers:
+
+- `Fragment.from(value)` (`prosemirror-model/src/fragment.ts:217-225`):
+  accepts `Fragment | Node | readonly Node[] | null` and dispatches to
+  `fromArray`, returns `Fragment.empty` for `null`, or wraps a single
+  `Node` as a one-element fragment. Used by every `NodeType.create*`
+  variant.
+- `Fragment.fromJSON(schema, value)` (`fragment.ts:244-256`): validates
+  the array shape, calls `Node.fromJSON` per child, then `fromArray`.
+  The merging step in `fromArray` is what makes JSON round-trips canonical
+  even if the producer emitted adjacent same-mark text nodes.
+- `findDiffStart` / `findDiffEnd` (`prosemirror-model/src/diff.ts`): walk
+  two fragments returning the position of the first/last differing
+  position, or `null` if equal. Identity short-circuits on equal
+  subtrees. Both are exposed and useful from plugin code:
+
+```ts
+import {findDiffStart, findDiffEnd} from "prosemirror-model"
+
+let start = findDiffStart(oldDoc.content, newDoc.content, 0)
+if (start !== null) {
+  let {a, b} = findDiffEnd(oldDoc.content, newDoc.content,
+                            oldDoc.content.size, newDoc.content.size)!
+  // Mutated region is [start..a) in old, [start..b) in new.
+}
+```
+
+This is exactly how `prosemirror-view`'s incremental DOM updater locates
+the changed window during reconciliation.
+
+### 14.4 `Slice.maxOpen` — clipboard parsing
+
+`Slice.maxOpen(fragment, openIsolating = true)` (`prosemirror-model/src/replace.ts:90-95`)
+is how the clipboard turns a parsed fragment of orphaned content into a
+slice with maximum open depths, so it joins naturally on paste.
+
+```ts
+static maxOpen(fragment: Fragment, openIsolating = true) {
+  let openStart = 0, openEnd = 0
+  for (let n = fragment.firstChild;
+       n && !n.isLeaf && (openIsolating || !n.type.spec.isolating);
+       n = n.firstChild) openStart++
+  for (let n = fragment.lastChild;
+       n && !n.isLeaf && (openIsolating || !n.type.spec.isolating);
+       n = n.lastChild) openEnd++
+  return new Slice(fragment, openStart, openEnd)
+}
+```
+
+Walk: descend along the leftmost spine until we hit a leaf or an
+`isolating` node, counting depth — that's `openStart`. Mirror on the
+right for `openEnd`. The returned `Slice` is then a maximally
+"join-friendly" representation of the parsed clipboard fragment.
+
+`openIsolating = false` is used by the view's `parseFromClipboard`
+when an `isolating` node should *not* be opened through (table cells,
+list items in some configurations).
+
+### 14.5 `Mark.addToSet` ordering rules and `MarkType.rank`
+
+§4.2 walks the algorithm; the *rank* itself is set during schema
+compilation (`prosemirror-model/src/schema.ts:316-319`):
+
+```ts
+static compile(marks: OrderedMap<MarkSpec>, schema: Schema) {
+  let result = Object.create(null), rank = 0
+  marks.forEach((name, spec) => result[name] = new MarkType(name, rank++, schema, spec))
+  return result
+}
+```
+
+So a mark's *declaration order in the schema spec* fixes its rank. In
+`prosemirror-schema-basic`, the order is roughly `link, em, strong, code`,
+giving rank `0, 1, 2, 3`. After `addToSet`, marks are listed in
+ascending rank — i.e. `link` outermost when serialized to DOM, `code`
+innermost.
+
+This matters for:
+
+- DOM rendering order (each mark wraps subsequent marks).
+- JSON output canonicalization (round-trips are stable).
+- Cheap `Mark.sameSet` (same length + pairwise eq, relying on canonical
+  order).
+
+If you see "my marks render with `<em>` outside `<strong>` and I want
+the opposite", reorder your `marks` map in the schema spec. There is no
+runtime override.
+
+### 14.6 `Node.textBetween` `leafText` callback
+
+§ Cheat-sheet mentions `textContent`. The full signature
+(`prosemirror-model/src/node.ts:104-107`) is:
+
+```ts
+textBetween(from: number, to: number, blockSeparator?: string | null,
+            leafText?: null | string | ((leafNode: Node) => string)) { … }
+```
+
+`leafText` controls how *leaf nodes* (atoms, e.g. `image`) contribute to
+the produced text:
+
+- Omitted → leaves contribute nothing.
+- A string → the literal string is inserted for every leaf.
+- A function `(leafNode) => string` → caller-controlled rendering, e.g.
+  emit `image.attrs.alt` for accessibility.
+
+Plus `NodeSpec.leafText(node) => string` (`schema.ts:482`): the
+*per-spec default* used when neither caller nor schema overrides. So a
+schema author can declare "every `image` should contribute its `alt`
+text whenever `textBetween` walks it" without forcing every caller to
+pass a callback. `Node.textContent` consults this:
+
+```ts
+get textContent() {
+  return (this.isLeaf && this.type.spec.leafText)
+    ? this.type.spec.leafText(this)
+    : this.textBetween(0, this.content.size, "")
+}
+```
+
+### 14.7 Walkthrough — `replaceOuter`, `replaceTwoWay`, `replaceThreeWay`
+
+`Node.replace` is implemented by `replace($from, $to, slice)` in
+`prosemirror-model/src/replace.ts:122-128`, which delegates to
+`replaceOuter`. The recursion thread is:
+
+```
+replaceOuter($from, $to, slice, depth = 0)
+  │
+  │ Case A: depth < min($from.depth, $to.depth) AND
+  │          $from.index(depth) == $to.index(depth) AND
+  │          slice.openStart > depth (we're still descending)
+  │
+  ├─►  Recurse into the shared child:
+  │      inner = replaceOuter($from, $to, slice, depth + 1)
+  │      return  newNode at depth = node.copy(replaceChild(idx, inner))
+  │
+  │ Case B: slice has empty content (pure deletion)
+  │
+  ├─►  return close(node, replaceTwoWay($from, $to, depth))
+  │
+  │ Case C: slice has content
+  │
+  └─►  let $start, $end = resolved positions of slice's open boundaries
+       return close(node, replaceThreeWay($from, $start, $end, $to, depth))
+```
+
+`replaceTwoWay` (lines 207-230) joins the *left* of `$from`'s context
+with the *right* of `$to`'s context, no slice middle. Used for plain
+deletions:
+
+```
+   left context (before $from at this depth)
+   ──────[ join here ]──────
+   right context (after $to at this depth)
+```
+
+`replaceThreeWay` (lines 187-204) is the same, but with the slice
+content threaded between:
+
+```
+   left context (before $from at this depth)
+   ──────[ join here ]──────
+   slice content at this depth
+   ──────[ join here ]──────
+   right context (after $to at this depth)
+```
+
+Both call `addNode` to append children with text-merging awareness, and
+`close(type, content)` to wrap a fragment in a new node with the given
+type, raising `ReplaceError` if `validContent` fails. `joinable`
+(line 151) checks `compatibleContent` between the two node types being
+joined; mismatched joins (e.g. inserting a `blockquote` open-end into a
+position that wants a `paragraph` open-start) throw.
+
+The reason this is recursive (and why open depths matter) is that a
+single `replace` may need to splice at multiple depths: the slice's
+content may wrap up to its `openStart` levels of "open" nodes that need
+to merge with the document's left context, then mirror on the right with
+`openEnd` levels into `$to`'s right context. Each level of open depth =
+one recursive frame.
+
+### 14.8 `nodesBetween` callback semantics
+
+`Node.nodesBetween(from, to, f, startPos = 0)` (`node.ts:73`) walks
+descendants overlapping `[from, to)`, calling
+`f(node, pos, parent, index)` for each. The callback's return value
+controls descent:
+
+- Return `false` → **do not descend into this node's children**.
+- Return `undefined` (or any truthy value) → descend normally.
+
+This is why `descendants(f)` (which is just `nodesBetween(0,
+content.size, f)`) is useful: `f` can return `false` for nodes whose
+inner walk would be wasted (e.g. you found what you were looking for, or
+this node's children can't possibly contain a match). Without
+`false`-to-skip, `descendants` would degenerate to `forEach` on a flat
+list with no recursion control.
+
+```ts
+let firstHeading: Node | null = null
+doc.descendants((node, pos) => {
+  if (firstHeading) return false       // stop walking entirely
+  if (node.type.name === "heading") { firstHeading = node; return false }
+})
+```
+
+### 14.9 `TextNode.withText` and the no-empty-text invariant
+
+`TextNode.withText(text)` (`node.ts:368`) returns a new `TextNode` with
+the same type/attrs/marks but a different string. It is the only sane
+way to "edit" a text node's text — `TextNode` is immutable, and
+`withText("")` would violate the "no empty text nodes" invariant.
+
+The constructor (`node.ts:355-360`) throws `RangeError("Empty text nodes
+are not allowed")` on `""`. This is why every text-cutting operation
+handles the empty case *before* calling `withText`/`cut` — see
+`Fragment.cut` (§3.3) which re-enters with `Math.max(0, …)`/`Math.min(…)`
+and skips children whose computed range is empty.
+
+`TextNode.eq` (overridden at `node.ts:386`) compares text identity:
+
+```ts
+eq(other: Node) {
+  return this.sameMarkup(other) && this.text == other.text
+}
+```
+
+Two text nodes with identical type, attrs, marks, and text content are
+equal but **not necessarily identical** (`==`). The merging in
+`Fragment.fromArray` ensures only one text-node identity per
+"contiguous run with given marks" exists in any fragment.
+
+### 14.10 `Node.cut` inside a non-leaf — example
+
+§ Cheat-sheet lists `node.cut(from, to)`; the behavior on non-leaf
+positions can surprise:
+
+```ts
+let p = schema.node("paragraph", null, [
+  schema.text("Hello "),
+  schema.text("world", [schema.mark("strong")])
+])
+// p.content.size === 11 (6 + 5)
+
+let cut = p.cut(2, 9)
+// inside p, position 2 is between 'e' and 'l' in "Hello "
+// position 9 is between 'r' and 'l' in "world"
+// cut.content === Fragment[ TextNode "llo ", TextNode "wor" with strong ]
+// cut.type === paragraph (same type — copy is non-destructive)
+// cut.marks === [] (same marks as original)
+```
+
+Notes:
+
+- `cut` preserves the *outer* node's identity (type + attrs + marks).
+- Inner content is re-cut via `Fragment.cut` (§3.3), which descends into
+  child text nodes by *character* offset and into non-text children by
+  *content position* (the `- 1` correction).
+- The returned node may be `==` to the original if the range covers
+  everything (`from == 0 && to == content.size`).
+
+### 14.11 Why aren't marks parented?
+
+ProseMirror models marks as a *flat sorted set* on each inline node, not
+as nested wrapper nodes (the Slate.js / DraftJS approach). The design
+rationale, from the source comments and behavior:
+
+1. **Order ambiguity disappears.** Two marks `em` and `strong` on the
+   same text are commutative — there's no semantic difference between
+   "em-inside-strong" and "strong-inside-em". A flat set makes that
+   commutativity structural; a nested model has to renormalize.
+2. **DOM rendering is decoupled from data.** The DOM's `<em><strong>…`
+   nesting order is decided by `MarkType.rank` at serialization time
+   (`to_dom.ts`). The data has no opinion; the serializer renders a
+   canonical nesting from the ordered set.
+3. **Fragment merging works.** Two adjacent text nodes with identical
+   mark *sets* can be merged into one (`Fragment.fromArray`). Under a
+   nested model, "a-then-b vs b-then-a" would be different trees and
+   would not merge.
+4. **Mapping is simpler.** A mark add/remove is a `(from, to, mark)`
+   range, never a tree structural change. `AddMarkStep` /
+   `RemoveMarkStep` (`prosemirror-transform/src/mark_step.ts`) don't
+   touch tree shape; they walk the affected text nodes and call
+   `mark.addToSet` / `removeFromSet`.
+5. **`MarkSpec.spanning` covers the rendering case.** Where the *DOM*
+   needs a single wrapper across multiple inline nodes (e.g. `<a>` over
+   `<em>foo</em>bar`), the serializer handles it via `spanning: true`
+   without complicating the data model.
+
+The trade-off: marks can't carry their own children (no "nested mark
+content"). For richer hierarchical inline annotations (footnotes with
+inner content), the answer in ProseMirror is to introduce a
+*node*, not a mark.
+
+### 14.12 `compareDeep` — the canonical attrs equality
+
+`prosemirror-model/src/comparedeep.ts:1-15` is small but central:
+
+```ts
+export function compareDeep(a: any, b: any): boolean {
+  if (a === b) return true
+  if (!(a && typeof a == "object") || !(b && typeof b == "object")) return false
+  let array = Array.isArray(a)
+  if (Array.isArray(b) != array) return false
+  if (array) {
+    if (a.length != b.length) return false
+    for (let i = 0; i < a.length; i++) if (!compareDeep(a[i], b[i])) return false
+  } else {
+    for (let p in a) if (!(p in b) || !compareDeep(a[p], b[p])) return false
+    for (let p in b) if (!(p in a)) return false
+  }
+  return true
+}
+```
+
+It's a recursive `===`-then-deep walk over plain objects and arrays.
+It's the function used (transitively) by:
+
+- `Node.hasMarkup` / `sameMarkup` — to compare attrs.
+- `Mark.eq` — to compare attrs.
+- `Step.eq` (in `prosemirror-transform`) — to compare step parameters.
+- Any plugin that needs "did this attrs change?" — call `compareDeep`
+  rather than `===`. Two `attrs` objects with the same fields but
+  different identities will be considered equal.
+
+This is the *only* attrs-equality function plugin authors should use;
+shallow `===` on attrs will produce false negatives whenever
+`computeAttrs` allocated a fresh object (which happens on every
+`createChecked`).
+

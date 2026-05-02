@@ -716,8 +716,7 @@ trick of wrapping its entire copy in a normal-weighted `<b>`.
 
 | Quirk | Where | Code |
 |---|---|---|
-| IE/Edge clipboard API is a lie | `brokenClipboardAPI` | input.ts:592–593 |
-| iOS Safari < 604 same | `brokenClipboardAPI` | input.ts:592–593 |
+| Broken `event.clipboardData` (IE/Edge < 15, iOS Safari WebKit < 604) — falls back to `captureCopy`/`capturePaste` synthetic-DOM path | `brokenClipboardAPI` | input.ts:592–593 |
 | Pre-Chrome 120 `clearData()` wipes files | dragstart | input.ts:700–701 |
 | WebKit injects leading `<meta>` in HTML | `readHTML` regex strip | clipboard.ts:225–226 |
 | WebKit replaces spaces with `\u00a0`-spans | `restoreReplacedSpaces` | clipboard.ts:241–248 |
@@ -953,3 +952,541 @@ are JSON-compatible.
 - `prosemirror-transform/src/mark.ts:75` and `structure.ts:133, 290` —
   `clearIncompatible` (foreign mark cleanup invoked from
   `replaceRange`/`replaceRangeWith`).
+
+---
+
+## 11. Cut vs. Copy ordering invariant (collab)
+
+The `copy` and `cut` handlers share a single closure (input.ts:594):
+
+```ts
+handlers.copy = editHandlers.cut = (view, _event) => {
+  let event = _event as ClipboardEvent
+  let sel = view.state.selection, cut = event.type == "cut"
+  if (sel.empty) return
+  let data = brokenClipboardAPI ? null : event.clipboardData
+  let slice = sel.content(), {dom, text} = serializeForClipboard(view, slice)
+  if (data) {
+    event.preventDefault()
+    data.clearData()
+    data.setData("text/html", dom.innerHTML)
+    data.setData("text/plain", text)
+  } else {
+    captureCopy(view, dom)
+  }
+  if (cut) view.dispatch(
+    view.state.tr.deleteSelection().scrollIntoView().setMeta("uiEvent", "cut"))
+}
+```
+
+The ordering is **invariant for collaborative editing**:
+
+1. `sel.content()` reads from `view.state` (the current canonical state).
+2. `serializeForClipboard(view, slice)` runs `transformCopied` and DOM-serialises
+   the slice.
+3. The DOM/text are written to `event.clipboardData` *synchronously*.
+4. **Only then** is `tr.deleteSelection()` dispatched.
+
+If you swapped (4) before (1)–(3), a cut during a collab session would race:
+the dispatched delete could be rebased by an incoming step, the local
+`view.state` would advance, and the slice serialised in step (2) would no longer
+match what the user actually saw selected. The slice has to be captured from
+the *exact* state the user observed at clipboard event time.
+
+This is also why no async work is permitted between sel.content() and
+data.setData(): the browser closes the writable window when the handler
+returns. Any `await` aborts the clipboard write silently.
+
+`captureCopy` (input.ts:572) is the IE/iOS<604 fallback that copies a hidden
+sibling DOM into the system selection; it does **not** call `dispatch`, so the
+cut step is still ordered the same way (delete fires after the 50 ms detach
+timeout).
+
+---
+
+## 12. The four real hooks (and the one that isn't)
+
+ProseMirror exposes four prop-callbacks that intercept the clipboard
+pipeline. `transformCopied` is the only **outgoing** transform and a frequent
+source of confusion because some references describe it as paired with a
+mythical "transformPasted" (which exists, just elsewhere) or imply it isn't a
+real prop. It **is** a real prop — defined in `index.ts` and called at
+`clipboard.ts:6`.
+
+| Prop                    | Direction | Stage                            | Receives                                        | Returns           | Source         |
+|-------------------------|-----------|----------------------------------|--------------------------------------------------|-------------------|----------------|
+| `transformCopied`       | outgoing  | inside `serializeForClipboard`   | `(slice, view)`                                  | `Slice`           | clipboard.ts:6 |
+| `clipboardSerializer`   | outgoing  | overrides default DOM serializer | (a `DOMSerializer` instance — not a callback)    | `DOMSerializer`   | clipboard.ts:17 |
+| `clipboardTextSerializer`| outgoing | textual fallback for `text/plain`| `(slice, view)`                                  | `string`          | clipboard.ts:36 |
+| `transformPastedHTML`   | incoming  | before `readHTML`                | `(html, view)`                                   | `string`          | clipboard.ts:68 |
+| `transformPastedText`   | incoming  | before text-branch parsing       | `(text, plainPaste, view)`                       | `string`          | clipboard.ts:49 |
+| `clipboardTextParser`   | incoming  | text-branch parser override      | `(text, $context, plainPaste, view)`             | `Slice` or null   | clipboard.ts:55 |
+| `clipboardParser`       | incoming  | HTML-branch parser override      | (a `DOMParser` instance)                         | `DOMParser`       | clipboard.ts:83 |
+| `transformPasted`       | incoming  | after parse, before insert       | `(slice, view, asText)`                          | `Slice`           | clipboard.ts:52 / clipboard.ts:108 / input.ts:737 |
+
+**There is no `transformCopiedHTML`.** Outgoing transformation always operates
+on a `Slice` (not the serialised HTML), because the receiving editor's parser
+will rebuild a slice from the serialised HTML anyway. If you need to scrub
+serialised HTML, override `clipboardSerializer` with a wrapping serializer
+instead.
+
+`transformPasted` is **also called on drop** (input.ts:737) when the drop
+originated from a ProseMirror selection (i.e., we already have a `Slice`,
+without going through the HTML round-trip). The `asText` parameter is `false`
+for drops and for HTML pastes; `true` only for text-branch pastes.
+
+### `clipboardSerializer` / `clipboardParser`
+
+Used to swap the entire DOM<->Slice machinery for clipboard purposes only,
+without affecting `view.props.domParser` (which the editor still uses for
+content updates from the input pipeline):
+
+```ts
+new EditorView(node, {
+  state,
+  clipboardSerializer: customSerializerWithExtraSpanWrappers,
+  clipboardParser: customParserThatStripsTrackedChangesMarks,
+})
+```
+
+If `clipboardParser` is not set, the paste path falls back to
+`view.someProp("domParser")` and finally to `DOMParser.fromSchema(schema)`
+(clipboard.ts:83). This is why an editor with a custom `domParser` but no
+`clipboardParser` will use the same parser for typed content and pasted
+HTML — usually what you want.
+
+### `clipboardTextSerializer` / `clipboardTextParser`
+
+Both control **plain-text** behaviour. The default plain-text serialisation is
+`slice.content.textBetween(0, size, "\n\n")` — block separators become double
+newlines, inline gaps become nothing. To preserve, e.g., Markdown emphasis,
+return a Markdown serialisation here.
+
+The default plain-text parser splits on `/(?:\r\n?|\n)+/` and wraps each block
+in a paragraph carrying the **insertion-context marks** (`$context.marks()`,
+clipboard.ts:59). Override `clipboardTextParser` to recognise structures —
+e.g., turn `> foo` lines into blockquotes, or detect Markdown lists.
+
+### Falling back when a Mark has no `toDOM`
+
+`DOMSerializer.fromSchema` reads each mark's `toDOM` from its spec. A mark
+with no `toDOM` is not registered into the serializer's mark-spec map, which
+means at serialise time the mark is **silently dropped from the DOM
+output** — the wrapped text is still emitted, but with no element. If the
+receiving editor's parser doesn't reapply the mark by some other rule, the
+mark is lost on round-trip. Workaround: provide a `toDOM` that emits a
+`<span data-mark-name="foo">` even if you don't intend it to render visibly,
+so that the matching `parseDOM` rule can re-recognise it.
+
+---
+
+## 13. NodeSelection vs TextSelection vs AllSelection — wrapper rules
+
+The wrapper-tag selection logic in §2.3 (`captureCopy` / `wrapMap`) handles
+the *context wrapper* needed so `innerHTML` round-trips correctly (e.g.,
+`<tr>` requires being inside `<table><tbody>` to parse). What's *inside* that
+wrapper depends on the selection type:
+
+| Selection                                       | `sel.content()` returns                                                | `data-pm-slice` `openStart`/`openEnd` |
+|-------------------------------------------------|------------------------------------------------------------------------|----------------------------------------|
+| `TextSelection` inside one block                | Slice with one open textblock containing the marked text run          | `1 1`                                  |
+| `TextSelection` spanning blocks                 | Slice with several blocks, edges open                                  | `≥1 ≥1` (depth varies)                 |
+| `NodeSelection` on an atom (e.g., image)        | Slice with the atom node as the only child, fully closed              | `0 0`                                  |
+| `NodeSelection` on a non-atom (e.g., paragraph) | Slice with the node as the only child, fully closed                   | `0 0`                                  |
+| `AllSelection`                                  | Whole-document slice, **fully closed at `doc` boundaries**             | `0 0`                                  |
+
+For an atom NodeSelection the serialised DOM is just `<elt>` (no surrounding
+`<p>` wrapper) — the slice has no open-edge textblock to render. Pasting into
+a different editor whose schema lacks that node type will **drop the slice
+entirely** (the atom can't be wrapped, can't be replaced with a placeholder
+text, and the parser produces an empty fragment). Schema-mismatch handling
+is a "lossy by design" path; see §16.
+
+For an `AllSelection` the slice round-trips as a full document fragment.
+Pasting it into a code block forces text-branch (`inCode = true`), and the
+result is the textBetween joining (default `"\n\n"`).
+
+The §2.3 wrapper choice (`<div>` vs `<p>`) is therefore independent of the
+selection type — it depends on whether the slice's first child is a block or
+inline node. NodeSelections of block nodes always wrap in `<div>`; atom
+inline NodeSelections (e.g., an inline image) wrap in `<p>`.
+
+---
+
+## 14. `transformPasted` worked example, paste-during-composition, schema mismatch
+
+### 14.1 `transformPasted(slice, view, asText): Slice`
+
+Last incoming hook; runs **after** parse, sentinel-detection, normalisation,
+and slice-closure adjustment. The slice handed in is fully coherent with the
+*source* schema's content expressions (since `parseSlice` validated against
+the receiving schema during parse), so transforms here are safe to assume
+shape.
+
+Typical uses:
+
+```ts
+new EditorView(node, {
+  state,
+  // Strip image marks from pasted slices (e.g., copyrighted source).
+  transformPasted(slice, _view, _asText) {
+    return new Slice(stripImages(slice.content), slice.openStart, slice.openEnd)
+  },
+})
+```
+
+The `asText` flag distinguishes plaintext-branch pastes — useful when you
+want to *augment* HTML pastes (e.g., add an "imported" mark) but leave plain
+text alone:
+
+```ts
+transformPasted(slice, _view, asText) {
+  if (asText) return slice
+  return slice.attr("imported", true) // pseudo — actually rewrite marks
+}
+```
+
+### 14.2 `transformPastedHTML` worked example — Google Docs scrub
+
+```ts
+transformPastedHTML(html: string): string {
+  // Google Docs wraps content in <b id="docs-internal-guid-…"> with default
+  // bold styling. PM's parser will read the <b> as a strong mark.
+  return html
+    .replace(/<b[^>]*id="docs-internal-guid-[^"]*"[^>]*>/g, "<span>")
+    .replace(/<\/b>(?=\s*$)/g, "</span>")
+    // Drop Google's inline `font-weight:normal` overrides.
+    .replace(/font-weight:\s*normal[^;"]*[;"]/g, "")
+}
+```
+
+Common targets and what to strip:
+
+| Source            | Sentinel signal                                            | Typical strip                                          |
+|-------------------|------------------------------------------------------------|--------------------------------------------------------|
+| Google Docs       | `<b id="docs-internal-guid-...">` outer wrapper            | Replace with `<span>`; drop `font-weight:normal`      |
+| Microsoft Word    | `<!--StartFragment-->` / `<!--EndFragment-->` comments      | Strip `class="MsoNormal"`, drop empty `<o:p>`         |
+| Excel / Numbers   | `<table>` with embedded `<colgroup><col span=N>` widths    | Strip `style="..."` width/height; preserve structure  |
+| Notion            | `<div data-block-id="…">` per block                        | Unwrap; rely on inner `<p>`/`<h1>` semantics          |
+| Linear            | `<p data-node-id="…">` plus inline `<span data-id="…">`    | Strip `data-*`; trust the plain HTML                  |
+| Slack             | `<span class="c-mrkdwn__…">` per styled run                | Strip class; emoji become `<img alt=":+1:">` text-fallback |
+
+A defensive default: collapse anything that is *just* a `<span>` with only
+inline-style attributes (no class/id) into its children.
+
+### 14.3 Paste during composition (input.ts:660)
+
+```ts
+editHandlers.paste = (view, _event) => {
+  ...
+  if (view.composing && !browser.android) return
+  ...
+}
+```
+
+Browsers handle JavaScript-driven paste during an active IME composition
+*very* poorly: Chrome and Safari frequently drop the composition silently,
+move the caret to a stale offset, and fire a beforeinput-without-input
+sequence that leaves the DOM and PM state out of sync. The cheapest fix is to
+**bail out of PM's paste handler** and let the browser perform a native
+insertion; the resulting DOM mutation will be observed by the DOM observer
+and reconciled through the normal mutation-diff path.
+
+Android is the exception because the editor is *almost always* composing on
+Android (the IME treats every keystroke as a composition update). If PM
+bailed on Android the paste handler would essentially never run.
+
+The composition flag is `view.composing`, set by `compositionstart` and
+cleared by `compositionend` in `input.ts`. See file 14 §3.
+
+### 14.4 Schema mismatch on paste
+
+When the source and destination editors disagree about node and mark
+definitions, the layered fall-back is:
+
+1. `parseSlice(dom, {context: $context})` calls `parseRule.context` and
+   schema content-match for every node it encounters. Unknown node types
+   are dropped from the fragment; unknown marks are dropped from text runs.
+2. If a node *is* known but lacks a parent that satisfies its content
+   expression at the insertion point, `normalizeSiblings` (clipboard.ts:122)
+   walks ancestor depths in `$context` to find a parent that *does* permit
+   the run, wrapping as needed.
+3. If even normalize can't fit, `Slice.maxOpen` (clipboard.ts:97) opens the
+   slice as much as possible and lets `replaceRange` either coerce or fail.
+4. After insertion, `tr.replaceSelection` calls `clearIncompatible` (see
+   §3.4) which strips marks not in the destination's `markSet` for each
+   parent.
+
+Lossy by design: a paste from a "trackChanges"-aware editor into a vanilla
+PM produces a slice with the trackChanges marks silently removed at step
+(1). The user sees text appear with no annotations, which is usually what
+they expect.
+
+---
+
+## 15. `data-pm-slice` parse — literal regex
+
+`clipboard.ts:74`:
+
+```ts
+let sliceData = contextNode &&
+  /^(\d+) (\d+)(?: -(\d+))? (.*)/.exec(contextNode.getAttribute("data-pm-slice") || "")
+```
+
+Format (set at `clipboard.ts:33-34`):
+
+```
+data-pm-slice="<openStart> <openEnd>[ -<wrappers>] <contextJSON>"
+```
+
+| Field          | Meaning                                                                                  |
+|----------------|------------------------------------------------------------------------------------------|
+| `openStart`    | `slice.openStart` after context-stripping (clipboard.ts:9-15 loop)                      |
+| `openEnd`      | `slice.openEnd` after context-stripping                                                 |
+| `-wrappers`    | Number of `wrapMap` wrappers that were prepended (table/tr/td case). Optional.          |
+| `contextJSON`  | `JSON.stringify([typeName, attrs, typeName, attrs, ...])` — depths peeled off, outermost first |
+
+Example for a `<td>` cell selection inside a 1-row, 1-column table:
+
+```
+data-pm-slice="0 0 -3 [\"table\",null,\"table_row\",null,\"table_cell\",null]"
+```
+
+Worked openStart/openEnd math (clipboard.ts:9-15):
+
+Given a slice with `content = doc(table(tr(td(p("hi")))))`, `openStart = 4`,
+`openEnd = 4`, the loop peels:
+
+| Iteration | `openStart` | `openEnd` | child            | `content` becomes      | `context` push                  |
+|-----------|-------------|-----------|------------------|------------------------|---------------------------------|
+| start     | 4           | 4         | -                | doc(table(...))        | `[]`                            |
+| 1         | 3           | 3         | `table`          | `tr(...)`              | `["table", null]`               |
+| 2         | 2           | 2         | `tr` (table_row) | `td(...)`              | `..., "table_row", null`        |
+| 3         | 1           | 1         | `td` (table_cell)| `p("hi")`              | `..., "table_cell", null`       |
+
+Loop stops because `openStart` would drop to 0. Wrap rendering then promotes
+`<p>` through `wrapMap["p"]` (none — it stops). But because the *first*
+serialised child is a `<p>` and not a `<td>`, the `data-pm-slice` `-N` field
+stays at 0 (no wrappers prepended). The `-N` field is only set when the
+first child *after* serialisation is in `wrapMap` — i.e., when the slice's
+top child was already a `<tr>`/`<td>`/etc. and `serializeFragment` produced a
+bare `<td>` that had to be re-wrapped in `<table><tbody>` to round-trip.
+
+On parse, clipboard.ts:75-80 reverses the wrap by descending `firstChild`
+exactly `wrappers` times; clipboard.ts:94-95 then re-applies the context
+ancestors via `addContext`, restoring the fully-rooted slice.
+
+---
+
+## 16. Drop coordinate → posAtCoords → insertion (cross-link to 17)
+
+Drop reuses §3.3's parse pipeline but inserts at a coordinate-derived
+position, not the current selection. Sequence (input.ts:719-778):
+
+```
+              dragover                    drop
+client (x,y) ─────────► event.preventDefault()  (so browser will deliver drop)
+                         │
+                         ▼
+                 view.posAtCoords({left:x, top:y})       ←── see file 17 §3
+                         │   returns {pos, inside}
+                         ▼
+                 $mouse = doc.resolve(pos)
+                         │
+                         ▼
+        ┌────── dragging from inside this view ─────┐
+        │ slice = view.dragging.slice               │
+        │ transformPasted(slice, view, false)       │
+        └───────────────────────────────────────────┘
+        ┌────── external dragsource ────────────────┐
+        │ slice = parseFromClipboard(...$mouse)     │
+        └───────────────────────────────────────────┘
+                         │
+                         ▼
+                 view.someProp("handleDrop", ...)        ←── plugin override
+                         │ if not handled
+                         ▼
+                 dropPoint(doc, $mouse.pos, slice)        (prosemirror-transform)
+                         │ returns insertPos (≠ null) or null
+                         ▼
+                 if (move && dragging.node) node.replace(tr)
+                 else if (move) tr.deleteSelection()
+                         │
+                         ▼
+                 pos = tr.mapping.map(insertPos)         ←── after delete remap
+                         │
+                         ▼
+                 isNode = (slice.openStart==0 && openEnd==0 && childCount==1)
+                         │
+                ┌────── isNode? ─────┐
+                │ tr.replaceRangeWith(pos, pos, slice.content.firstChild)
+                │ else
+                │ tr.replaceRange(pos, pos, slice)
+                └────────────────────┘
+                         │
+                         ▼
+                 setSelection(...) → view.focus() → view.dispatch(tr)
+```
+
+Two important interactions with file 17:
+
+- `posAtCoords` can return `null` (pointer outside the editor's bounding box,
+  or `caretFromPoint` returned a node not under `view.dom`). In that case
+  `handleDrop` is short-circuited and the drop is silently ignored
+  (input.ts:733).
+- The `insertPos` returned by `dropPoint` is **before** any deletion of the
+  source. If `move` is true and the source range was *before* the insertion
+  point, the mapping shifts `insertPos` left by the deleted size. This is
+  why the `tr.mapping.map(insertPos)` step (input.ts:751) is essential —
+  skipping it produces off-by-N drops that PM forks frequently regress on.
+
+---
+
+## 17. Image / file paste-and-upload reference pattern
+
+The single most common real-world clipboard concern. PM core does not handle
+image uploads directly; the recipe is a placeholder decoration that is
+replaced when the upload resolves.
+
+```ts
+import { Plugin, PluginKey } from "prosemirror-state"
+import { Decoration, DecorationSet } from "prosemirror-view"
+
+const pasteUploadKey = new PluginKey<DecorationSet>("paste-upload")
+
+const placeholderPlugin = new Plugin<DecorationSet>({
+  key: pasteUploadKey,
+  state: {
+    init: () => DecorationSet.empty,
+    apply(tr, set) {
+      set = set.map(tr.mapping, tr.doc)
+      const action = tr.getMeta(pasteUploadKey)
+      if (action?.add) {
+        const widget = document.createElement("placeholder")
+        widget.className = "uploading"
+        const deco = Decoration.widget(action.add.pos, widget, { id: action.add.id })
+        set = set.add(tr.doc, [deco])
+      } else if (action?.remove) {
+        set = set.remove(set.find(undefined, undefined, spec => spec.id == action.remove.id))
+      }
+      return set
+    },
+  },
+  props: { decorations(state) { return this.getState(state) } },
+})
+
+function findPlaceholder(state: EditorState, id: object) {
+  const decos = pasteUploadKey.getState(state)
+  const found = decos?.find(undefined, undefined, spec => spec.id == id)
+  return found?.length ? found[0].from : null
+}
+
+function startImageUpload(view: EditorView, file: File) {
+  const id = {}                                     // unique sentinel
+  const tr = view.state.tr
+  if (!tr.selection.empty) tr.deleteSelection()
+  tr.setMeta(pasteUploadKey, { add: { id, pos: tr.selection.from } })
+  view.dispatch(tr)
+
+  uploadFile(file).then(
+    (url) => {
+      const pos = findPlaceholder(view.state, id)
+      if (pos == null) return                        // user rolled back
+      view.dispatch(
+        view.state.tr
+          .replaceWith(pos, pos, view.state.schema.nodes.image.create({ src: url }))
+          .setMeta(pasteUploadKey, { remove: { id } }),
+      )
+    },
+    () => {
+      view.dispatch(view.state.tr.setMeta(pasteUploadKey, { remove: { id } }))
+    },
+  )
+}
+
+// Wire into clipboard / drop:
+new EditorView(node, {
+  state,
+  plugins: [placeholderPlugin],
+  handlePaste(view, event) {
+    const items = Array.from(event.clipboardData?.items || [])
+    const images = items.filter(it => /^image\//.test(it.type))
+    if (!images.length) return false
+    images.forEach(it => {
+      const file = it.getAsFile()
+      if (file) startImageUpload(view, file)
+    })
+    return true                                      // we handled it
+  },
+  handleDrop(view, event, _slice, _moved) {
+    const files = Array.from((event as DragEvent).dataTransfer?.files || [])
+    const images = files.filter(f => /^image\//.test(f.type))
+    if (!images.length) return false
+    const coords = view.posAtCoords({ left: event.clientX, top: event.clientY })
+    if (!coords) return false
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, coords.pos)))
+    images.forEach(f => startImageUpload(view, f))
+    return true
+  },
+})
+```
+
+Key points:
+
+- **Use a fresh `{}` sentinel per upload.** `===` identity is the only
+  reliable id under collab rebasing; numbers can collide with placeholder
+  ids inserted by other users.
+- **Re-resolve the position via `findPlaceholder` after the await.** Other
+  edits may have shifted it. The placeholder decoration's `set.map()` keeps
+  it tracked through every intermediate transaction.
+- **Guard against the placeholder being gone.** A user undo or another
+  removal may have evicted the decoration; `findPlaceholder` returning null
+  must be treated as "discard this upload".
+- **Always emit the `remove` meta on failure** so the placeholder doesn't
+  linger forever.
+- The same plugin handles both paste and drop because both produce `File`
+  objects on `clipboardData.items` / `dataTransfer.files`. PM's
+  `parseFromClipboard` does **not** inspect files at all (clipboard.ts:46
+  bails early on no html/text), so without `handlePaste`/`handleDrop`
+  intercepts an image-only paste is a no-op.
+
+---
+
+## 18. Sniffing the paste source
+
+There is no single reliable signal, but a layered heuristic works:
+
+1. **`data-pm-slice` present** → an internal-PM source. Treat the slice as
+   authoritative; skip transformPastedHTML scrubs that would damage it.
+2. **MIME priority order** in `clipboardData.types`:
+   - `["text/html", "text/plain"]` only → almost certainly a browser source.
+   - `["text/html", "text/plain", "image/png"]` → screenshot tool (Snip,
+     macOS Preview, GNOME Screenshot) — favour the image, ignore the HTML.
+   - `["Files", "text/html", "text/plain"]` → drag from Finder/Explorer.
+   - `["text/html", "text/plain", "text/rtf"]` → Microsoft Office source
+     (Word, Excel). RTF presence is the strongest Office signal.
+3. **HTML head sniff** (run `transformPastedHTML` early, return same string
+   after sniffing):
+   - `/<!--StartFragment-->/` → MS Office.
+   - `/<b[^>]*id="docs-internal-guid-/` → Google Docs.
+   - `/^<meta charset=['"]utf-8['"]>/i` → Chrome WebKit native copy.
+   - `/<google-sheets-html-origin>/` → Google Sheets.
+   - `/class="MsoNormal"/` → MS Word (older).
+
+There is no portable "originating app" attribute — the browser deliberately
+does not propagate it for privacy.
+
+---
+
+## 19. Cross-links (added)
+
+- §3.3 → file 11 §2 (DOM parser rule application during `parseSlice`).
+- §3.3 → file 11 §6 (`context` parameter and how it's matched against
+  `parseRule.context`).
+- §16 (drop sequence) → file 17 §3 (`posAtCoords` flow), file 17 §3.10
+  (`posFromCaret` correctness), file 06 §3 (mapping after deletion).
+- §17 (image upload) → file 10 §4 (widget decorations and mapping
+  semantics), file 06 §4 (mapping `pos` through transactions).
+- §11 (cut ordering) → file 20 §3 (collab rebase and step ordering).
+- §12 hooks table → file 22 §12 (clipboard pitfalls), file 11 §3
+  (`transformPastedHTML` interaction with `parseSlice` whitespace handling).

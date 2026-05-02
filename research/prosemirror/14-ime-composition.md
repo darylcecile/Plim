@@ -42,7 +42,9 @@ Defined on `InputState` in `input.ts:19-44`:
 | field | purpose |
 |---|---|
 | `composing: boolean` (L32) | Public-ish flag exposed via `view.composing` (`index.ts:110`). True between `compositionstart` and `compositionend` (or its timeout). |
-| `compositionNode: Text \| null` (L33) | The text node currently *holding* the IME-in-progress text. Set lazily by `findCompositionNode` (see §6). |
+| `view.composing` getter (`index.ts:108-110`) | Just forwards `this.input.composing`. There is no separate "tail-window" — code that wants to see "composition just ended" reads `compositionEndedAt` directly via `inOrNearComposition` (see §11). |
+| `compositionNode: Text \| null` (L33) vs `compositionNodes: ViewDesc[]` (L35) | **Different things, despite the name overlap.** `compositionNode` is the *one* live `Text` node currently being mutated by the IME (a snapshot stored by `findCompositionNode` on each `updateState`). `compositionNodes` is an array of *past* `CompositionViewDesc` instances queued up so `clearComposition` can call `markParentsDirty` on each when composition ends — i.e. one is "current", the other is "history of everything we shielded so far this composition". |
+| `view.markCursor: readonly Mark[] \| null` (`index.ts:41`) | The marks the *next* inserted character should carry. Set by `compositionstart`'s mark-context branch before calling `endComposition(view, true)` (`input.ts:466-468`). When non-null, `updateCursorWrapper` (`index.ts:537-547`) renders an invisible `<img mark-placeholder>` widget wrapped in the marks so the IME types into the correctly-marked DOM context. Cleared on the next state change. |
 | `composingTimeout: number` (L34) | Setinterval handle that ends composition after 5 s of inactivity on Android (`timeoutComposition = 5000`, `input.ts:455`). |
 | `compositionNodes: ViewDesc[]` (L35) | Stack of `CompositionViewDesc` instances that need to be marked dirty when composition is cleared. |
 | `compositionEndedAt: number` (L36) | Timestamp of last `compositionend`. Used to ignore the spurious `keydown Enter` Safari fires immediately after a Japanese candidate confirm (`input.ts:447`). |
@@ -119,6 +121,29 @@ Notes:
 * `scheduleComposeEnd(view, 20)` (L511) sets a 20 ms safety net to call
   `endComposition` if a redraw didn't already happen.
 
+**Why `Promise.resolve().then(() => view.domObserver.flush())` and not
+`setTimeout(..., 0)`?** Microtask ordering. A `Promise.resolve().then`
+callback runs *before* the browser yields to the event loop's macrotask
+queue — i.e. *before* the next animation frame, before any I/O callback,
+and crucially *before* the browser repaints. Using `setTimeout` would
+schedule the flush as a macrotask, giving the browser an opportunity to
+paint the post-composition DOM (with whatever the IME left behind) before
+PM has a chance to reconcile. The result would be a single-frame visual
+flicker every time a composition ends. The microtask path guarantees the
+reconcile happens "between" the JS turn that fired `compositionend` and
+the browser's first paint after that turn.
+
+The 5s vs 20ms `scheduleComposeEnd` distinction:
+* **5000ms** (`timeoutComposition`, `input.ts:455`) — used inside
+  `compositionstart`/`compositionupdate` on Android only. Some Android
+  IMEs never fire `compositionend` if the user just walks away; the 5-s
+  watchdog force-ends the composition so PM doesn't stay frozen forever.
+* **20ms** (`input.ts:512`) — used immediately after `compositionend`.
+  Schedules a deferred `endComposition` to run if a redraw hasn't already
+  forced one. The 20ms picks up any residual mutations the browser may
+  emit *after* compositionend (Safari is the worst offender), then tears
+  down the composition shield.
+
 ### 3c. `endComposition` — the "force end" path (L554-566)
 
 ```ts
@@ -149,6 +174,30 @@ export function endComposition(view: EditorView, restarting = false) {
   on each so the next reconcile redraws them.
 * If the doc is now dirty (or we were explicitly *restarting* a composition
   with new marks), we dispatch / `updateState` to rebuild the DOM.
+
+#### Why the second argument `restarting`?
+
+The `restarting` parameter is *only* `true` from one caller: the
+mark-context branch of `compositionstart` (`input.ts:466-468`), where the
+user has begun composing and there are stored marks (set via
+`tr.setStoredMarks` or implicitly because the cursor is between two
+identically-marked text runs) that need to wrap the in-progress IME text.
+
+Without `restarting`, the three-way branch inside `endComposition` would
+choose the "selection unchanged, doc not dirty, no markCursor" path and
+return `false` — meaning **the stored marks would silently disappear**,
+because nothing would force the DOM to be re-rendered with the
+mark-placeholder wrapper around the cursor. With `restarting = true`, the
+function falls through to either `tr.deleteSelection` (if at a non-inline
+parent) or — the common case — `view.updateState(view.state)`, which
+re-runs `viewUpdate` and *renders* the mark-placeholder widget. The IME
+then resumes typing into the correctly-wrapped DOM, and on subsequent
+characters the typed text inherits those marks via `markCursor`.
+
+The single use site is essentially: "I'm about to start a composition,
+but I need PM's DOM redrawn to reflect the marks-context first; pretend
+I'm 'ending' a composition just to force that redraw, then immediately
+let the new compositionstart proceed." A subtle but load-bearing trick.
 
 ### 3d. `forceDOMFlush` (L272-274)
 
@@ -184,7 +233,11 @@ Properties of this special view desc:
 
 * **No children** (`super(parent, [], ...)`) — it's a leaf shielded box.
 * **It owns a real DOM node** the browser is mid-edit on (`textDOM`), so
-  reconciliation must not touch it.
+  reconciliation must not touch it. This is the critical inversion vs.
+  `TextViewDesc`: a normal `TextViewDesc.dom` is a Text node *PM created*
+  and feels free to replace; a `CompositionViewDesc.dom` is a Text node
+  *the browser created* (or PM created earlier and the browser is now
+  mutating) — the reconciler must keep its hands off.
 * `ignoreMutation` returns true for the no-op characterData notifications
   some browsers fire spuriously, but lets real edits through (since
   `oldValue !== nodeValue` then).
@@ -205,19 +258,55 @@ if (updater.changed || this.dirty == CONTENT_DIRTY) {
 }
 ```
 
-`protectLocalComposition` then:
+### 4a. `protectLocalComposition` step-by-step
 
-1. Walks up from the text node to the direct child of `contentDOM`,
-   peeling away any siblings (L841-845) — the browser sometimes puts the
-   composition inside an unwanted wrapper span; we hoist it.
-2. Constructs a `CompositionViewDesc` over that hoisted DOM subtree and
-   pushes it onto `view.input.compositionNodes` for later cleanup
-   (L847-848).
-3. Patches `this.children` so the composition desc occupies the slice
-   `[pos, pos + text.length]` (L851), via `replaceNodes`.
+The full algorithm (annotated):
 
-Result: `renderDescs` will preserve that DOM subtree exactly. The
-reconciler walks past it without diffing it.
+```ts
+// viewdesc.ts:835-852, slightly elided
+protectLocalComposition(view, {node, pos, text}) {
+  // (1) Bail if the textNode is already wrapped (e.g. on re-entry)
+  if (this.getDesc(node)) return
+
+  // (2) Hoist node up to be a direct child of this.contentDOM,
+  //     peeling siblings and detaching wrappers.
+  let topNode = node
+  for (;;) {
+    topNode.pmViewDesc = undefined
+    if (topNode.parentNode == this.contentDOM) break
+    let parent = topNode.parentNode!
+    while (parent.firstChild != topNode) parent.removeChild(parent.firstChild!)
+    while (parent.lastChild != topNode) parent.removeChild(parent.lastChild!)
+    if (parent.pmViewDesc) parent.pmViewDesc = undefined
+    topNode = parent
+  }
+
+  // (3) Build the CompositionViewDesc and remember it for later cleanup.
+  let desc = new CompositionViewDesc(this, topNode, node, text)
+  view.input.compositionNodes.push(desc)
+
+  // (4) Splice it into our children array at [pos, pos+text.length].
+  this.children = replaceNodes(this.children, pos, pos + text.length, view, desc)
+}
+```
+
+The substitution model is the key insight: **PM substitutes the live Text
+node into its own desc tree** rather than building a fresh DOM node. The
+new `CompositionViewDesc.dom` *is* `topNode`, the actual node the browser
+is editing. After the splice, `renderDescs` walks `this.children`, sees a
+desc whose `dom` is already correctly placed, and skips. The browser
+keeps editing into a Text node that PM has implicitly promised to leave
+alone for the duration of the composition.
+
+The peel-siblings loop in step (2) is necessary because the browser
+sometimes wraps the composition in a `<span class="...">` of its own
+making — typing "あ" with macOS Japanese IME, for instance, briefly
+inserts a `<span style="background-color: rgba(...)">` underline-decoration
+wrapper. Hoisting up to `contentDOM` means our `CompositionViewDesc.dom`
+captures that wrapper *as well as* the inner text, so `renderDescs`
+preserves the entire subtree, decorations and all.
+
+### 4b. `localCompositionInfo` scoring
 
 `localCompositionInfo` (L815-833) returns either:
 - `{node, pos: textPos, text}` when the composition text sits in *this*
@@ -226,10 +315,44 @@ reconciler walks past it without diffing it.
   (`compositionInChild`, used at L771, L788),
 - or `null` when the composition has nothing to do with this subtree.
 
-The `compositionInChild` branch (L788-792) targets a different
-optimization: it forces the `ViewTreeUpdater` to update the *specific
-existing* child desc that contains the composition rather than creating
-a new one, so the DOM identity is preserved.
+The decision tree:
+
+1. **Is the selection a `TextSelection`?** No → return `null` (other
+   selection types can't host a composition; let normal reconcile run,
+   which has the side-effect of ending the composition).
+2. **Is `view.input.compositionNode` still attached to `view.dom`?**
+   (Tracked via `composingInside(view, view.input.compositionNode)`.)
+   No → return `null` (the IME is editing a node we already discarded;
+   force fall-through).
+3. **Is the composition text node a descendant of `this.contentDOM`?**
+   Yes-and-inline → call `findTextInFragment(this.node.content, …)` to
+   compute the PM offset of the text within this node and return
+   `{node, pos: textPos, text: compositionNode.nodeValue}`.
+   Yes-but-in-a-child → return `{node, pos: -1, text: ""}` (the
+   `compositionInChild` sentinel).
+   Neither → return `null`.
+
+The `compositionInChild` branch (L788-792 of `updateChildren`) targets a
+different optimization: it forces the `ViewTreeUpdater` to update the
+*specific existing* child desc that contains the composition rather than
+creating a new one, so the DOM identity is preserved. The actual shield
+is constructed by *that* child desc when it later runs `updateChildren`.
+
+### 4c. Why `markParentsDirty` (not `markDirty`) on cleanup?
+
+When composition ends, `clearComposition` (`input.ts:520-526`) loops
+over `compositionNodes` and calls `markParentsDirty()` on each. Crucially,
+it does **not** call `markDirty(from, to)` with a precise range. Why?
+
+Because by the time we're cleaning up, the IME has been mutating the DOM
+for an unknown duration; we don't know exactly which positions were
+affected, and the browser may have inserted/removed text outside the
+original `[pos, pos+text.length]` range we initially shielded.
+`markParentsDirty` walks up from each desc setting `CHILD_DIRTY` /
+`CONTENT_DIRTY` flags, guaranteeing the next reconcile fully redraws all
+of the affected subtrees rather than trusting a possibly-stale range.
+Over-dirtying is safe and cheap; under-dirtying would leave divergent
+DOM/state that any subsequent operation would crash on.
 
 ---
 
@@ -287,6 +410,26 @@ From `domobserver.ts`:
 * `flushSoon()` (L83-86): debounces a flush 20 ms in the future. Used
   when IE11 and Safari produce mutations that aren't safe to read
   synchronously (L62, L69).
+
+  **Why 20 ms specifically?** The number is empirically chosen to balance
+  two competing pressures:
+
+  1. **Short enough to feel synchronous.** A burst of mutations from a
+     single user action (one keystroke, one paste) typically arrives
+     within 1-3 ms. 20 ms is below the 100-ms human-perception threshold
+     for "instant" feedback, so the editor doesn't feel laggy.
+  2. **Long enough to coalesce.** A single user action often produces
+     multiple `MutationRecord`s — typing a Korean syllable can fire 3-4
+     records (composition wrapper insertion, characterData, wrapper
+     removal, characterData again). Flushing immediately on the first
+     record would produce three separate `readDOMChange` calls, three
+     transactions, three round-trips through the plugin system. The 20 ms
+     debounce lets them coalesce into one logical edit.
+
+  Lower values (5 ms, 10 ms) were tried in the historical commits and
+  caused noticeable transaction storms on Safari with long compositions.
+  Higher values (50 ms+) felt sluggish.
+
 * `forceFlush()` (L88-94): cancels the debounce and runs `flush()` now.
   Called by `endComposition` (`input.ts:556`) and by every non-229
   `keydown` (`input.ts:116`).
@@ -625,6 +768,131 @@ USER hits Enter to confirm:
                                                               CompositionViewDesc; full reconcile
                                                               CompositionViewDescs popped, DOM == state
 ```
+
+### 12a. Worked trace — Japanese kanji conversion ("にほん" → "日本")
+
+```
+t=0ms  user presses 'n' on macOS Japanese IME
+       ┌─ keydown(229)              [input.ts:114, IME passthrough]
+       └─ compositionstart           [input.ts:457]
+            view.input.composing = true
+            view.input.compositionID++           // e.g. 7
+            updateCursorWrapper()                // no-op (no markCursor)
+       ┌─ compositionupdate "ん"     [input.ts:469]
+       └─ MutationRecord (characterData "" → "ん") arrives
+            domobserver.flushSoon(20ms)          // debounce
+       ┌─ flush() at t=22ms                       [domobserver.ts:174]
+       │   updateChildren() called from updateState
+       │   localCompositionInfo() → {node: textNode, pos: 5, text: "ん"}
+       │   protectLocalComposition(view, info)
+       │     - hoist textNode to direct child of contentDOM
+       │     - new CompositionViewDesc(parent, textNode, textNode, "ん")
+       │     - children = [..., compDesc, ...]
+       │   renderDescs() preserves textNode untouched
+t=400ms user types 'i' → "にほ"; same cycle, compositionupdate
+t=900ms user presses Space to convert → IME shows kanji candidates
+t=1400ms user picks "日本"
+       ┌─ compositionupdate "日本"   [input.ts:469]
+       └─ MutationRecord characterData "にほん" → "日本"
+            (CompositionViewDesc.text is stale "にほん"; ignoreMutation
+             returns false because oldValue !== nodeValue;
+             the mutation flows through; flushSoon scheduled)
+       ┌─ flush() at t=1422ms
+       │   the existing CompositionViewDesc still points to the same
+       │   textNode but with new content; updateChildren is called,
+       │   localCompositionInfo finds it and re-shields
+t=1500ms user presses Enter to commit
+       ┌─ compositionend             [input.ts:502]
+       │   composing = false; compositionEndedAt = t
+       │   view.input.compositionPendingChanges = 7   // the ID stamp
+       │   Promise.resolve().then(() => domObserver.flush())
+       │   scheduleComposeEnd(view, 20)
+       └─ microtask: flush()
+            readDOMChange detects characterData change
+            tr = state.tr.replaceWith(5, 8, schema.text("日本"))
+            tr.setMeta("composition", 7)         // domchange.ts:82-83
+            view.dispatch(tr)
+            clearComposition: markParentsDirty on every queued desc
+```
+
+The `compositionID` (7) on the dispatched tr lets plugins reasoning about
+composition (e.g. collab, history-grouping) know the run of mutations
+between `compositionstart` and now belongs to a single user gesture.
+
+### 12b. Worked trace — Android Enter as DOM mutation (no compositionend)
+
+Android Chrome with gboard often fires Enter *during* an active
+composition by inserting a `<br>` or splitting the paragraph at the
+DOM level rather than by firing a real `keydown(13)` event.
+
+```
+t=0   user composing "hello" in a paragraph; view.input.composing = true
+t=200 user taps the Enter key on gboard
+      keydown(13) fires but [input.ts:115] swallows it on Android+Chrome:
+        if (browser.android && browser.chrome && event.keyCode == 13) return
+      meanwhile the IME mutates the DOM:
+        <p>hello|</p>  →  <p>hello</p><p>|</p>
+      MutationRecords arrive: a removed-text + childList insertion
+      domObserver flushSoon(20)
+t=222 flush() → handleDOMChange → readDOMChange
+      registerMutation reports a childList change with `added: <p>` desc
+      domchange.ts:124-130:
+        // looks like an Enter? synthesise the keystroke through handleKeyDown
+        if (looksLikeEnter(...)) {
+          let key = new KeyboardEvent("keydown", {keyCode: 13, key: "Enter"})
+          if (view.someProp("handleKeyDown")?.(view, key)) {
+            view.domObserver.suppressSelectionUpdates()
+            return
+          }
+        }
+      → keymap binding for Enter (e.g. splitBlock) runs
+      → tr is dispatched as a real "Enter" rather than a raw childList op
+```
+
+Without the synthetic-keydown bridge, every Enter on Android would bypass
+the user's Enter binding and just commit whatever mess gboard inserted
+verbatim — losing list-splitting, code-block-newline, etc.
+
+### 12c. Worked trace — stored marks restart (`endComposition(view, true)`)
+
+```
+state: cursor inside a paragraph, storedMarks = [bold]
+       user starts typing on macOS Japanese IME
+t=0   compositionstart                        [input.ts:457]
+       composing = true
+       in input.ts:466-468:
+         if (state.storedMarks && !sameMarkSet(...)) {
+           view.markCursor = state.storedMarks    // [bold]
+           endComposition(view, true)             // ★ second arg
+         }
+
+      endComposition(view, restarting=true):
+        forceFlush() → no pending records
+        clearComposition(view)                    // pops compositionNodes
+        view.docView.dirty is false, but restarting=true → take the
+        "markCursor || restarting" branch:
+          parent.inlineContent → view.dispatch(tr.deleteSelection())
+          (else)                → view.updateState(view.state)
+        either path triggers a redraw
+      redraw runs updateCursorWrapper(view, [bold], null)  [index.ts:537]
+        → inserts <img class="ProseMirror-separator" mark-placeholder>
+          wrapped in <strong>…</strong>
+      now the IME composition target is the <img> wrapper's nearby
+      Text node, which lives inside <strong> — typed characters
+      automatically inherit bold without PM having to mark them.
+t+1ms compositionstart fires again (because endComposition called
+      view.dispatch(...) which triggered selectionToDOM, which the
+      browser interprets as a selection move that re-arms IME).
+      This time storedMarks now match the cursor's actual mark
+      context, so the if-branch is skipped, composition proceeds
+      normally with the protected wrapper in place.
+```
+
+Without the `restarting=true` path, `view.markCursor = [bold]` would
+be assigned but never rendered — the IME would type into a Text node
+*outside* any `<strong>` wrapper, the resulting characterData mutation
+would have no marks attached, and the eventual transaction would lose
+the user's bold intent.
 
 ---
 

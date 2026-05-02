@@ -55,6 +55,22 @@ space in the tag name becomes the XML namespace passed to
 `createElementNS` (lines 207-213). Attribute keys can also include a namespace
 prefix the same way (line 218-219).
 
+> **The namespace mechanism is *general*, not SVG-specific.** Any URI works:
+> MathML (`http://www.w3.org/1998/Math/MathML`), XHTML
+> (`http://www.w3.org/1999/xhtml`), or your own. The same `" "` split applies
+> to *both* tag names and attribute names — for attributes it triggers
+> `setAttributeNS(ns, localName, value)` instead of `setAttribute`. This is
+> how `xlink:href` on SVG `<use>` elements gets correctly namespaced:
+>
+> ```js
+> ["http://www.w3.org/2000/svg use",
+>  { "http://www.w3.org/1999/xlink href": "#sym" }]
+> ```
+>
+> Note the *attribute* namespace differs from the *tag* namespace. The parser
+> recovers them through `Element.namespaceURI` / `Attr.namespaceURI` on the
+> way back in.
+
 ---
 
 ## 2. `DOMSerializer.fromSchema(schema)`
@@ -197,6 +213,25 @@ the iteration order of marks on the *previous* sibling. For each child node:
    `contentDOM ?? dom` for subsequent appends.
 4. Append the node itself into the (possibly mark-nested) `top`.
 
+> **Three subtle semantics in this loop:**
+>
+> - **`keep`/`rendered`/`pop`-and-walk-back.** `keep` counts active wrappers
+>   we'll reuse; `rendered` counts marks consumed from `node.marks`. When
+>   `keep < active.length` after the prefix loop, we `active.pop()` until
+>   they match, *and* we walk `top` back via the captured
+>   `parentBeforeMark`. This is what limits wrapper depth and is also why
+>   declaring marks in a stable schema-rank order matters: if `[em, strong]`
+>   becomes `[strong, em]` between siblings, the prefix has length 0 and
+>   *both* wrappers churn.
+> - **`null`-toDOM silently drops the mark.** If `this.marks[name]` is
+>   `undefined` (mark spec omitted `toDOM`, or `toDOM = null`), the loop
+>   `rendered++; continue` — the mark is silently dropped from output, not
+>   thrown on. Plugin authors hitting this lose marks without warning.
+> - **`spanning: false` forces a fresh wrapper.** Even when `next.eq(active[keep][0])`,
+>   the loop breaks. So three consecutive `text` nodes each carrying a `code`
+>   mark with `spanning:false` produce three separate `<code>` elements —
+>   never one merged wrapper.
+
 This is what produces idiomatic HTML like
 `<em><strong>a</strong>b</em><strong>c</strong>` from a fragment with marks
 `[em,strong]`, `[em]`, `[strong]` on three text nodes — the `em` wrapper is
@@ -311,6 +346,11 @@ Key fine points:
 
 ## 6. XSS / "suspicious attributes" guard (`to_dom.ts:164-191, 204-206`)
 
+> **🛑 Security-critical.** This guard is the single defence between
+> attacker-controlled JSON in `node.attrs` and arbitrary DOM injection at
+> render time. Removing or bypassing it (e.g. by calling the static
+> `DOMSerializer.renderSpec` from a custom `toDOM`) re-opens the hole.
+
 ```ts
 const suspiciousAttributeCache = new WeakMap()
 
@@ -340,11 +380,62 @@ attrs for any `[string, ...]`-shaped sub-array. If a `toDOM` ever returns one
 of those very arrays as its output spec, that's almost certainly an attacker
 having placed a malicious DOMOutputSpec inside an attribute string and a
 poorly-written `toDOM` having returned it verbatim — so we throw. The cache is
-keyed by attrs identity in a `WeakMap`, so it's amortized free.
+keyed by attrs identity in a `WeakMap`, so it's amortized free across renders
+of the same node.
+
+### 6.1 Threat model
+
+The attack the guard defends against:
+
+1. The application stores documents from untrusted sources (collab, paste,
+   external API).
+2. A node has an attribute (say, `data` on a custom embed) that is a
+   `[string, …]` array shaped like a `DOMOutputSpec`. Postgres / JSON-typed
+   storage round-trips arrays through node attrs as-is.
+3. A naïve `toDOM(node)` returns `node.attrs.data` — perhaps because the
+   author wanted "user-supplied DOM tree" semantics.
+4. Without the guard, attacker-supplied
+   `["script", {}, "alert(document.cookie)"]` would render as a real
+   `<script>` element.
+
+The guard catches step 4. **It does not** catch `toDOM` functions that
+hand-construct DOM from attrs (e.g. setting `dom.innerHTML = node.attrs.html`).
+That's a separate hazard the schema author owns — the guard is specifically
+about array-shaped spec injection.
+
+### 6.2 Worked example
+
+```ts
+// Schema:
+const embed = {
+  attrs: { spec: { default: ["span"] } },
+  toDOM: node => node.attrs.spec   // ← naive
+}
+
+// Attacker-controlled doc:
+embed.create({ spec: ["script", {}, "alert(1)"] })
+
+// At serialization time:
+//   serializeNodeInner calls renderSpec(doc, node.attrs.spec, null, node.attrs)
+//   blockArraysIn = node.attrs = { spec: ["script", {}, "alert(1)"] }
+//   suspiciousAttributes(blockArraysIn) = [["script", {}, "alert(1)"]]
+//   structure === blockArraysIn.spec → matches → throws
+//
+// → RangeError: "Using an array from an attribute object as a DOM spec.
+//                This may be an attempted cross site scripting attack."
+```
+
+The render aborts the entire `serializeFragment` call — that is, **a single
+poisoned attr blast-radius is the whole document fragment, not just the
+offending node.** Callers should sanitise input upstream rather than rely on
+this throw.
+
+### 6.3 The static `renderSpec` escape hatch
 
 The public `DOMSerializer.renderSpec(...)` static method does **not** receive a
 `blockArraysIn` (line 115-128), so the check is skipped there. That's because
-it's intended for callers that have already vetted the spec.
+it's intended for callers (like NodeView authors) that have already vetted the
+spec themselves. *Do not call it with attacker-derived arrays.*
 
 ---
 
@@ -492,3 +583,115 @@ inline content" rule is enforced for free.
 - `dom.ts:1` — `export type DOMNode = InstanceType<typeof window.Node>` —
   every DOM-handling type in the package routes through this single typedef so
   swapping in a non-browser DOM means only stubbing `window.Node`.
+
+---
+
+## 11. Why-questions
+
+**Why is `mark.toDOM === null` silently dropped instead of throwing?** So a
+schema can declare a mark for parser-side / state-side use (e.g. an internal
+"composing" or "dirty" flag) without forcing a DOM representation. The mark
+roundtrips through ProseMirror state but vanishes at serialization. If you
+*want* loud failure, write `toDOM: () => { throw new Error("…") }`.
+
+**Why does the serializer not `cloneNode` to amortise repeated `toDOM` calls?**
+Because `toDOM`'s contract is "produce fresh DOM each call." Some specs return
+DOM nodes directly (form 1) and the serializer trusts the spec to either
+construct a new node or accept the consequences if it doesn't.
+`["tag", …]` form sidesteps this entirely — `renderSpec` always
+`createElement`s a fresh tree. The cost of cloning would also defeat NodeView
+authors who rely on `dom`/`contentDOM` identity.
+
+**Why isn't the mark `excludes` relationship enforced at serialization?**
+Because excludes is a *schema-construction-time* invariant: the `Mark.addToSet`
+operation enforces it whenever marks are placed onto a node. By the time
+serialization runs, `node.marks` already satisfies all `excludes` rules — there
+is nothing for the serializer to check. (Contrast with `spanning`, which is a
+*serialization-shape* concern and therefore lives here.)
+
+**Why is there no text-node coalescing at serialization?**
+`serializeNodeInner` calls `createTextNode` once per ProseMirror text node
+(line 78); two adjacent text siblings with identical marks become two adjacent
+DOM `Text` nodes. Browsers will *normalise* them into one when the resulting
+HTML is later re-parsed (via `Element.normalize()` or implicitly through
+`innerHTML` round-tripping), so for visible output it doesn't matter. But it
+does affect:
+
+- `Selection`/`Range` reconstruction in `prosemirror-view`, which expects 1:1
+  PM-text ↔ DOM-text correspondence.
+- Round-trip stability via `innerHTML` → `parseSlice`: if you serialize then
+  re-parse, you may end up with a single PM text node where you started with
+  two — generally fine, but plugin tests sometimes notice.
+
+The serializer deliberately does not coalesce because it would need to inspect
+mark identity across siblings, which is exactly the work `serializeFragment`
+already does at the *wrapper* level. Replicating that for text would double
+the loop's complexity for a marginal output-size win.
+
+---
+
+## 12. Worked micro-examples
+
+### 12.1 SVG with namespaced tag *and* attribute
+
+```ts
+const symbolUseSpec: DOMOutputSpec = [
+  "http://www.w3.org/2000/svg use",
+  { "http://www.w3.org/1999/xlink href": "#icon-check" }
+]
+DOMSerializer.renderSpec(document, symbolUseSpec)
+// produces:
+//   <use xlink:href="#icon-check"/>   (in the SVG namespace)
+//   .namespaceURI === "http://www.w3.org/2000/svg"
+//   .getAttributeNS("http://www.w3.org/1999/xlink", "href") === "#icon-check"
+```
+
+The leading-space convention applies independently on tag and attr names.
+Children of the `<use>` would inherit `xmlNS = SVG ns` via `renderSpec`'s
+recursive `xmlNS` parameter (line 233), so nested `["path", ...]` becomes an
+SVG `<path>` without further annotation.
+
+### 12.2 `code` mark with `spanning: false`
+
+```ts
+// Schema:
+const codeMark = { spec: { spanning: false, toDOM: () => ["code"] } }
+
+// Document fragment:
+//   text("foo", marks=[code])
+//   text("bar", marks=[code])
+//   text("baz", marks=[code])
+
+serializeFragment(frag) →
+  // Loop iteration 1: active=[], marks=[code]; push <code>1; append "foo"
+  // Loop iteration 2: keep<active && rendered<marks → next=code, eq, but
+  //                   spec.spanning===false → break.
+  //                   Pop <code>1 (top ← parent). Push fresh <code>2; append "bar"
+  // Loop iteration 3: same → fresh <code>3; append "baz"
+  →
+  <code>foo</code><code>bar</code><code>baz</code>
+```
+
+Without `spanning: false` (the default `true`) the three runs would collapse
+into `<code>foobarbaz</code>` because the first `<code>` wrapper is reused.
+
+### 12.3 XSS attempt and the RangeError
+
+```ts
+const node = embedType.create({ payload: ["script", {}, "alert(1)"] })
+// embedType.spec.toDOM = node => node.attrs.payload   (naive)
+
+serializer.serializeNode(node)
+// → serializeNodeInner(node)
+// → renderSpec(doc, ["script", {}, "alert(1)"], null, node.attrs)
+//   blockArraysIn = node.attrs                     // contains the array
+//   suspiciousAttributes(blockArraysIn)            // returns [<that array>]
+//   suspicious.indexOf(structure) > -1             // true
+// → throw RangeError("Using an array from an attribute object as a DOM spec.
+//                     This may be an attempted cross site scripting attack.")
+```
+
+The error halts the entire `serializeFragment` invocation. In a `prosemirror-view`
+context, this surfaces as an exception during `view.updateState`, which
+ProseMirror does not catch — the view is left in a partially-rendered state.
+Treat this guard as a *last-resort tripwire*; sanitise upstream.

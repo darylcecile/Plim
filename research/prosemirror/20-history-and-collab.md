@@ -702,3 +702,1176 @@ receiveTransaction([r₁, r₂], [B, B]):
 - `getVersion` — collab.ts:182–184
 
 — end of file —
+
+---
+
+## 6. Gap-fill addenda
+
+### 6.1 `depth` and `newGroupDelay` parameters in detail
+
+`history(config?)` (`history.ts:391–393`) accepts:
+
+```ts
+{
+  depth?: number,            // default 100
+  newGroupDelay?: number     // default 500 (ms)
+}
+```
+
+**`depth`** caps `Branch.eventCount` (the *grouped event* count, not
+total step count). Concretely, when `addTransform` lands a step, it
+checks `eventCount > histOptions.depth + DEPTH_OVERFLOW` where
+`DEPTH_OVERFLOW = 20` (`history.ts:103, 256`):
+
+- The hysteresis (+20) means we only call `cutOffEvents`
+  (`history.ts:209–218`) *occasionally*, not on every recording past
+  the cap. After each cull, `eventCount` drops back to `depth`, then
+  the user adds 20 more events before the next cull — amortizing the
+  rope-slice cost.
+- `cutOffEvents` walks `items` from the front, finds the first
+  group-start (selection bookmark) past the overflow threshold, and
+  returns `items.slice(cut)` plus the recomputed `eventCount`.
+- An item with a step but **no** selection bookmark inside the cut
+  range becomes orphaned (the event-start it referred to has been
+  dropped); these items get their step replaced with `null` (line 213)
+  so they survive as map-only filler — preserving forward maps for
+  remaining items to remap through.
+
+**`newGroupDelay`** is the time gap (in ms) above which a new
+transaction starts a *new* event group:
+
+- Compared against `tr.time` (`history.ts:282`), which is a
+  `Transaction` field set to `Date.now()` when the tr is constructed.
+- 500ms is "between two keystrokes in fluent typing" — so a typing run
+  coalesces into a single undo event, but a pause of half a second
+  starts a new one.
+- Value of 0 disables time-based grouping; only `closeHistory`,
+  composition changes, or non-adjacent ranges break events. Value of
+  `Infinity` makes the *whole session one event* unless other
+  triggers fire — useful for "macro recording" UX.
+- Composition-change boundary (`history.prevComposition != composition`,
+  line 281) uses `tr.getMeta("composition")` set by `prosemirror-view`'s
+  domobserver (file 15); each IME composition session gets its own
+  number.
+
+### 6.2 `historyPreserveItems` ref-counting × `compress`
+
+`mustPreserveItems(state)` (`history.ts:345–361`) is **boolean** at any
+moment — but it's computed by *iterating state.plugins* and OR-ing
+their `historyPreserveItems` spec flag:
+
+```ts
+function mustPreserveItems(state: EditorState) {
+  let plugins = state.plugins
+  if (cachedPreserveItems != plugins) {
+    cachedPreserveItemsPlugins = plugins
+    cachedPreserveItems = plugins.some(p => p.spec.historyPreserveItems)
+  }
+  return cachedPreserveItems
+}
+```
+
+This is **effectively a ref-count over plugin lifetimes**:
+
+- Add the collab plugin → `mustPreserveItems` flips to `true`. From
+  this moment, `addTransform` no longer merges items
+  (`history.ts:86, 91, 101`) and `popEvent` builds a full `remap`
+  (`history.ts:39–62`).
+- Remove the collab plugin (e.g. user goes offline, you swap state for
+  a single-player one) → flag flips back to `false`. The next
+  `addTransform` resumes merging from the *end*, but **existing items
+  remain unmerged**. The branch carries the historical "no-merge"
+  shape until `compress` collapses it.
+
+Interaction with `compress` (`history.ts:179–204`):
+
+- `compress` is invoked from `Branch.rebased` when
+  `branch.emptyItemCount() > max_empty_items (500)` (line 162). It is
+  *not* invoked on plain recording.
+- During preserve mode, `compress` is *still safe*: items that are pure
+  map-only fillers below the rebase boundary (`upto`) get folded into
+  the next surviving step's map. Items with steps survive but get
+  re-merged via `Item.merge` (lines 194–197) when the predecessor's
+  step accepts a `Step.merge`.
+- After preserve mode ends, the branch is "long but consistent". The
+  next `compress` (which only fires in `rebased`) won't fire because
+  there's no rebase. So the branch *stays* shaped as it was during
+  collab. This is **intentional** — past undo events recorded during
+  collab still have to map cleanly through future remote changes that
+  arrive after collab is re-enabled.
+
+In practice: don't toggle `historyPreserveItems` on/off mid-session if
+you can avoid it. Either start in preserve mode and stay there, or
+keep collab off entirely.
+
+### 6.3 `Selection.getBookmark()` / `bookmark.resolve()` mechanics
+
+History items store `SelectionBookmark`, never `Selection`. The
+contract is on `Selection` (file 08) and looks like:
+
+```ts
+abstract class Selection {
+  abstract getBookmark(): SelectionBookmark
+}
+
+interface SelectionBookmark {
+  map(mapping: Mappable): SelectionBookmark
+  resolve(doc: Node): Selection
+}
+```
+
+Each `Selection` subclass implements its own bookmark:
+
+- **`TextSelection`** → `TextBookmark { anchor: number, head: number }`.
+  `map(m)` returns `new TextBookmark(m.map(anchor), m.map(head))`.
+  `resolve(doc)` → `TextSelection.between(doc.resolve(anchor),
+  doc.resolve(head))` (note: `between` falls back to a near-by valid
+  text position if the exact one is no longer a textblock).
+- **`NodeSelection`** → `NodeBookmark { anchor: number }`.
+  `map(m)` → `new NodeBookmark(m.map(anchor))`.
+  `resolve(doc)` → `NodeSelection.create(doc, anchor)` *if* the
+  position still resolves to a node-start; otherwise falls back to
+  `Selection.near(doc.resolve(anchor))`.
+- **`AllSelection`** → singleton bookmark; `resolve(doc)` → fresh
+  `AllSelection(doc)`.
+
+Why bookmarks, not selections, in history items:
+
+1. **A `Selection` requires a `Node` (the doc) to exist.** History
+   items survive across many doc generations. Storing a Selection
+   would mean storing a stale `Node` reference too, defeating the
+   GC-friendliness of immutable history.
+2. **Bookmarks are mappable through `Mapping` directly** without doc
+   access (`history.ts:73, 148`). `popEvent` builds a `remap: Mapping`
+   from later items' StepMaps and calls `bookmark.map(remap.slice(...))`.
+3. **Resolution is deferred** to the moment we actually need a
+   Selection — typically `setSelection(bookmark.resolve(state.doc))`
+   when applying an undo. By that time the doc is the *current* doc,
+   so the resolution is meaningful.
+
+A custom `Selection` subclass MUST provide a bookmark (and `map`/
+`resolve` on it) for it to participate in undo/redo. Without one,
+selections collapse to `TextSelection.between` defaults during undo —
+visible to the user as "my fancy column-selection lost its shape after
+Ctrl-Z".
+
+### 6.4 `closeHistory(tr)` — full effect
+
+The function (`history.ts:366–368`) is one line:
+
+```ts
+export function closeHistory(tr: Transaction) {
+  return tr.setMeta(closeHistoryKey, true)
+}
+```
+
+Then `applyTransaction` (`history.ts:263`) reads the meta:
+
+```ts
+if (tr.getMeta(closeHistoryKey))
+  history = new HistoryState(history.done, history.undone, null, 0, -1)
+```
+
+The reset is *applied before the rest of `applyTransaction` runs*. Its
+fields, in detail:
+
+| Field | Pre-reset | After `closeHistory` | Consequence |
+|---|---|---|---|
+| `done` | preserved | preserved | The undo stack is untouched; the *current* event is closed but everything before it stays. |
+| `undone` | preserved | preserved | Same — redo stack survives. |
+| `prevRanges` | array of touched ranges | `null` | Adjacency check (`isAdjacentTo`) returns `false` for the next tr → guaranteed new event. |
+| `prevTime` | Date.now of last recording | `0` | First check in `newGroup` (`history.ts:280`) is `prevTime == 0` → unconditionally a new event. |
+| `prevComposition` | last composition id (or -1) | `-1` | Composition-grouping bypassed; even if the next tr's composition matches the *original* `prevComposition`, `-1` ≠ that value → new event regardless. |
+
+Use cases:
+
+- **Programmatic boundaries**: after running a multi-step refactor (e.g.
+  "format document"), wrap the dispatched tr with `closeHistory(tr)` so
+  the next user typing starts a new undo event rather than coalescing
+  with your formatter.
+- **InputRule boundary** (see file 19 §8.6): inside a rule handler,
+  `return closeHistory(tr)` to make the rule a discrete undo step.
+- **Atomic AI/translation results**: when an async command (file 19
+  §8.3) lands its result, dispatch `closeHistory(tr)` to lock that
+  insertion as one atomic undo event distinct from preceding typing.
+
+### 6.5 Collab cursor / awareness — full section
+
+The `prosemirror-collab` package handles **document state**, not
+**presence**. Showing where peer cursors are — "Alice is editing
+here", "Bob has selected this paragraph" — is a separate layer.
+
+The PM-canonical recipe is **decorations driven by peer-state mapped
+through `tr.mapping`**.
+
+#### 6.5.1 Data model
+
+```ts
+// What you receive from your transport (WebSocket, Yjs, custom):
+type PeerAwareness = {
+  clientID: string
+  name: string
+  color: string                    // hex, for the cursor flag
+  selection: { anchor: number, head: number }   // in *peer's* version
+  basedOnVersion: number           // the collab version they sent at
+}
+```
+
+Two challenges:
+
+1. **Peer positions are based on a possibly-different version**.
+2. **Local edits move peers' cursors** — when I type before Alice's
+   cursor, her caret should shift.
+
+#### 6.5.2 The plugin
+
+```ts
+import { Plugin, PluginKey } from "prosemirror-state"
+import { Decoration, DecorationSet } from "prosemirror-view"
+
+const awarenessKey = new PluginKey<DecorationSet>("collab-awareness")
+
+export function awarenessPlugin(getPeers: () => PeerAwareness[]) {
+  return new Plugin<DecorationSet>({
+    key: awarenessKey,
+    state: {
+      init(_, state) { return buildPeerDecorations(state.doc, getPeers()) },
+      apply(tr, set, oldState, newState) {
+        // 1. Map existing decorations through this transaction's mapping.
+        set = set.map(tr.mapping, tr.doc)
+
+        // 2. If the transaction carries new peer state, rebuild.
+        const update = tr.getMeta(awarenessKey)
+        if (update) set = buildPeerDecorations(newState.doc, update.peers)
+
+        return set
+      }
+    },
+    props: {
+      decorations(state) { return awarenessKey.getState(state) }
+    }
+  })
+}
+
+function buildPeerDecorations(doc: Node, peers: PeerAwareness[]) {
+  const decos: Decoration[] = []
+  for (const peer of peers) {
+    const { anchor, head } = peer.selection
+    if (anchor < 0 || head > doc.content.size) continue   // out of range
+    if (anchor == head) {
+      // Caret: a widget decoration with a colored bar
+      const flag = document.createElement("span")
+      flag.className = "peer-caret"
+      flag.style.borderLeftColor = peer.color
+      flag.setAttribute("data-name", peer.name)
+      decos.push(Decoration.widget(head, flag, {
+        side: -1, key: `caret-${peer.clientID}`,
+        ignoreSelection: true,
+      }))
+    } else {
+      // Range: an inline decoration with a tinted background
+      const [from, to] = anchor < head ? [anchor, head] : [head, anchor]
+      decos.push(Decoration.inline(from, to,
+        { style: `background:${peer.color}33` },        // 20% alpha
+        { inclusiveStart: false, inclusiveEnd: false }))
+    }
+  }
+  return DecorationSet.create(doc, decos)
+}
+```
+
+#### 6.5.3 Mapping peer cursors through *local* edits
+
+The `set.map(tr.mapping, tr.doc)` call (`apply` step 1 above) is where
+peer cursors stay glued to content. `DecorationSet.map`
+(`prosemirror-view/src/decoration.ts`):
+
+- For **widget** decorations (carets), uses the `side` to bias mapping:
+  `side: -1` keeps the caret on the *left* of an inserted character at
+  that position (so my typing pushes Alice's caret right, like a real
+  selection would). Use `side: 1` for "stick to right".
+- For **inline** decorations (ranges), uses `inclusiveStart` /
+  `inclusiveEnd` to control whether insertions at the boundary expand
+  or stay outside the highlight.
+
+This means: **once peer awareness is in plugin state, you never need
+to re-receive it on every local keystroke** — local edits map peer
+positions automatically. You only re-send / re-receive when the *peer*
+moves their selection.
+
+#### 6.5.4 Mapping peer cursors through *remote* (collab) edits
+
+When `prosemirror-collab.receiveTransaction` lands remote steps, the
+returned tr carries the remote steps in `tr.steps` and the mapping
+includes both `invert(localᵢ)` and the remote steps and the rebased
+locals (§2.4). `set.map(tr.mapping, tr.doc)` shifts peer positions
+through *all* of that — **including** the rebase undo+redo cycle.
+
+But peer cursors are typically based on a specific authority
+*version*, not the local view. To handle a peer's broadcast:
+
+```ts
+// Transport layer fires this when peer awareness changes.
+function onPeerAwareness(peer: PeerAwareness) {
+  const localVersion = getVersion(view.state)
+  if (peer.basedOnVersion < localVersion) {
+    // Map peer.selection forward through the steps the local client
+    // has applied since peer.basedOnVersion. The steps are the ones
+    // currently in the authority log past peer.basedOnVersion.
+    peer.selection = mapPeerSelection(peer.selection, peer.basedOnVersion,
+                                       localVersion)
+  } else if (peer.basedOnVersion > localVersion) {
+    // We're behind — defer or buffer until receiveTransaction catches us
+    // up. In practice this is rare because the same transport delivers
+    // both step broadcasts and awareness updates; awareness for v=X
+    // typically arrives just after step v=X.
+    pendingPeerAwareness.push(peer)
+    return
+  }
+
+  view.dispatch(view.state.tr.setMeta(awarenessKey,
+    { peers: [/* updated list */] }))
+}
+```
+
+`mapPeerSelection` requires access to the authority's step log — the
+same log used by `receiveTransaction`. Most apps cache the last `K`
+steps locally for exactly this purpose. If you can't map (peer is
+arbitrarily far behind), fall back to clamping to nearest-valid via
+`TextSelection.between`.
+
+#### 6.5.5 Rendering details
+
+- The widget decoration sets `ignoreSelection: true` so PM's own
+  selection management doesn't try to put the local caret into the
+  peer-caret DOM.
+- Use CSS `::after` for the name flag rather than inline DOM, so the
+  flag doesn't affect text layout (peer carets shouldn't reflow lines).
+- For **avatars at start-of-paragraph**, prefer `Decoration.widget`
+  with a side-padding style; for **inline name labels next to the
+  caret**, the same widget with absolute positioning works.
+
+#### 6.5.6 Why this pattern, not native CSS carets
+
+Browsers don't expose multi-cursor carets. Even Selection API's
+`addRange` doesn't render visible carets for non-focus selections. The
+DecorationSet path is the only way to render peer presence without
+forking PM's view-rendering, *and* it composes correctly with
+mapping-through-edits.
+
+### 6.6 Comments / annotations anchored across collab
+
+The same DecorationSet pattern handles comments and annotations:
+
+```ts
+type Comment = {
+  id: string,
+  from: number, to: number,        // in *current* local doc
+  basedOnVersion: number,
+  text: string,
+  author: string,
+}
+
+const commentKey = new PluginKey<{ comments: Comment[],
+                                   decos: DecorationSet }>("comments")
+
+const commentPlugin = new Plugin({
+  key: commentKey,
+  state: {
+    init() { return { comments: [], decos: DecorationSet.empty } },
+    apply(tr, val, _, newState) {
+      // 1. Map all comment positions through tr.mapping. Use bias=1 for
+      //    'from' and bias=-1 for 'to' so insertions at boundaries don't
+      //    expand the comment range.
+      const comments = val.comments.map(c => ({
+        ...c,
+        from: tr.mapping.map(c.from, 1),
+        to:   tr.mapping.map(c.to, -1),
+      })).filter(c => c.from < c.to)              // dropped if collapsed
+
+      // 2. Map decoration set in lockstep
+      let decos = val.decos.map(tr.mapping, tr.doc)
+
+      // 3. Apply meta updates (add/remove/edit comments)
+      const action = tr.getMeta(commentKey)
+      if (action?.add) {
+        comments.push(action.add)
+        decos = decos.add(tr.doc, [Decoration.inline(action.add.from,
+          action.add.to, { class: "comment" }, { id: action.add.id })])
+      } /* …remove / edit branches… */
+
+      return { comments, decos }
+    }
+  },
+  props: { decorations(s) { return commentKey.getState(s)!.decos } }
+})
+```
+
+Properties:
+
+- **Anchors are positions, not content offsets.** They are mapped
+  through every transaction (local AND `receiveTransaction`'s rebase
+  tr) so they survive collab automatically.
+- **Bias control**: `from` mapped with `1` (right-bias), `to` with
+  `-1` (left-bias) means typing at either boundary keeps the comment
+  range exactly over its original content. Without explicit bias,
+  PM's default is to expand inclusively — a comment on "world" becomes
+  a comment on "world!" if you type `!` after it.
+- **Collapse-on-delete**: when a remote user deletes the entire
+  commented range, `from == to` and we filter the comment out
+  (line: `.filter(c => c.from < c.to)`). The convention varies — some
+  apps keep "orphaned" comments visible at the deletion site; that's a
+  product decision. If keeping orphans, store `originalText` and render
+  it inline as a strikethrough.
+- **Persistence**: the same `setMeta(commentKey, { add: {...} })`
+  pattern works for round-tripping comments through your transport.
+  Send `(commentId, basedOnVersion, from, to, text)`; on receive, map
+  `(from, to)` from `basedOnVersion` to current version using the
+  authority's step log (same as awareness in §6.5.4).
+
+### 6.7 Step JSON wire compression
+
+`Step.toJSON()` produces compact-ish objects:
+
+```json
+// ReplaceStep("Hello world!" → "Hi world!", from=0, to=5)
+{ "stepType": "replace", "from": 0, "to": 5,
+  "slice": { "content": [{ "type": "text", "text": "Hi" }] } }
+```
+
+Wire-size considerations:
+
+- **Step JSON is the canonical transport** in the official collab
+  example. Every confirmed step lives forever in the authority log as
+  JSON. For documents with millions of steps, this is the dominant
+  storage cost.
+- **Per-step overhead is ~30–80 bytes** for typical text edits. A
+  paragraph rewrite that touches 5 KB of content is ~5.2 KB of step
+  JSON. A single-character insertion is ~80 bytes.
+- **Mark sets** are repeated verbatim per text node in the slice — a
+  bold insertion repeats `"marks":[{"type":"strong"}]` on every text
+  node. For documents with many marks, this is the biggest expansion.
+- **Batching**: send N steps per network round-trip rather than 1.
+  `sendableSteps` already returns the entire `unconfirmed` array;
+  POST it as a single JSON array. The authority serializes them
+  atomically.
+- **gzip / brotli on the transport**: step JSON compresses extremely
+  well (>10×) because mark sets, attribute keys, and step types
+  repeat. **Always enable transport compression** for collab — it's
+  free win.
+- **Schema-aware compression** (custom): if your schema has a fixed
+  small set of node/mark types, you can shrink stepType, marks, and
+  attribute keys to integer IDs. This is what Yjs/Automerge do
+  natively. For PM, a shim layer converting `Step.toJSON()` to a
+  varint-tagged binary format is feasible but not in any published
+  package.
+- **Snapshot vs incremental**: late-joiners (§6.10) get a full doc
+  snapshot, not a step replay. After the bootstrap, they switch to
+  incremental step receipt. The break-even depends on your edit
+  density; 10K steps ≈ 1 MB JSON, which is roughly the size of a
+  100KB doc snapshot (the doc itself), so for active docs the snapshot
+  is cheaper. For mostly-archived docs with sparse edits, replay can
+  be cheaper.
+
+### 6.8 CRDT comparison — PM (OT) vs Yjs / Automerge
+
+| Property | `prosemirror-collab` (OT/rebase) | Yjs (CRDT) | Automerge (CRDT) |
+|---|---|---|---|
+| **Authority** | Required (single serializer) | Optional (P2P-capable) | Optional (P2P-capable) |
+| **Convergence proof** | Sequential rebase against total log; provably converges | Mathematical CRDT proof per type | Mathematical CRDT proof per type |
+| **Offline edits** | Possible but unbounded rebase chain on reconnect | First-class, no limit | First-class, no limit |
+| **Conflict resolution** | "Last writer (in serialization order) wins"; rebased steps may drop | Per-CRDT-type rules (Y.Text uses fractional indexing) | Per-CRDT-type rules |
+| **Per-edit overhead on wire** | ~30–80 bytes (step JSON) | ~10–30 bytes (Yjs binary) | ~30–60 bytes |
+| **Per-edit overhead in memory** | None (steps confirmed → discarded) | Tombstones grow with history | Full op log retained |
+| **Doc-as-CRDT integration with PM** | Native (this package) | `y-prosemirror` binding maintains a Y.XmlFragment in lockstep with PM doc | Less mature; community bindings |
+| **Selection / undo / inputrules** | Native PM, fully integrated | Works through `y-prosemirror` shim, with caveats around undo on remote ops | Limited |
+| **Bandwidth on idle** | 0 (no log replay) | Minimal (sync protocol pings) | Minimal |
+| **Scale** | Bounded by authority throughput; ~100s of edits/s typical | Lower coordinator load, higher per-doc memory | Higher per-doc memory |
+| **Schema** | Strict (PM schema enforced at every step) | Loose (Y.XmlFragment is structurally permissive) | Strict-ish |
+
+**When to choose PM-collab (this package)**:
+- You have, or can run, a serializing authority (Node, Rust, Cloudflare
+  DO, Postgres-as-coordinator).
+- Edits arrive online; offline tolerance is minutes, not days.
+- You want native PM history, input rules, and selection semantics with
+  zero shim layer.
+
+**When to choose Yjs (`y-prosemirror`)**:
+- You need offline editing for hours/days.
+- You need P2P or no-server architecture (WebRTC).
+- You can accept that PM's history plugin needs replacement (Yjs has
+  its own Y.UndoManager that's per-client; semantics differ).
+
+**When to choose Automerge**:
+- You need formal verification or are integrating with other
+  Automerge-using systems.
+- The schema is loose enough that PM's strict validation isn't a fit.
+
+PM-collab's "OT-style rebase" is mathematically OT in the limited form
+"clients always rebase against authoritative serialization, never
+transform pairs". It avoids the full OT minefield (operation
+transformation matrices, transformation property TP1/TP2) by punting
+serialization to the authority. Convergence holds as long as
+`Step.map` is well-defined for every Step type — which is enforced by
+the Step interface contract (file 05).
+
+### 6.9 Mirror map — *why* (expanded)
+
+`transform.mapping.setMirror(invertI, rebasedI)` (`collab.ts:22`) is
+called for each successfully-rebased local step. The "mirror"
+relationship records that the position-shift introduced by `invert(i)`
+is *exactly cancelled* by the position-shift of `rebased(i)`.
+
+Without mirror pairing, a position mapped through the entire rebase
+transform would be **double-shifted**. Imagine a position at offset 50
+in the original local doc:
+
+```
+maps in transform.mapping (in order):
+  m_inv_3   = invert of localStep 3   (e.g. "delete chars at [40,45]" inverted → insert)
+  m_inv_2   = invert of localStep 2
+  m_inv_1   = invert of localStep 1
+  m_remote_1, m_remote_2, …          (remote inserts/deletes)
+  m_local_1' = rebased localStep 1   (re-applies a delete at remapped position)
+  m_local_2' = rebased localStep 2
+  m_local_3' = rebased localStep 3
+```
+
+A naive `mapping.map(50)` would walk all 9 maps. The inverts shift 50
+"up" (re-inserting deleted content), then the rebased copies shift it
+"back down" (deleting it again). The result *should* be 50 (or 50
+shifted by the *remote* effects), but if the inverts and re-applies
+weren't recognized as paired, intermediate maps could mis-apply
+deletion bias.
+
+With `setMirror`, `Mapping.map` (file 06) detects the pair and **skips
+the redundant pair** for positions that fall *outside* the deletion's
+range. Specifically, the mirroring information is used by
+`StepMap.recover` and friends to know that a position deleted by
+`m_local_1'` and re-inserted by `m_inv_1` should be tracked as
+"recoverable" rather than "lost".
+
+`Branch.rebased` (`history.ts:130–165`) uses `mapping.getMirror(i)` to
+**locate the rebased copy of an inverted step** — given the inverted-
+local position `i`, it asks "where did this step end up after rebase?"
+and gets back the rebasedᵢ index, or `null` if the rebased step
+failed to apply (was dropped). That's how history items recover their
+rebased forward-map without scanning the whole transform.
+
+The TL;DR: mirror pairing is what makes the rebase *transparent* to
+position consumers (history items, decorations, comments, awareness)
+that map through the entire combined transform.
+
+### 6.10 Late-joining client bootstrap
+
+A new client at version `v_new` joining a doc currently at
+`v_authority` must obtain a starting state and reach
+`v_authority` before applying any local edits. Two patterns:
+
+#### Pattern A — Snapshot
+
+```
+1. Client requests GET /collab/<doc>/state
+2. Authority responds:
+     {
+       version: 142,
+       doc: { ... full PM doc JSON, via doc.toJSON() ... },
+       schemaVersion: "1.3",
+       comments: [...],
+       awareness: [...]   // current peer states
+     }
+3. Client constructs EditorState:
+     EditorState.create({
+       doc: schema.nodeFromJSON(snapshot.doc),
+       plugins: [..., collab({ version: snapshot.version })],
+     })
+4. Client begins long-polling GET /collab/<doc>/events?version=142
+5. Steps committed during steps 1-4 arrive in step 4's response and
+    are applied via receiveTransaction.
+```
+
+**Pros**: O(doc size) bandwidth regardless of history depth.
+**Cons**: doesn't give the client the step history (so no client-local
+undo of pre-join changes). Most apps accept this — undo across
+sessions is a separate problem (§6.12).
+
+#### Pattern B — Step replay
+
+```
+1. Client requests GET /collab/<doc>/state?fromVersion=0
+2. Authority responds with all steps + clientIDs from version 0.
+3. Client builds an empty doc (or a known-template doc), then applies
+    every step via Transform / dispatch.
+4. Switches to incremental polling.
+```
+
+**Pros**: client gets full history, can show "edited by N changes",
+allows time-travel.
+**Cons**: O(step-count) bandwidth — typically much larger than the
+snapshot for an active doc.
+
+**Practical recommendation**: Pattern A for default. Reserve Pattern B
+for time-travel UIs ("show me the doc at version 50") that compute
+intermediate doc snapshots from `step.apply` walks server-side.
+
+### 6.11 Permanent undo across sessions — persistence patterns
+
+PM's history plugin stores `HistoryState` in plugin state, which lives
+in `EditorState`, which lives in memory. **Closing the browser drops
+undo history.** To persist:
+
+#### Naive: serialize plugin state
+
+```ts
+// Save
+const json = historyKey.getState(view.state).toJSON?.()
+localStorage.setItem(`hist:${docId}`, JSON.stringify(json))
+// Load
+const json = JSON.parse(localStorage.getItem(`hist:${docId}`))
+const state = EditorState.create({
+  doc, plugins: [history({ /* config */ })]
+})
+// then... no public API to restore HistoryState from JSON
+```
+
+`HistoryState` has **no `toJSON`** (`history.ts:246–254`) and no
+public restore path. The rope-of-Items structure isn't designed for
+serialization (selection bookmarks are abstract; some Step subtypes
+serialize but Items aren't a Step).
+
+#### Practical: store the inverted-step transcript yourself
+
+Because you know what `addTransform` *will* store (one Item per Step
+with the inverted Step), you can shadow-record:
+
+```ts
+const undoLog: { invertedJSON: any, selectionBefore: any }[] = []
+
+const view = new EditorView(target, {
+  state,
+  dispatchTransaction(tr) {
+    // Capture inversions BEFORE applying.
+    if (tr.docChanged && tr.getMeta("addToHistory") !== false) {
+      const invs = tr.steps.map((s, i) => s.invert(tr.docs[i]).toJSON())
+      undoLog.push({
+        invertedJSON: invs,
+        selectionBefore: view.state.selection.toJSON(),
+      })
+      persistAsync(undoLog)
+    }
+    view.updateState(view.state.apply(tr))
+  }
+})
+```
+
+Restore by replaying. Caveats:
+
+- **Position rebasing across sessions**: if remote edits happened
+  while you were offline, the inverted steps need rebasing through
+  the remote step log before they can be applied. This is the
+  `rebaseSteps` algorithm (§2.4) used in reverse — undo the local
+  steps, apply the remote ones, then map the inversions through.
+- **Schema changes**: if the schema has changed, old step JSON may
+  reference removed node/mark types and `Step.fromJSON` will throw.
+  Either freeze schema versions or migrate the log (§6.16).
+
+For most products, "undo only within the current session" is the
+right scope; persistent undo is a niche feature. Linear and Notion
+both reset undo on reload.
+
+### 6.12 3-client conflict scenario
+
+Three clients **A**, **B**, **C** at version 5 with doc `"foo bar"`
+(positions 1..7).
+
+- **A** appends `"!"` at end (insert at 8) → `local_A`.
+- **B** replaces `"bar"` with `"baz"` (4..7) → `local_B`.
+- **C** wraps the whole thing in bold (mark range 1..8) → `local_C`.
+
+All three send `{ version: 5, ... }` simultaneously.
+
+#### Phase 1: Authority serializes (say, A then B then C)
+
+Authority log appends `local_A` at v=6, `local_B` at v=7, `local_C` at
+v=8.
+
+#### Phase 2: A receives `[local_B, local_C]` (clientIDs `[B, C]`)
+
+- `ours = 0` (A's queue head is unrelated to incoming clientIDs).
+- `nUnconfirmed = 0` (A's local_A was already acked at v=6 in a prior
+  receive).
+
+Wait — actually, A's request for `local_A` returns:
+- *its own ack* `{ steps: [local_A], clientIDs: [A] }` arrives first
+  (v=5→6).
+- Then `[local_B, local_C]` arrives at v=6→8.
+
+Each is a separate `receiveTransaction`. After both, A's doc is
+`"foo baz!"` with bold over 1..8. No rebase needed.
+
+#### Phase 2': B receives `[local_A]` (clientIDs `[A]`) at v=5→6
+
+- `ours = 0`, `nUnconfirmed = 1` (local_B in queue).
+- `rebaseSteps([local_B], [local_A], tr)`:
+  - Phase 1: `tr.step(invert(local_B))` → doc back to `"foo bar"`.
+  - Phase 2: `tr.step(local_A)` → doc `"foo bar!"`.
+  - Phase 3: `mapped = local_B.map(slice(1))` → `replace(4,7,"baz")`
+    is unaffected by A's append at 8 → `mapped = local_B`.
+  - `tr.maybeStep(mapped)` → doc `"foo baz!"`.
+  - `setMirror(0, 2)`.
+- `tr` carries `meta: rebased=1, addToHistory=false, collabKey={v=6,
+  unconfirmed=[mapped(local_B)]}`.
+
+B's doc now `"foo baz!"`, version 6, unconfirmed `[mapped(local_B)]`.
+B sends `{version:6, steps:[mapped(local_B)], clientID:B}`.
+
+But authority is already at v=8. Authority responds with the gap:
+`{steps: [local_B (already-applied), local_C], clientIDs: [B, C]}`.
+
+Wait — actually authority responded earlier when B's POST arrived
+*after* A's commit but *before* C's commit. It would have replied with
+just `[local_A]`. Then B retries at v=6 and fails because authority
+is now at v=7 (after B was applied). Authority replies with **gap from
+v=6 to v=8**: `[local_B, local_C]`. Wait — but `local_B` is B's own;
+authority's log records it at v=7 with clientID `B`. So the gap reply
+is `{steps: [local_B, local_C], clientIDs: [B, C]}` at version `8`.
+
+#### Phase 2'': B receives `[local_B, local_C]` (clientIDs `[B, C]`)
+
+- `ours = 1` (clientID[0] == B). Pop unconfirmed[0], drop steps[0].
+- Remaining: `steps = [local_C]`, `clientIDs = [C]`,
+  `unconfirmed = []`.
+- `nUnconfirmed = 0`, so just `tr.step(local_C)`.
+- B's doc `"foo baz!"` + bold 1..8 = `"foo baz!"` with bold.
+
+B is now at v=8, unconfirmed `[]`. ✓
+
+#### Phase 2''': C receives `[local_A]` then `[local_B]`
+
+When C is at v=5 and receives `[local_A]`:
+- `nUnconfirmed=1`, rebase `local_C` over `local_A`:
+  - Phase 1: undo local_C (remove bold).
+  - Phase 2: apply local_A.
+  - Phase 3: `mapped = local_C.map(slice(1))` → bold range was 1..8,
+    A's insertion at 8 with default right-bias keeps end at 8 (or
+    extends to 9, depending on AddMarkStep's mapping bias — it's
+    9 because AddMarkStep treats end inclusively). `mapped = bold
+    1..9`.
+- C's doc `"foo bar!"` with bold 1..9.
+
+When C is at v=6 and receives `[local_B]`:
+- `nUnconfirmed=1` (mapped local_C). Rebase over local_B.
+  - Phase 1: undo mapped local_C → doc `"foo bar!"`.
+  - Phase 2: apply local_B → doc `"foo baz!"`.
+  - Phase 3: `mapped' = mapped.map(slice(1))` → bold 1..9 maps to
+    bold 1..9 (B replaced 4..7 with same length, so end position
+    unchanged).
+- C now at v=7, unconfirmed `[mapped' local_C]`.
+
+C sends `mapped' local_C` at v=7. Authority receives, but its log
+already has C's bold at v=8 (which was `local_C` *un-rebased*). HERE'S
+THE TRICKY BIT: the authority *can't* recognize that the rebased
+mapped' local_C and the original local_C (already in the log) are
+"the same edit" — they're different Step JSONs.
+
+In practice, the authority would have committed C's *original* steps
+when they arrived at version 5; if they arrived after A and B, the
+authority would've rejected them with a gap from 5→7. C would then
+rebase as above. The authority log only contains the *final* rebased
+form.
+
+#### Convergence
+
+All three at version 8, doc `"foo baz!"` with bold 1..9 (or 1..8
+depending on Step bias). The three operations commute under PM's
+StepMap because:
+
+- Insertions and replacements at non-overlapping ranges commute
+  trivially.
+- Mark addition over the full range commutes with both, *as long as
+  AddMarkStep.map handles end-position bias consistently* (it does;
+  see file 05).
+
+The 3-client case works because **each pair-wise receive** is an
+independent rebase against an authoritative serialization. Conflicts
+that would be hard in classical OT (3-way merging with concurrent
+edits at the same position) reduce to "rebase against the linear log
+in the order the authority chose".
+
+### 6.13 Step-fork attack detection on the server
+
+A malicious client could:
+
+1. **Lie about version**: claim `version: 42` when it's really at 30,
+    hoping to skip rebasing 12 remote steps and overwrite content.
+2. **Replay**: re-POST steps from old version with new clientID.
+3. **Forged steps**: craft a Step JSON that, when applied to authority's
+    doc, produces a doc the client never agreed to (e.g. inserting at
+    a position they couldn't have known about).
+
+Authority defenses:
+
+- **Version match required for accept**: authority MUST refuse any
+  POST whose `version` ≠ its current version. This is the single most
+  important check (`collab.ts` example server: see file 06 / file 21
+  cross-refs and the `prosemirror-website` collab example).
+- **Apply server-side**: authority MUST execute every incoming step
+  via `Step.apply(currentDoc)` and only accept on success. A forged
+  step that would mutate disallowed structure throws and is rejected.
+  This eliminates "forge a step that the schema rejects".
+- **ClientID auth**: clientID in the POST is *user-asserted*. The
+  authority should **also** authenticate the connection (cookie,
+  bearer token) and verify the asserted clientID matches the
+  authenticated user. Otherwise client A can claim to be B.
+- **Rate / size limits**: per-client step rate, per-step size. PM
+  itself has no such limits.
+- **Version-skew detection**: if a client repeatedly POSTs at a
+  *higher* version than the authority's current version (claiming
+  edits-from-the-future), drop the connection. This shouldn't happen
+  legitimately.
+- **Step-shape sanity**: reject step JSONs whose `from`/`to` exceed
+  `currentDoc.content.size`. PM's `Step.fromJSON` doesn't validate
+  positions — it only validates structure.
+
+The attacks **PM cannot defend against** at this layer:
+- A client with valid auth that simply makes a destructive valid edit
+  (e.g. delete the whole doc). This is an authorization problem,
+  solved with per-range or per-document permissions outside PM.
+- Replay of a *valid* step the user already submitted: the version-
+  match check filters these unless the attacker also predicts the
+  current version. For idempotency, authority can dedup by
+  `(clientID, version)` pairs.
+
+### 6.14 Selective undo (undo-just-my-change) in collab
+
+PM's `undo` command pops the **most recent event** from `done`, period.
+In collab, that event is *your* most recent local edit (because remote
+edits go into history as map-only items via `addMaps`, not as recorded
+events — `history.ts:121–124, 294–296`).
+
+So **selective undo "just my changes" is the default**. There's no
+need to filter by clientID; remote changes never appear in your
+`done` stack as undoable events.
+
+Caveat: if your most recent local edit was at position X and a remote
+user has since deleted the content at X, the inverted step from your
+edit may fail to apply post-rebase (`maybeStep` returns null,
+`history.ts:53–56`). In that case `popEvent` finds an effectively-
+empty event and `undo` returns `false`. The next `undo` call pops the
+*previous* local event.
+
+For "undo a specific local edit, not necessarily the most recent",
+PM does **not** support this directly. Patterns:
+
+- **Tagged events**: stamp each local tr with a meta key
+  `tr.setMeta("editTag", uniqueId)`. To undo a specific edit, walk
+  history... except history items don't expose meta. You'd need to
+  shadow-record (similar to §6.11) and replay the inverted step
+  manually, then dispatch with `addToHistory: false`.
+- **Linear inverse**: dispatch `tr.step(originalStep.invert(originalDoc))`
+  with the cached inversion. Mark `addToHistory: false` so it doesn't
+  show up as a regular undo. This is what comment-system "delete
+  edit" features typically do.
+
+### 6.15 Failure mode — step `from`-pos no longer exists post-rebase
+
+`tr.maybeStep(mapped)` (`collab.ts:24`) returns a result object:
+
+```ts
+{ failed?: string, ...transform fields }
+```
+
+If `failed`, the transform is unchanged (the step was not appended).
+`rebaseSteps` checks `!result.failed` (line 24); if failed, the step
+is **dropped** — no exception, no warning. Specifically:
+
+- **Position deleted**: the original step inserted at position 50, but
+  remote steps deleted [45, 60]. `mapped.from` = `mapped.to` = the
+  collapsed deletion point; the insert applies *there* (technically
+  succeeds). For `replace` steps over a now-deleted range, `mapped`
+  becomes `replace(point, point, content)` — also applies as an
+  insert.
+- **Range invalid**: an `addMark(50, 100, ...)` step where positions
+  50 and 100 ended up in different parents post-rebase. `Step.map`
+  returns `null` *or* `Step.apply` fails. Dropped.
+- **Schema invalidation**: a `setBlockType(node, paragraph)` step
+  where the parent post-rebase no longer permits paragraph as that
+  child. `apply` fails. Dropped.
+
+When dropped, `Branch.rebased` (`history.ts:138`) loses the mirror,
+so the corresponding history item is removed, decrementing
+`eventCount` if the dropped item carried a selection bookmark
+(`history.ts:138`).
+
+User-visible consequence: **the local edit silently disappears** as
+if it had been transformed away. There's no signal at the API
+boundary. If you need to detect this, wrap `receiveTransaction` and
+compare `unconfirmed.length` before vs after the meta payload:
+
+```ts
+const before = unconfirmedBefore.length
+const tr = receiveTransaction(state, steps, clientIDs)
+const after = (tr.getMeta(collabKey) as any).unconfirmed.length
+const dropped = (before - sames(steps, clientIDs)) - after
+if (dropped > 0) console.warn(`${dropped} local steps dropped on rebase`)
+```
+
+In practice, dropped-on-rebase is rare for typical text edits but
+common for structural edits (lift, wrap, setBlockType) under
+concurrent edits.
+
+### 6.16 Schema migration on the wire
+
+PM steps are tied to schema by:
+
+- Node/mark **type names** (strings) referenced in `nodeFromJSON`,
+  `Mark.fromJSON`, and `Step.fromJSON`.
+- **Required attributes** — a `NodeType` with a non-defaulted attr
+  fails to construct from JSON missing it.
+- **Content expressions** — a step that produces content valid in v1's
+  schema may violate v2's content match.
+
+Thus collab does **not** handle schema migration on the wire. If the
+authority's schema changes:
+
+1. **Old clients send step JSON valid for v1**, the authority parses
+   it against v2 — `Node.fromJSON` may throw, or the step may apply
+   but produce a doc that *next* steps reject.
+2. **Old clients receive step JSON valid for v2** (unknown node type,
+   new required attrs) — the client's `Step.fromJSON` throws.
+
+Migration patterns used in production (none built-in to PM):
+
+- **Frozen schema versions**: each doc records its `schemaVersion`.
+  Authority refuses connections for clients on a different version.
+  Migration is a separate offline operation: read all steps, replay
+  through a v1 schema to build the doc, transform the doc with a
+  custom function to v2 shape, then snapshot at v2 with no preserved
+  history.
+- **Backward-compatible additions only**: never rename or remove a
+  node/mark type; never add a required attribute (always default).
+  Removed types become "frozen" types still parseable by old clients.
+- **Reverse-compatibility-shim layer**: at the wire boundary,
+  serialize the doc through `doc.toJSON()` then through a shim that
+  rewrites unknown attrs / adds defaults / collapses removed types.
+  The shim runs both directions and is keyed on
+  `(stepJsonSchemaVersion, localSchemaVersion)`.
+
+Realistically: lock your schema before going live with collab. Treat
+schema changes as breaking and require all clients to reload before
+any v2 step lands on the authority.
+
+### 6.17 Authority server example (Node + Express)
+
+A minimal in-memory authority for the official `prosemirror-collab`
+client. Single-doc, single-process; production needs a database and
+locking but the protocol is the same:
+
+```ts
+// server.ts
+import express from "express"
+import { Schema, Node } from "prosemirror-model"
+import { Step } from "prosemirror-transform"
+import { schema } from "./schema"            // your shared schema
+
+const app = express()
+app.use(express.json({ limit: "1mb" }))
+
+type StoredStep = { stepJson: any, clientID: string }
+
+class Authority {
+  doc: Node
+  steps: StoredStep[] = []
+  waiters: Array<(steps: StoredStep[]) => void> = []
+
+  constructor(initialDoc: Node) { this.doc = initialDoc }
+
+  get version() { return this.steps.length }
+
+  /** POST /events */
+  receive(version: number, stepJsons: any[], clientID: string) {
+    if (version != this.version) {
+      // Conflict: caller is behind. They will GET to catch up, then retry.
+      return { status: 409, body: this.gapFrom(version) }
+    }
+    let doc = this.doc
+    const newStored: StoredStep[] = []
+    for (const j of stepJsons) {
+      const step = Step.fromJSON(schema, j)
+      const result = step.apply(doc)
+      if (result.failed) return { status: 400, body: result.failed }
+      doc = result.doc!
+      newStored.push({ stepJson: j, clientID })
+    }
+    this.doc = doc
+    this.steps.push(...newStored)
+    this.flushWaiters()
+    return { status: 200, body: { version: this.version } }
+  }
+
+  /** GET /events?version=N (long-poll) */
+  async events(fromVersion: number, signal?: AbortSignal): Promise<StoredStep[]> {
+    if (fromVersion < this.version) return this.gapFrom(fromVersion)
+    return new Promise(resolve => {
+      const onSteps = (steps: StoredStep[]) => resolve(steps)
+      this.waiters.push(onSteps)
+      signal?.addEventListener("abort", () => {
+        this.waiters = this.waiters.filter(w => w !== onSteps)
+        resolve([])
+      })
+    })
+  }
+
+  private gapFrom(version: number): StoredStep[] {
+    return this.steps.slice(version)
+  }
+  private flushWaiters() {
+    const ws = this.waiters; this.waiters = []
+    for (const w of ws) w(this.gapFrom(this.version - 1))
+  }
+
+  /** GET /state — snapshot for late joiners */
+  snapshot() {
+    return { version: this.version, doc: this.doc.toJSON() }
+  }
+}
+
+const authority = new Authority(schema.node("doc", null, [schema.node("paragraph")]))
+
+app.get("/state", (req, res) => res.json(authority.snapshot()))
+
+app.get("/events", async (req, res) => {
+  const v = parseInt(req.query.version as string, 10) || 0
+  const ac = new AbortController()
+  req.on("close", () => ac.abort())
+  const steps = await authority.events(v, ac.signal)
+  res.json({
+    version: v + steps.length,
+    steps:     steps.map(s => s.stepJson),
+    clientIDs: steps.map(s => s.clientID),
+  })
+})
+
+app.post("/events", (req, res) => {
+  const { version, steps, clientID } = req.body
+  const r = authority.receive(version, steps, clientID)
+  res.status(r.status).json(r.body)
+})
+
+app.listen(3000)
+```
+
+Properties this implements:
+
+- **Linear log**: `steps` is append-only. Every accepted POST appends
+  N entries; version is the array length.
+- **Apply server-side**: every step is `Step.fromJSON(schema, json)`
+  then `step.apply(doc)`. A failure is a 400, not silent corruption.
+- **Long-poll for events**: GET blocks until new steps exist past
+  `fromVersion`, using a waiter list. AbortSignal cleans up if the
+  client disconnects.
+- **Late-joiner snapshot**: GET /state returns the live doc + version.
+
+**Production gaps** (intentionally omitted): persistence (steps in
+Postgres/Redis), per-doc routing (multiple docs), authentication,
+rate-limiting, dedup of `(clientID, version)`, schema-version
+matching, awareness/comments envelopes (§6.5/6.6).
+
+### 6.18 WebSocket / SSE / CRDT integration example
+
+The HTTP long-poll above is the simplest transport but high-latency.
+A WebSocket variant inverts the polling:
+
+```ts
+// client.ts (sketch)
+const ws = new WebSocket("ws://localhost:3000")
+
+ws.onmessage = (ev) => {
+  const msg = JSON.parse(ev.data)
+  if (msg.type == "steps") {
+    const stepObjs = msg.steps.map((j: any) => Step.fromJSON(schema, j))
+    view.dispatch(receiveTransaction(view.state, stepObjs, msg.clientIDs))
+  } else if (msg.type == "ack") {
+    // Pure ack — receiveTransaction with empty steps still progresses version.
+    view.dispatch(receiveTransaction(view.state, [], []))
+  } else if (msg.type == "awareness") {
+    view.dispatch(view.state.tr.setMeta(awarenessKey, { peers: msg.peers }))
+  }
+}
+
+// Send local edits whenever there are unconfirmed.
+view.someProp = "..."
+function send() {
+  const sendable = sendableSteps(view.state)
+  if (!sendable) return
+  ws.send(JSON.stringify({
+    type: "steps",
+    version: sendable.version,
+    steps: sendable.steps.map(s => s.toJSON()),
+    clientID: sendable.clientID,
+  }))
+}
+```
+
+Server side, broadcast on accept:
+
+```ts
+// In Authority.receive, after accepting:
+broadcast({ type: "steps", steps: stepJsons, clientIDs: [clientID, ...] })
+```
+
+For **SSE**, the server side becomes a `text/event-stream` response;
+the client uses `EventSource`. Same JSON shapes. SSE is one-way, so
+the client still POSTs to send.
+
+For **CRDT integration** (Yjs / Automerge under PM):
+
+```ts
+import * as Y from "yjs"
+import { ySyncPlugin, yCursorPlugin, yUndoPlugin }
+                                    from "y-prosemirror"
+
+const ydoc = new Y.Doc()
+const yXmlFragment = ydoc.getXmlFragment("prosemirror")
+
+const state = EditorState.create({
+  schema,
+  plugins: [
+    ySyncPlugin(yXmlFragment),       // replaces prosemirror-collab
+    yCursorPlugin(awareness),         // awareness from y-protocols
+    yUndoPlugin(),                    // replaces prosemirror-history
+  ]
+})
+```
+
+When using y-prosemirror:
+
+- **Don't include `prosemirror-collab` or `prosemirror-history`** in
+  the plugin list — they'd conflict. yUndoPlugin is per-client
+  (origin-aware undo) and uses Yjs's built-in undo manager.
+- The `Y.Doc` is the source of truth; PM's doc is regenerated from it
+  on every sync. Bidirectional shim handles the conversion.
+- Awareness is a Yjs protocol concept (`y-protocols/awareness`); the
+  awareness plugin renders peer cursors via decorations the same way
+  §6.5 describes.
+
+**Inconsistency note (§1.13 fix)**: in §1.13 the line "`historyKey,
+closeHistoryKey, public surface`" lists `closeHistoryKey` as a public
+API name. It is **not** — `closeHistoryKey` is a private `PluginKey`
+(`history.ts:371`) and the public function is `closeHistory(tr)`
+(`history.ts:366`). The public surface is:
+
+```ts
+export function history(config?): Plugin
+export function closeHistory(tr: Transaction): Transaction
+export const undo, redo, undoNoScroll, redoNoScroll
+export function undoDepth(state): number
+export function redoDepth(state): number
+export function isHistoryTransaction(tr): boolean
+// Plus the historyKey PluginKey is exposed via type-checking only.
+// closeHistoryKey is internal.
+```
+
+Don't reference `closeHistoryKey` from application code — use
+`closeHistory(tr)` to set the meta, and the plugin will read it via
+its own private key.

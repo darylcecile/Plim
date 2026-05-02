@@ -641,10 +641,13 @@ CSS `direction`.
 
 ---
 
-## 5. `withinTextNode` — not present
+## 5. `withinTextNode` — historical reference (API not in current source)
 
-`grep "withinTextNode"` across `prosemirror-view/src/` returns no
-matches. The closest analogues are:
+The name `withinTextNode` does **not appear in the current
+`prosemirror-view` source**. Older PM forks and at least one outside
+spec referred to a helper of that name; if you encounter it in
+references, it maps to one of the following modern helpers depending
+on context:
 
 - `findOffsetInText` (`domcoords.ts:185-200`): char-by-char rect search
   inside a text node.
@@ -883,3 +886,457 @@ calls (`index.ts:339`) so focusing the editor never moves the page.
 | `endOfTextblock` callers         | `capturekeys.ts:29, 253, 271`, `index.ts:432`     |
 | `posAtCoords` callers            | `input.ts:290, 381, 687, 730`                     |
 | RTL detection sites              | `domcoords.ts:344, 468`, `capturekeys.ts:223-242` |
+
+---
+
+## 9. `scrollPosIntoView` vs `scrollRectIntoView`
+
+Two scroll primitives exist:
+
+| Function                                           | Input                  | Caller(s)                                        | Behaviour |
+|----------------------------------------------------|------------------------|--------------------------------------------------|-----------|
+| `scrollRectIntoView(view, rect, startDOM)`         | a `Rect` in client coords + a starting DOM node | `index.ts` (`updateState` `scrollIntoView`/`reset` paths) | Walks ancestors from `startDOM` upward, scrolling each scroll container the minimum amount required to bring `rect` inside `bounding ± scrollMargin`. Uses `view.someProp("scrollThreshold")` to decide when scrolling is necessary at all. |
+| `scrollPosIntoView(view, pos, side?)`              | a doc `pos` (and an optional `side`) | not exported; conceptually used by `scrollToSelection` (index.ts) — it computes the rect via `coordsAtPos` and forwards to `scrollRectIntoView` | The position-based wrapper is what file 21 §6 references. In current source it is inlined inside `scrollToSelection`. |
+
+The split exists because some callers (e.g., a plugin scrolling a
+specific decoration into view) already have a rect, while others have
+only a position — having both avoids re-resolving the position twice.
+
+### `scrollMargin` and `scrollThreshold` per-side object form
+
+Both props accept either `number` or `{ top, right, bottom, left }`
+(domcoords.ts:18 `getSide`, called from each side independently):
+
+```ts
+new EditorView(node, {
+  state,
+  scrollMargin: { top: 80, right: 0, bottom: 80, left: 0 },
+  // Don't auto-scroll until selection is within 5px of the viewport edge.
+  scrollThreshold: 5,
+})
+```
+
+Per-side margins are essential for editors with sticky toolbars: a flat
+`scrollMargin: 80` leaves 80 px of *horizontal* slack too, which can
+push the caret off-screen on narrow viewports.
+
+---
+
+## 10. `view.posAtDOM(node, offset, bias)` and `view.domAtPos(pos, side)`
+
+The lower-level companions to `posAtCoords` / `coordsAtPos`. Both are
+documented public API (index.ts).
+
+### `posAtDOM(node, offset, bias = -1) → number`
+
+Returns the document position corresponding to a DOM node + offset.
+Used internally by `selectionFromDOM` (selection.ts:21) to convert the
+browser's native `Selection` (which lives in DOM coordinates) into a
+PM `TextSelection`. The `bias` parameter (`-1` left, `1` right) breaks
+ties when the DOM offset is at a node boundary that maps to two
+adjacent positions.
+
+```ts
+// External usage example: respond to a click on a custom widget
+const pos = view.posAtDOM(widgetEl, 0, 1)
+view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, pos)))
+```
+
+Throws if the node is not inside `view.dom`. For an element child of a
+NodeView whose internal DOM is not part of `view.docView`,
+`posAtDOM` may return the *containing* atom's position rather than a
+position inside it.
+
+### `domAtPos(pos, side = 0) → { node, offset }`
+
+The exact inverse: given a doc position, return the DOM node and
+offset to place the browser's selection at. Used by `selectionToDOM`
+(selection.ts) to push PM's selection back into the DOM. The `side`
+parameter biases between adjacent nodes when the position is at a
+boundary.
+
+The pairing invariant is:
+
+```ts
+const { node, offset } = view.domAtPos(pos, 0)
+const back = view.posAtDOM(node, offset, 0)
+// back === pos for any pos inside an inline run
+```
+
+It does **not** round-trip exactly inside atoms (the DOM has no
+position "inside" an atom), nor inside widget decorations.
+
+Citing callers:
+
+- `selection.ts:21` `selectionFromDOM` — DOM mutation → PM selection.
+- `selection.ts:104-130` `selectionToDOM` — PM selection → DOM range.
+- `viewdesc.ts:1166` (within `setSelection` of view descriptors).
+
+---
+
+## 11. `coordsAtPos(pos, side)` callers — built-in commands and decorations
+
+Used by:
+
+- `endOfTextblockVertical` (`domcoords.ts:450`) — see §4.2.
+- `posFromCaret` (`domcoords.ts:399-453`) — verifying a candidate node
+  via block-rect walk.
+- `scrollToSelection` (index.ts) — to derive the rect for
+  `scrollRectIntoView`.
+- *External*: floating-toolbar implementations, autosuggest pop-ups,
+  collaboration cursor avatars. None of these are inside `prosemirror-view`,
+  but they are the primary public-API consumers.
+
+### Worked example: anchoring a floating toolbar
+
+```ts
+function repositionToolbar(view: EditorView, toolbar: HTMLElement) {
+  const sel = view.state.selection
+  if (sel.empty) { toolbar.style.display = "none"; return }
+  const fromRect = view.coordsAtPos(sel.from, 1)
+  const toRect = view.coordsAtPos(sel.to, -1)
+  const top = Math.min(fromRect.top, toRect.top)
+  const left = (fromRect.left + toRect.right) / 2
+  toolbar.style.display = ""
+  toolbar.style.top = `${top - toolbar.offsetHeight - 8}px`
+  toolbar.style.left = `${left - toolbar.offsetWidth / 2}px`
+}
+```
+
+Two failure modes you must handle:
+
+1. **`coordsAtPos` returns a 0-width rect at line start.** When `pos`
+   resolves to a position whose `domFromPos` lands on a textblock with
+   no preceding text run (start of line, or after a hard break),
+   `Range.getClientRects()` returns `[]`, and `singleRect`
+   (domcoords.ts:341) falls back to `target.getBoundingClientRect()` —
+   which for an empty range is `{ top: y, bottom: y, left: x, right: x }`
+   (zero width, zero height in some browsers). Defend by using the
+   max/min of `fromRect`/`toRect` and tolerating equal-coords.
+2. **Transformed ancestors zero out width.** A `transform: scale(0)`
+   ancestor produces a zero-area rect even when the target has content.
+   `clientRect` (domcoords.ts:22-29) attempts to compensate for `scale`,
+   but only when `node.offsetWidth` is non-zero — collapsed scales still
+   defeat it.
+
+### Hit-testing decorations
+
+`view.posAtCoords(coords)` returns the *document position* — it does
+not tell you which decoration was hit. To hit-test a decoration:
+
+```ts
+function decorationAt(view: EditorView, coords: { left: number, top: number }) {
+  const target = document.elementFromPoint(coords.left, coords.top) as HTMLElement | null
+  if (!target || !view.dom.contains(target)) return null
+  // Inline decorations render as <span> with the spec's nodeName.
+  // Widget decorations render as the widget element itself.
+  // Walk up to find the nearest element with `pmViewDesc`.
+  const desc = view.docView.nearestDesc(target, true)
+  if (!desc) return null
+  // Match by class/data-attr you set in your Decoration.inline/widget options.
+  if (target.dataset.commentId) return { kind: "comment", id: target.dataset.commentId }
+  return null
+}
+```
+
+PM does not maintain a reverse lookup from DOM element → Decoration
+spec, because decorations are intentionally cheap and may be re-created
+on every transaction. The convention is: encode whatever id you need
+to recover into the `attrs`/`class` of the decoration spec, then read
+it back from the DOM at hit-test time.
+
+### Caching `coordsAtPos` results
+
+There is no built-in cache. The result depends on:
+
+- The current state (positions shift on every transaction).
+- The current layout (any reflow invalidates rects).
+- Scroll state of every ancestor.
+
+A safe cache key would have to include `view.state` identity, the
+viewport scroll positions of every ancestor, and the
+`devicePixelRatio` — by which point the cache is more expensive than
+recomputing. **Don't cache.** If you're calling it in a loop, batch
+into a single layout read (no DOM writes between calls) so the
+browser's internal layout cache amortises the cost.
+
+### Recovering from `posAtCoords` returning `null`
+
+```ts
+const hit = view.posAtCoords({ left: e.clientX, top: e.clientY })
+if (!hit) {
+  // The pointer is outside view.dom's bounding rect, OR caretFromPoint
+  // returned a node that is not contained by view.dom (e.g., a popup,
+  // a floating widget rendered outside the editor).
+  // Fallbacks, in order of preference:
+  //   1. Treat as "no-op" — best for context menus.
+  //   2. Snap to the nearest edge:
+  const box = view.dom.getBoundingClientRect()
+  const x = clamp(e.clientX, box.left + 1, box.right - 1)
+  const y = clamp(e.clientY, box.top + 1, box.bottom - 1)
+  const retry = view.posAtCoords({ left: x, top: y })
+  if (retry) handle(retry.pos)
+  //   3. Fall back to the current selection's anchor.
+}
+```
+
+`posAtCoords` failure also occurs inside *Shadow DOM* boundaries (see
+§13).
+
+---
+
+## 12. `endOfTextblock` — sequence diagram of the side-effecting probe
+
+`endOfTextblockHorizontal` (domcoords.ts:470-502) is **the most
+fragile public API in `prosemirror-view`**. It works by mutating the
+browser's native selection, observing where it lands, then restoring.
+
+```
+endOfTextblockHorizontal(view, state, dir)
+  │
+  ├── if (!maybeRTL.test(parent.textContent) || !sel.modify)
+  │     → return atStart / atEnd  (cheap, no probe)
+  │
+  └── withFlushedState(view, state, () => {
+         │
+         │ Capture state:
+         │   oldNode, oldOff      = focus
+         │   anchorNode, anchorOff = anchor
+         │   oldBidiLevel         = (sel as any).caretBidiLevel  [Firefox]
+         │
+         │ MUTATE:
+         │   sel.modify("move", dir, "character")
+         │     ↳ browser's native bidi-aware caret movement
+         │
+         │ Read result:
+         │   newNode, newOff = new focus
+         │   parentDOM       = textblock's contentDOM
+         │
+         │ Decide:
+         │   result = newNode is OUTSIDE parentDOM
+         │         OR (newNode == oldNode && newOff == oldOff)  ← "didn't move"
+         │
+         │ RESTORE (try/catch — Selection API throws on detached nodes):
+         │   sel.collapse(anchorNode, anchorOff)
+         │   if (oldNode && (oldNode != anchorNode || oldOff != anchorOff))
+         │     sel.extend(oldNode, oldOff)
+         │   if (oldBidiLevel != null) sel.caretBidiLevel = oldBidiLevel
+         │
+         └── return result
+       })
+```
+
+Notes:
+
+- `withFlushedState` (defined elsewhere in domcoords.ts) ensures any
+  pending DOM writes are committed before the probe runs.
+- The native `sel.modify` is **synchronous** but triggers a layout
+  flush inside the browser — this is why endOfTextblock is the single
+  most expensive call in PM keyboard handling. It is cached
+  (`cachedState`/`cachedDir`/`cachedResult` at domcoords.ts:506-510)
+  per (state, dir), so repeated arrow keys at the same selection
+  amortise to one probe.
+- The DOM observer **must** be paused while the probe runs (otherwise
+  the selectionchange events would feed back into PM as user actions).
+  This is the responsibility of `withFlushedState`'s callers — see
+  file 15 §3.
+- On Edge legacy, `sel.modify` doesn't exist; the function falls back
+  to the "primitive approach" that just compares `parentOffset` to
+  `parent.content.size`.
+- Restoration of `caretBidiLevel` is Firefox-only — when collapsing a
+  selection that crossed a bidi run, Firefox normalises the bidi level
+  to the start side. Saving and restoring it preserves caret visual
+  position on subsequent arrow presses.
+
+---
+
+## 13. Shadow DOM hit testing
+
+`caretFromPoint` (`dom.ts:1`) is `caretPositionFromPoint` on Firefox,
+`caretRangeFromPoint` on Chrome/Safari. Both have **inconsistent
+Shadow DOM behaviour** that affects PM editors hosted inside web
+components:
+
+| Browser          | `caretFromPoint` from outside shadow root, point inside       | Behaviour                                                                     |
+|------------------|--------------------------------------------------------------|-------------------------------------------------------------------------------|
+| Chrome ≥ 89      | shadow boundary is **opaque** — returns the host element     | PM's `posAtCoords` resolves the host, then `nearestDesc` walks up to `view.dom` and resolves to the editor's outer position. Click-through fails. |
+| Chrome ≥ 105 (`caretFromPoint` accepting `shadowRoot`) | Pass `{shadowRoots: [root]}` to pierce | Not used by PM; PM's call site has no `shadowRoots` option. |
+| Safari ≥ 16.4    | accepts `{shadowRoots: [...]}` like Chrome 105+              | Same — PM doesn't use it.                                                     |
+| Firefox          | shadow boundary is opaque, returns host                       | Same as Chrome.                                                               |
+
+PM's `view.root` is set to the closest shadow root containing the
+editor (or `document` if none), and `posAtCoords` calls
+`view.root.elementFromPoint` (domcoords.ts:280) — this *does* work
+across shadow roots when `view.root === shadowRoot`.
+
+What this means for you when hosting PM in a web component:
+
+1. **Pass the shadow root as the editor's mount point**, not a child
+   of it, and PM will set `view.root = shadowRoot` correctly via
+   `getDocument(view.dom)`.
+2. **Click events that originate outside the shadow root** (bubbled
+   from a parent) will see `caretFromPoint` return the host element,
+   not anything inside the editor. PM falls back to
+   `elementFromPoint` (domcoords.ts:280-288), which uses `view.root`'s
+   `elementFromPoint` if available — that's the shadow-aware path.
+3. **Cross-shadow drag-and-drop**: `event.clientX/Y` are
+   shadow-host-relative, but `caretFromPoint` is called against
+   `view.dom.ownerDocument`, which is the outer Document. The two
+   coordinate spaces are the same (clientX/Y are viewport-relative
+   regardless of host), so this works.
+4. **`window.getSelection()` does not return shadow-root selections.**
+   PM uses `view.domSelectionRange()` (selection.ts) which walks the
+   shadow root tree; for hit-testing decorations, use
+   `shadowRoot.getSelection()` (Chrome) or
+   `view.root.getSelection()` (works in all current shadow-aware browsers).
+
+There is a `dom.ts` workaround (`isCollapsed inappropriately returns
+true in shadow dom`, `dom.ts:124`) that PM applies when reading
+selection state from shadow roots; it is invoked unconditionally and
+covers the most common Chrome bug, but it does not extend to
+`caretFromPoint`.
+
+---
+
+## 14. Subpixel rounding, zoom, devicePixelRatio
+
+`getBoundingClientRect` returns subpixel `DOMRect` values
+(IEEE-754 doubles). Issues you'll hit:
+
+- **`transform: scale(0.5)` ancestor.** PM's `clientRect` (domcoords.ts:22)
+  computes `scaleX = rect.width / node.offsetWidth`, which **rounds
+  away** any sub-1% scale because `offsetWidth` is integer-rounded.
+  For very small or very large scales, the rect is mis-scaled.
+- **Browser zoom (Ctrl+/Ctrl-).** Modern browsers report zoomed coords
+  as if the page were at 100%; this works correctly for PM.
+  Firefox <91 has known `Range.getClientRects()` rounding errors at
+  non-integer zooms — `coordsAtPos` returns rects 1 px off at certain
+  fractional zoom factors.
+- **`devicePixelRatio` ≠ 1.** Retina/HiDPI generally fine; what breaks
+  is when ancestors set `transform: matrix(...)` to compensate (some
+  full-screen presentation tools do this), causing `scale` detection
+  to mis-fire.
+- **`elementFromPoint` snapping.** Browsers round `(x, y)` to the
+  nearest device-pixel before testing. At sub-pixel boundaries between
+  two adjacent inline runs the result can be either; PM masks this by
+  using both `caretFromPoint` and `elementFromPoint` and crosschecking
+  in `posAtCoords` (domcoords.ts:280-288).
+
+### CSS `contain: layout` / `content-visibility: auto`
+
+Both interact poorly with PM's coordinate logic:
+
+- **`contain: layout`** isolates the element's layout from the rest
+  of the page. `getBoundingClientRect` on descendants still works,
+  but ancestor-walking to find a scroll container (in
+  `scrollRectIntoView`, domcoords.ts:35) stops short — the contained
+  ancestor returns a position-relative box that may not actually be a
+  scroll parent. Typically benign; symptom is that
+  `scrollIntoView` doesn't reach as far as expected.
+- **`content-visibility: auto`** skips layout for offscreen subtrees.
+  A descendant of a `content-visibility: auto` block has a
+  *meaningless* bounding rect (zero or stale) when offscreen. PM's
+  `coordsAtPos` for a position inside such a subtree returns garbage.
+  Workaround for virtualised editors: ensure `content-visibility` is
+  applied **outside** the editor's `view.dom`, never inside.
+
+---
+
+## 15. RTL with an Arabic example
+
+The bidi probes in §6 detect RTL text by Unicode range. Worked
+example with `paragraph` containing `Hello مرحبا world`:
+
+```
+Logical order  (memory):  H e l l o   م ر ح ب ا   w o r l d
+                          ─────────  ─────────────  ─────────
+                          0  1  ...   5  6  ...      11 ...
+Visual order   (screen):  H e l l o   ا ب ح ر م   w o r l d
+                          (LTR)       (RTL run)     (LTR)
+```
+
+A click between visual `م` and `w` (visually adjacent) lands
+**logically between offset 10 (last char of Arabic run) and 11
+(start of `w`)**. `caretFromPoint` returns `node = textNode, offset = 10`
+in Chrome and `offset = 11` in Firefox — the disagreement on which
+side of the bidi boundary to bias toward.
+
+In `coordsAtPos(pos = 5, side = 1)` ("between space and Arabic m"):
+
+1. `domFromPos` returns `(textNode, 5)`.
+2. `BIDI.test(text)` is true (Arabic chars in range).
+3. `singleRect(textRange(node, 5, 5), 1)` — empty range at offset 5.
+4. The browser returns the rect of the *visual* caret position
+   between space and م — which on the screen is at the **right edge**
+   of `Hello` (because the next visual character is the rightmost
+   character of the Arabic run).
+
+For the LTR-only fallback (no bidi chars), `singleRect` would have
+returned the rect of an *adjacent character*, which would have been
+on the left side of `Hello` — wrong for bidi. This is why the BIDI
+gate exists.
+
+`endOfTextblockHorizontal` for `dir = "right"` from offset 5: the
+`Selection.modify("move", "right", "character")` call moves the
+caret *visually* right one character — into the Arabic run, which in
+*logical* order is moving forward to offset 10 (the last char of the
+Arabic run, because right-of-space in RTL is the last char of the
+RTL run). Result: PM's `parentOffset` is now 10 ≠ end (parent has
+more content), so `endOfTextblock` returns `false` correctly.
+
+### CSS `direction: rtl` vs Unicode bidi
+
+PM's RTL detection is based on **Unicode character classes only**,
+not on the inherited CSS `direction` property:
+
+- A paragraph styled `direction: rtl` containing only ASCII is **not
+  detected** as RTL (BIDI regex misses) — `endOfTextblockHorizontal`
+  uses the cheap fallback (`atStart` / `atEnd`), which is correct for
+  pure-ASCII RTL because the visual order matches logical order
+  inverted.
+- A paragraph styled `direction: ltr` containing Arabic text **is**
+  detected (BIDI regex hits) — and PM handles it correctly via the
+  `Selection.modify` probe.
+- A paragraph styled `direction: rtl` containing Arabic text — same
+  as above, probe handles it.
+
+The one case PM gets wrong: pure-ASCII inside a `direction: rtl`
+parent **with** mirrored punctuation (e.g., `(foo)` displayed as
+`)foo(`). The visual-vs-logical mismatch isn't detected because
+neither character is in the BIDI range. Cursor movement at the
+boundary will look "off by one" visually. Fix: include the
+parent's `getComputedStyle(...).direction` in the gate, or always
+take the probe path. PM doesn't currently do this.
+
+---
+
+## 16. `tr.scrollIntoView()` callers, cross-linked
+
+| Site                                           | What triggers it                                      | File 13/05/21 link |
+|------------------------------------------------|--------------------------------------------------------|--------------------|
+| `capturekeys.ts:15`                            | After a navigation key handled by capturekeys          | file 13 §3.1       |
+| `domchange.ts:95`                              | Mutation reconciliation produced a state change        | file 15 §4         |
+| `domchange.ts:240`                             | Composition end with structural change                 | file 14 §3         |
+| `input.ts:155`                                 | Click → set selection                                  | file 13 §2.4       |
+| `input.ts:611` (cut)                           | After cut, scroll new caret into view                  | file 16 §2         |
+| `input.ts:643` (paste)                         | After paste, scroll inserted content into view         | file 16 §3         |
+| `input.ts:824`                                 | Chrome Android backspace fix                           | file 18 §2.1       |
+
+The transform-side spec for the `scrollIntoView` flag itself is in
+file 05 §7. The view consumes it in `updateStateInner` per
+`scrollMode` ("preserve" / "to-selection" / "reset"), see file 21 §6.
+
+---
+
+## 17. Cross-link block
+
+- `pos` semantics in `coordsAtPos` / `posAtCoords` → file 04 §2
+  (resolved positions, depth, parentOffset).
+- `domFromPos` (called by `coordsAtPos`) → file 09 §3 (view
+  descriptors).
+- `nearestDesc` → file 09 §2.
+- Decoration hit-testing → file 10 §3 (DOM rendering of decorations),
+  §4 (widget decorations).
+- Scroll-mode wire-up in `updateStateInner` → file 21 §6.
+- DOM observer pause/resume around `endOfTextblock` probe →
+  file 15 §3.

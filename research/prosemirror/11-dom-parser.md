@@ -33,6 +33,18 @@ would expand shorthand `text-decoration` etc.) — `from_dom.ts:200-218`.
 that can directly nest itself; in that case `normalizeList` (line 808) reparents
 nested `<ul>/<ol>` under the previous `<li>` to fix Word/Google-Docs HTML.
 
+> **Caveat — list normalization is mostly schema-driven.** It is sometimes said
+> that "the parser auto-fixes list nesting." That's misleading. The only
+> *parser-side* code is `normalizeList` (`from_dom.ts:805-820`), which solely
+> reparents a `<ul>`/`<ol>` that was sibling-after-an-`<li>` *into* that `<li>`.
+> Beyond that, every other list fix-up — `<ul><p>x</p></ul>` rerouting,
+> stray-`<li>` placement, `<table><td>` synth — comes from the schema's
+> `ContentMatch.fillBefore` and `findWrapping` machinery exposed via
+> `findPlace`. Whether `normalizeList` even runs is decided by introspecting
+> the schema (`from_dom.ts:213`). So the right mental model is: the schema
+> defines structure; the parser asks the schema "where can I put this?" via
+> `findPlace`, and obeys.
+
 ---
 
 ## 2. `DOMParser.fromSchema(schema)` — gathering rules
@@ -470,6 +482,34 @@ materialized a `ContentMatch`: we first try `fillBefore` (insert any
 mandatorily-required content, e.g. a leading `paragraph` in a `blockquote`),
 fall back to a wrapping path, else give up.
 
+> **Why eager `fillBefore` at `enter` time, not lazy at `finish` time?** Once
+> a node is enqueued in `top.content`, every subsequent `findPlace` /
+> `enterInner` indexes positions into the fragment as it stands. If we
+> retroactively spliced filler content in at finish time, every previously
+> recorded position (including `findPositions` callbacks and the parser's own
+> `match` cursor) would shift. Eagerly filling at `enter` means the offsets
+> are stable for the rest of the parse.
+
+> **Penalty arithmetic in `findPlace`.** The loop walks `this.open` → `0`,
+> tracking `penalty` (init 0, `+= 2` for each `solid` boundary crossed when
+> `cautious=false`). At each depth it computes `cx.findWrapping(node)`; the
+> *shortest* candidate wins, with `route.length + penalty` as the tiebreaker.
+> So crossing a solid frame is treated as if it cost two extra wrappers.
+> Concretely: pasting `<li>X</li>` into a `<p>` — depth 1 (`<p>`) yields
+> `findWrapping(li) = null`; depth 0 (`<doc>`) yields `[ul]` length 1. With
+> `penalty=2` from leaving `<p>`, the chosen route's effective cost is `1+2=3`,
+> still better than `null`. The penalty exists *only* to break ties when more
+> than one frame can host the node — it nudges the parser toward keeping the
+> deepest frame and away from speculatively flattening solid wrappers.
+
+> **The `cautious` flag.** Used for whitespace inserts and most leaf inserts
+> (`insertNode(text, marks, true)` from `addTextNode`'s
+> linebreak-replacement path is one of the few `cautious=true` callers).
+> `cautious=true` short-circuits the loop the moment the first `solid` frame
+> is hit — i.e. *never* climb out of a solid wrapper, even at infinite
+> penalty. This protects e.g. a stray space character from busting out of a
+> `<table>` cell into the document body.
+
 #### `insertNode(node, marks, cautious)` (`from_dom.ts:641-659`)
 
 ```
@@ -505,6 +545,15 @@ drops marks that the schema forbids in this position — e.g. `code` mark on a
   the "pad with `fillBefore(Fragment.empty, true)`" step.
 - The prompt's "`closeNode`" corresponds to `closeExtra` plus
   `NodeContext.finish` (line 377-390).
+
+> **`closeExtra` semantics, precisely.** It is *not* "flush pending children"
+> in the buffered-writer sense; the children are already in
+> `nodes[i].content`. The operation finalizes (and discards from the live
+> stack) every frame deeper than `this.open` — i.e. nodes the parser opened
+> *speculatively* (via `enterInner` from a `findPlace` route) and now wants to
+> commit. The `openEnd` argument controls whether each finalized fragment is
+> marked open-ended (relevant only when this is reached as part of `finish()`
+> in `parseSlice`).
 
 #### `finish()` (`from_dom.ts:700-704`)
 
@@ -698,3 +747,85 @@ If we instead called `parser.parse(dom)` (`isOpen=false`), the open-left flag
 would be absent and `findPlace(text("foo"))` would auto-wrap via
 `textblockFromContext()`, producing two paragraphs — ideal for "open this HTML
 as a document" but wrong for paste merging.
+
+---
+
+## 9. Worked micro-examples
+
+### 9.1 `<table><td>x</td></table>` — `fillBefore` synthesises `<tr>`
+
+The DOM is missing the required `<tr>`. The parser still gets it right because
+`<td>` enters via `enter(table_cell, …)` → `findPlace(table_cell.create(), …)`,
+and `findPlace` consults `NodeContext.findWrapping` on the open `<table>`
+frame:
+
+```
+top.match = table.contentMatch       // expects table_row+
+top.match.fillBefore(Fragment.from(table_cell)) → null     // can't satisfy directly
+top.match.findWrapping(table_cell)   → [table_row]          // a 1-step wrap
+```
+
+`findPlace` returns `route = [table_row]`, the parser `enterInner(table_row)`,
+*then* `enterInner(table_cell)`, *then* the text `"x"` lands inside the cell.
+At `closeExtra` the synthesised `table_row` is committed as a regular child of
+the table. No `<tr>`-aware code in the parser; it's all schema content
+expressions.
+
+### 9.2 `<p><div>hello</div></p>` — `findPlace` with `cautious=false`
+
+Browser HTML parsers will already have rewritten this to
+`<p></p><div>hello</div><p></p>` before ProseMirror sees it (because `<div>`
+implicitly closes `<p>`). But if the input came via `DOMParser.parseFromString`
+with `text/xml`, or via a hand-built fragment, ProseMirror sees the literal
+nesting.
+
+When `<div>` is encountered while inside an open `<p>` frame:
+
+1. `<div>` has no `parseDOM` rule in the basic schema, so falls through to
+   `addElement`'s `!rule || skip` branch.
+2. `<div>` is in `blockTags`. Top frame (`<p>`) has inline content.
+3. The inline-content cascade pops one open level: `this.open--`.
+4. `<div>`'s children (the text `"hello"`) are then `addAll`'d into the parent
+   doc frame.
+5. Subsequent text after `</div>` (none here) would re-enter via
+   `findPlace(text, …, cautious=false)` and trigger
+   `textblockFromContext()` → fresh `<p>`.
+
+Net result: `paragraph(empty), text("hello") wrapped via fresh paragraph`. The
+*key* mechanism is that `findPlace` is allowed to climb out of the speculative
+`<p>` frame because it's non-solid past the cascade pop.
+
+### 9.3 `<ul><p>x</p></ul>` — schema rejects, parser reroutes
+
+`<ul>` is a `bullet_list` whose content expression is `list_item+`. A
+paragraph child is illegal. The flow:
+
+1. `<ul>` enters (`enter(bullet_list)`).
+2. `<p>` rule fires; `enter(paragraph)` calls
+   `findPlace(paragraph.create(), …, cautious=false)`.
+3. `findPlace` walks: at depth (`bullet_list`)
+   `findWrapping(paragraph) = [list_item]` (length 1). At depth (`doc`)
+   `findWrapping = []` but penalty is `+2` (after crossing solid `bullet_list`),
+   so effective cost = `0 + 2 = 2` vs depth's `1 + 0 = 1`. The list-item route
+   wins.
+4. Parser `enterInner(list_item)`, then `enterInner(paragraph)`, then text
+   `"x"`. The `<p>` ends up nested inside an auto-synthesised `list_item`.
+
+This is *exactly* the opposite outcome of what naive HTML semantics would
+suggest. The schema's `list_item` content expression (`paragraph block*`) is
+what makes `findWrapping` return `[list_item]` for `paragraph`. Change the
+schema so `list_item` is `text*` and the same DOM would produce a different
+shape.
+
+### 9.4 Whitespace: `<p>  <em> hello  </em>  </p>`
+
+| Mode | Output |
+|---|---|
+| `preserveWhitespace: false` (default) | `paragraph(em(text("hello ")))` — leading/trailing spaces collapsed to one and trimmed at boundaries. The leading `"  "` is dropped because no `nodeBefore` exists; the trailing `"  "` is dropped by `NodeContext.finish`'s trailing-WS strip (lines 378-385). The space inside the `<em>` between "hello" and `</em>` is kept because there's still text following. |
+| `preserveWhitespace: true` | `paragraph(text("  "), em(text(" hello  ")), text("  "))` — collapsing skipped (no `\s+ → " "` regex), but `\r?\n → " "` still applies. `OPT_OPEN_LEFT` does *not* fire because we're parsing as a document, not a slice. |
+| `preserveWhitespace: "full"` | Same as `true` for this input (no newlines). The difference shows up only when `\n` is present: `"full"` keeps `\n`; `true` rewrites to space (or to `linebreakReplacement` if the schema has one). |
+
+The `OPT_OPEN_LEFT` flag affects the **leading** trim during `addTextNode`:
+when set on the root frame and we're at the leftmost text node with no
+`nodeBefore`, the whitespace is *not* stripped — it's preserved so that the
+slice merges cleanly with adjacent text in the destination document.

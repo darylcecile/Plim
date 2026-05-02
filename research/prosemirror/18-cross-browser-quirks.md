@@ -488,8 +488,8 @@ are the pointers to the original bug reports.
 
 | Browser flag           | First defined         | Number of branch sites in `src/` |
 | ---------------------- | --------------------- | -------------------------------- |
-| `ie`                   | `browser.ts:9`        | 12                               |
-| `ie_version`           | `browser.ts:10`       | 8 (always paired with `ie`)      |
+| `ie`                   | `browser.ts:9`        | 11 (the `12` cited elsewhere counts the `ie_edge` UA-regex usage in `browser.ts` itself) |
+| `ie_version`           | `browser.ts:10`       | 8 (subset of `ie` sites — every `ie_version` reference appears inside an `if (browser.ie ...)` block, never standalone) |
 | `gecko`                | `browser.ts:11`       | 13                               |
 | `gecko_version`        | `browser.ts:12`       | 0 (exported, unused)             |
 | `chrome`               | `browser.ts:15`       | 23                               |
@@ -509,3 +509,380 @@ total module size shows that the lion's share of PM's complexity is
 WebKit/Blink/Gecko-bug compensation. iOS and Android together account
 for a further 15 sites, almost all of which involve the composition or
 virtual-keyboard pipeline.
+
+---
+
+## 7. UA-sniffing false-positives and capability vs. UA
+
+`browser.ts` is **pure UA + vendor + capability sniffing**. The
+mutually-exclusive layering at the top (`ie` is computed first; all
+other family flags `&&` against `!ie`) is *not* sufficient to make the
+flags strictly disjoint. Real-world false-positive cases:
+
+| User agent                                      | Flags that are `true`             | Mis-fire                                                                                |
+|-------------------------------------------------|------------------------------------|------------------------------------------------------------------------------------------|
+| Chromium-Edge ("Edg/" suffix on Chrome UA)      | `chrome`, `webkit`, `windows`/`mac`| The `Edge/` sniff in `browser.ts:5` matches **legacy** Edge only. Chromium-Edge identifies as Chrome and is **not** flagged `ie`. So `chrome === true && ie === false` for it — usually the correct outcome, but any "this is Chrome but I want to skip Edge" gate has to test `!/Edg\//.test(navigator.userAgent)` separately. |
+| Brave / Vivaldi                                 | `chrome`, `webkit`                  | Chromium derivatives. Inherit every Chrome workaround.                                  |
+| Opera (modern)                                  | `chrome`, `webkit`                  | Same.                                                                                    |
+| Samsung Internet                                | `chrome`, `webkit`, `android`       | UA contains `SamsungBrowser/`, but `chrome` regex still matches because Samsung includes `Chrome/...` in the UA string. PM treats it as Chrome — usually correct, except for Samsung's keyboard-specific composition bugs (see §8.2). |
+| MIUI Browser                                    | `chrome`, `webkit`, `android`       | Same, plus its own composition quirks.                                                  |
+| Facebook in-app WebView (iOS)                   | `safari`, `webkit`, `ios`           | UA appends `[FBAN/FBIOS;…]`. PM treats it as iOS Safari.                                |
+| Instagram in-app WebView (iOS)                  | `safari`, `webkit`, `ios`           | UA appends `Instagram …`. Same.                                                         |
+| Line in-app WebView                             | `safari`, `webkit`, `ios`/`android` | Same family of issues.                                                                  |
+| iPad in desktop-mode (default since iPadOS 13)  | `safari`, `webkit`, `ios`, `mac`    | `ios` flag relies on `maxTouchPoints > 2` to catch this — works for current iPadOS.    |
+| Headless Chromium (Puppeteer / Playwright)      | `chrome`, `webkit`                  | UA includes `HeadlessChrome/`. PM has **no separate flag**. Generally fine — except for clipboard/composition tests where Headless Chromium has different IME behaviour (no real IME ever attaches), so composition-flag transitions never happen. Tests that expect `compositionstart` will hang. |
+
+In short: `browser.chrome === true` is "Blink-family browser, current
+era". If you need to distinguish Chrome from its derivatives, do it
+yourself in addition to PM's flags.
+
+---
+
+## 8. Modern (post-2023) bugs not captured by the existing tables
+
+### 8.1 Mobile Safari ≥ 17
+
+Bugs observed in the wild that PM-using applications need to handle
+(none of these have a `browser.safari && browser.ios && webkit_version
+>= 17XXX` gate in current source — they're handled either via the
+generic mutation-diff fall-back or are still open):
+
+| Symptom                                                                                  | Trigger                                                       | PM workaround / status |
+|------------------------------------------------------------------------------------------|----------------------------------------------------------------|------------------------|
+| Autocorrect replacement during composition drops the inserted character                  | iOS 17 Safari, two-finger autocorrect tap mid-compose         | Mitigated by `domchange.ts` mutation diffing; occasionally requires user re-typing. |
+| `insertReplacementText` beforeinput event fires with stale `getTargetRanges()`           | iOS 17, predictive bar tap                                    | PM ignores beforeinput targetRanges in favour of mutation observation. |
+| Selection collapses to start of textblock after `compositionend` in empty editor         | iOS 17 Safari, blank document, first IME compose             | iOS hacks in `viewdesc.ts:1531`. |
+| Composing `'\n'` inside list item splits incorrectly                                     | iOS 17 Safari + iOS 18 betas                                  | Open; users see the second line outside the list. |
+| Long-press dragstart fires while text-selection still active                              | iPadOS 17 with external keyboard                              | `selection.ts:64-72` Chrome drag delay does not cover Safari. |
+
+### 8.2 Samsung Internet / MIUI Browser / in-app WebViews
+
+| Browser                  | Symptom                                                         | Mitigation                                                                                 |
+|--------------------------|------------------------------------------------------------------|--------------------------------------------------------------------------------------------|
+| Samsung Internet (Android) | Predictive-text suggestions fire as full-word replacement (single mutation), not character-by-character | PM's mutation-diff handles it; emoji-replacement still requires `read.ts` heuristics. |
+| Samsung keyboard         | Backspace at start of textblock occasionally enters composition before deletion | The Chrome-Android backspace hack at `input.ts:809-826` partially covers this — Samsung devices benefit from it because they're caught by `browser.chrome && browser.android`. |
+| MIUI Browser             | Custom paste UI returns `text/plain` only, even when source had HTML | Falls back to PM's text-branch path. Plain-paste is correct, no special handling needed. |
+| Facebook iOS WebView     | `composing` flag stuck `true` after switching apps and back     | `input.ts:454` 5-second composition timeout drops it. |
+| Instagram iOS WebView    | Same                                                              | Same. |
+| Line WebView (Android)   | `selectionchange` fires twice for one tap                        | DOM observer dedupes via `domobserver.ts:228-235` selection-drift logic. |
+
+### 8.3 Headless Chromium / Puppeteer / Playwright
+
+PM's automated tests use jsdom for unit tests, but integration tests
+under headless browsers need to be aware of:
+
+- **No IME ever fires.** `compositionstart`/`compositionend` will not
+  be triggered by `page.type()`. To test composition flows, you must
+  use `page.evaluate()` to dispatch `CompositionEvent` manually, or
+  use `Input.dispatchKeyEvent` from CDP with `key: "Process"`.
+- **Clipboard API is permissioned.** `navigator.clipboard.writeText`
+  rejects without user-gesture; tests typically dispatch raw
+  `ClipboardEvent`s with synthetic `clipboardData`.
+- **`devicePixelRatio === 1` always**, regardless of the host display.
+  Fine for PM, but tests that snapshot rect coords cross-machine need
+  to set `--force-device-scale-factor=1` explicitly.
+- **`requestAnimationFrame` runs at 60 Hz even when headless** — PM's
+  `requestAnimationFrame`-driven flushes do work.
+- **Drag-and-drop is unreliable.** Puppeteer's `dragAndDrop` simulates
+  mouse events but does not always trigger the platform's native
+  `dragstart`. Playwright's `dragTo` is more reliable; PM's `dragstart`
+  handler is exercised correctly under it.
+
+### 8.4 Browser zoom and `getBoundingClientRect`
+
+Modern browsers (Chrome ≥ 88, Safari ≥ 14, Firefox ≥ 91) report rects
+in pre-zoom coordinates: a 100 px element zoomed to 200 % still
+returns `width: 100`. PM's `coordsAtPos` works correctly under zoom
+because both the rect and the click coords are in the same coordinate
+system.
+
+The exceptions are:
+
+- **Firefox < 91**: `Range.getClientRects()` had ±1 px rounding errors
+  at fractional zoom. Manifests as caret-1px-off after `coordsAtPos`.
+  No PM workaround; bug is fixed upstream.
+- **Old WebKit (pre-Safari 14)**: full-page zoom changed
+  `getBoundingClientRect` and `clientX`/`clientY` differently,
+  producing visible miss-clicks at zoom levels other than 100 %.
+  Still relevant for Safari iOS < 14 fleets.
+- **Chrome with `--force-device-scale-factor`**: rects scale; coords
+  do too. Self-consistent.
+
+### 8.5 Forced-colors / High-contrast mode
+
+Windows High Contrast and `prefers-contrast: more` engage the browser's
+`forced-colors: active` media query. Effects on PM:
+
+- **Decorations using `style="color: …; background: …"` are
+  overridden** to system colours (`Canvas`, `CanvasText`, `Highlight`,
+  `HighlightText`). A "draft" decoration coloured grey becomes
+  `CanvasText` — same as normal text — losing its visual signal.
+- **Selection rendering** is browser-default (system Highlight). PM's
+  `selectionVisible` decoration trick (when used) is overridden.
+- **Caret colour** likewise.
+- **`background-image: linear-gradient(...)` is ignored.** Decorations
+  using gradients to mark suggestions disappear.
+
+Fix: provide `@media (forced-colors: active)` rules that re-anchor
+visual signals to forced-color-aware properties (`outline`,
+`text-decoration`, `mark` element wrappers) instead of `color` /
+`background`.
+
+---
+
+## 9. Workaround flowchart (mutually-exclusive vs. additive)
+
+```
+           Browser detected
+                  │
+                  ▼
+        ┌─────────┴──────────┐
+        │  family selection  │   mutually exclusive — pick one
+        ├────────────────────┤
+        │ ie / gecko / chrome / safari (modulo Chromium-Edge edge case)
+        └────────────────────┘
+                  │
+                  ▼
+        ┌────────────────────┐
+        │  platform overlay  │   additive
+        ├────────────────────┤
+        │ ios, mac, android, windows
+        └────────────────────┘
+                  │
+                  ▼
+        ┌────────────────────┐
+        │ capability probes  │   additive — runtime-only
+        ├────────────────────┤
+        │ webkit (style probe), trustedTypes (window probe),
+        │ visualViewport (window probe), elementFromPoint on shadow root
+        └────────────────────┘
+                  │
+                  ▼
+        ┌────────────────────┐
+        │   computed flags   │   set during `new EditorView`
+        ├────────────────────┤
+        │ requiresGeckoHackNode  ← set by checkCSS at construction time;
+        │                          can be reset to false if non-default
+        │                          white-space is detected on a
+        │                          display:inline-block ancestor (no actual
+        │                          collapse risk).
+        │ brokenClipboardAPI     ← module-level constant (input.ts:592)
+        └────────────────────┘
+                  │
+                  ▼
+        ┌────────────────────┐
+        │  per-event guards  │
+        ├────────────────────┤
+        │ dragstart / paste / copy / cut / compositionstart / etc.
+        │ each branch is `if (browser.X && condition)` — all additive,
+        │ never mutually exclusive within a single handler.
+        └────────────────────┘
+```
+
+The structural workarounds in §3 are mostly **additive**: a Gecko
+trailing-`<br>` injection coexists with a Safari `addHackNode` for a
+preceding `<img>`; an iOS list-marker reset coexists with an Android
+backspace blur/refocus. The only two sets that are **mutually
+exclusive** are:
+
+- The synthetic-DOM clipboard fallback (`captureCopy` /
+  `capturePaste`) vs. the `event.clipboardData` path — controlled by
+  `brokenClipboardAPI`. One or the other, never both for a given
+  event.
+- The `Selection.modify` probe in `endOfTextblockHorizontal` vs. the
+  `parentOffset`-only fallback — controlled by `maybeRTL.test(...)`
+  *and* presence of `sel.modify`. One or the other per call.
+
+---
+
+## 10. `requiresGeckoHackNode` — when it is *also* disabled
+
+Per `domobserver.ts:308-317`, the flag is set to true on Firefox when
+the editor's computed `white-space` is `normal`, `nowrap`, or
+`pre-line` (i.e., not a `pre`-flavoured value that preserves trailing
+whitespace).
+
+It is **disabled** (left `false`, no warning) in these cases:
+
+- The editor's computed `white-space` is `pre`, `pre-wrap`, or
+  `break-spaces` — the recommended config. Trailing whitespace is
+  preserved by CSS, no hack needed.
+- The browser is not Firefox (`browser.gecko === false`). On
+  Chrome/Safari the equivalent trailing-whitespace handling is done
+  via `addHackNode("BR", ...)` at `viewdesc.ts:1377-1383` instead.
+- The editor's `view.dom` has a `display: inline-block` ancestor that
+  affects line-box construction. PM's `checkCSS` does not currently
+  detect this case automatically (only the computed `white-space` is
+  read), so the flag is set even when it would be redundant. The
+  symptom is a benign extra `<br>` in textblocks that already wouldn't
+  have collapsed trailing spaces — visually identical, no impact.
+
+The hack node itself (`viewdesc.ts:1373-1380`) is re-evaluated per
+textblock render: a textblock whose last char is whitespace gets the
+trailing `<br>` appended; a textblock whose last char is not
+whitespace does **not**. So even when the flag is on, the actual hack
+is only present where it's needed.
+
+To **disable the warning** when you've intentionally set
+`white-space: normal` and accept the consequences, set
+`view.requiresGeckoHackNode = false` after construction (it's a
+public field on the view).
+
+---
+
+## 11. Trusted Types policy creation API
+
+Chrome's `require-trusted-types-for "script"` Content Security
+Policy directive blocks `innerHTML` and similar sinks unless the value
+is a `TrustedHTML` instance from a registered policy. PM's
+`maybeWrapTrusted` (clipboard.ts:213-222) does this:
+
+```ts
+let _policy: any = null
+
+function maybeWrapTrusted(html: string): string {
+  let trustedTypes = (window as any).trustedTypes
+  if (!trustedTypes) return html
+  if (!_policy)
+    _policy = trustedTypes.defaultPolicy ||
+              trustedTypes.createPolicy("ProseMirrorClipboard", {createHTML: (s: string) => s})
+  return _policy.createHTML(html)
+}
+```
+
+Three branches:
+
+1. **No Trusted Types support** (most browsers, Firefox, Safari): the
+   `trustedTypes` global is `undefined`; return the raw string.
+   `innerHTML` accepts strings unconditionally on these browsers.
+2. **Trusted Types enabled, default policy registered**: hosts can
+   register a `default` policy under the name `"default"` (note: the
+   API requires `default` literally as the policy name) which
+   intercepts every `createHTML` call site that passes a raw string.
+   PM uses the host's default policy if one exists — so the host's
+   policy gets to inspect/sanitise the clipboard HTML before PM's
+   parser sees it.
+3. **Trusted Types enabled, no default**: PM creates its own
+   `"ProseMirrorClipboard"` policy with an identity `createHTML`
+   transform. This is *unavoidable* — PM has already run its own
+   pipeline on this HTML (`parseFromClipboard`, `transformPastedHTML`,
+   etc.) and the data must reach `innerHTML` to be parsed by the
+   browser. The hostname `"ProseMirrorClipboard"` will appear in
+   CSP violation reports if the host's policy disallows it.
+
+To restrict PM, the host should *register a default policy* before
+the editor mounts:
+
+```ts
+trustedTypes.createPolicy("default", {
+  createHTML(html, sink) {
+    if (sink === "Element innerHTML") {
+      return DOMPurify.sanitize(html)  // or similar
+    }
+    return html
+  },
+})
+```
+
+PM's `createPolicy("ProseMirrorClipboard", …)` call returns an
+already-existing policy of that name on subsequent invocations only
+if the browser accepts it; some Trusted Types implementations
+**throw on duplicate-name policy creation**. PM caches `_policy`
+module-side to avoid the second call.
+
+The policy is **only used for clipboard HTML parsing**. PM's view
+descriptors set DOM via `textContent`, `setAttribute`, and direct
+node creation — never `innerHTML` outside this clipboard path. If
+your CSP is `require-trusted-types-for "script"` you can confirm
+this by setting up CSP reporting; only the
+`"ProseMirrorClipboard"` policy should ever be cited.
+
+---
+
+## 12. Adding a new quirk in a fork
+
+The pattern PM uses internally (e.g., the Pre-120 Chrome `clearData`
+file-loss workaround at `input.ts:700`):
+
+1. **Reproduce the bug minimally** with a known browser version and
+   open an upstream issue if it isn't already.
+2. **Add a flag** in `browser.ts`. If it's a one-off version gate,
+   inline the comparison in the call site instead — `browser.chrome
+   && browser.chrome_version > 120` rather than introducing
+   `browser.chrome_post120`.
+3. **Branch in the call site**, with a comment citing the issue
+   number:
+   ```ts
+   // See https://github.com/ProseMirror/prosemirror/issues/NNNN
+   if (browser.X && condition) {
+     // alternative behaviour
+   }
+   ```
+4. **If the workaround is structural** (a hack node, a CSS reset, an
+   event-handler bail-out), document it in §3 here and cross-link
+   from the call site comment.
+5. **Add a regression test** under `prosemirror-view/test/` that
+   exercises the alternate path, preferably via a `browser.X = true`
+   test override (PM's tests do this by re-importing
+   `./browser` and patching the export — see existing tests).
+
+### Diff-style example: the Chrome 120 `clearData` fix
+
+```diff
+ handlers.dragstart = (view, _event) => {
+   ...
+   let {dom, text, slice} = serializeForClipboard(view, draggedSlice)
+-  event.dataTransfer.clearData()
++  // Pre-120 Chrome versions clear files when calling `clearData` (#1472)
++  if (!event.dataTransfer.files.length || !browser.chrome || browser.chrome_version > 120)
++    event.dataTransfer.clearData()
+   event.dataTransfer.setData(brokenClipboardAPI ? "Text" : "text/html", dom.innerHTML)
+   ...
+ }
+```
+
+The pattern: keep the **happy-path code first** (here: clearData),
+gate the *non-default* behaviour (skipping clearData) on the bug
+condition, and cite the upstream issue. Avoid `if (!buggy) ... else
+... ` shapes — they make the buggy path harder to spot in code review.
+
+---
+
+## 13. Workaround retirement guide
+
+When can a workaround be deleted? Rule of thumb: when the support
+floor of the fork rises *strictly past* the highest browser version
+the workaround targets.
+
+| Workaround                                       | Targets                  | Safe to delete when…                                      |
+|--------------------------------------------------|--------------------------|------------------------------------------------------------|
+| `brokenClipboardAPI` for `ie_version < 15`       | IE 8–14, legacy Edge ≤ 14 | Fork drops IE/legacy Edge entirely.                        |
+| `brokenClipboardAPI` for `webkit_version < 604`  | iOS Safari < 11          | iOS 11 (= 2017) below support floor.                       |
+| `captureCopy` IE wrapper                         | IE 8–11                   | Same as above.                                             |
+| `selection.ts:155` "kill control selection"      | IE 11                     | IE 11 dropped.                                             |
+| Pre-Chrome 120 `clearData` skip                  | Chrome < 120              | Support floor ≥ Chrome 120.                                |
+| `safariDownArrowBug` (`input.ts:289`)            | Safari ≤ 16 (per #867 / #1090) | Mac Safari support floor > 16.                       |
+| iOS Enter virtual-keyboard flag (`input.ts:118`) | iOS Safari (all current)  | Not yet — bug still observed in iOS 17.                    |
+| Chrome Android backspace blur/focus (`input.ts:809`) | Chrome Android (all current) | Not yet — still active.                                |
+| Firefox trailing-whitespace `<br>` (`requiresGeckoHackNode`) | Firefox (all current) | Not yet — still active.                                |
+| Trusted Types policy                             | Chrome with strict CSP    | Never — opt-in feature, deletion only if PM stops using `innerHTML` for clipboard, which would require a structural rewrite. |
+| Selection drift in shadow root (`dom.ts:124`)    | Chrome ≤ 90+              | Chromium issue #447523 closed and rolled out — bug still reproduces in Chrome 130+, so not yet. |
+
+A reasonable policy for forks: keep the workaround if there are still
+non-trivial fleets running affected browsers (>0.5 % of your
+analytics, say); delete only after a full quarter at <0.1 %.
+
+---
+
+## 14. Cross-links
+
+- §2 per-browser tables → file 14 §7 (composition specifics by
+  browser; same workarounds discussed from a different angle).
+- §3.7 / §11 Trusted Types → file 16 §15 (`maybeWrapTrusted` on the
+  paste path).
+- §5 TODO/HACK list → file 22 §3, §6, §8, §12 (pitfalls that
+  reference the same source lines).
+- §10 `requiresGeckoHackNode` → file 09 §4 (where the trailing `<br>`
+  is appended in `viewdesc`), file 21 §5 (`checkCSS` invocation in
+  the construction sequence).
+- §8.3 Headless behaviour → file 22 §15 (testing pitfalls).

@@ -56,9 +56,13 @@ static jsonID(id: string, cls: { fromJSON(doc, json): Selection })
 ```
 
 - **`findFrom($pos, dir, textOnly)`** — search for a valid cursor or selectable leaf. If `$pos.parent.inlineContent`, returns a `TextSelection` *at* `$pos`. Otherwise it walks `findSelectionIn` outward through ancestor depths (`selection.ts:118–130`).
-- **`near($pos, bias)`** — `findFrom($pos, bias) || findFrom($pos, -bias) || new AllSelection(...)`. The fallback to `AllSelection` only kicks in for genuinely empty / leaf-only documents (`selection.ts:135–137`).
-- **`atStart(doc)` / `atEnd(doc)`** — search inward from position 0 / `doc.content.size` for the first valid selection; fall back to `AllSelection(doc)` (`selection.ts:143–151`).
-- **`jsonID(id, cls)`** — registers `cls` in a module-private `classesById` table and stamps `cls.prototype.jsonID = id`. `fromJSON` dispatches on `json.type` (`selection.ts:155–171`).
+
+  The `textOnly` parameter, when `true`, tells `findSelectionIn` to **skip atom nodes that would otherwise be selectable as `NodeSelection`** (`selection.ts:439–452`, the `!text && NodeSelection.isSelectable(child)` branch). This is what makes `Mod-A` produce a clean text-only selection that walks past atom widgets like `horizontal_rule`, image atoms, or any custom node with `selectable: true` — without `textOnly`, those would be matched as a `NodeSelection` first. The "select all" implementation in `prosemirror-commands` uses `textOnly` to keep the selection inline.
+
+- **`near($pos, bias)`** — `findFrom($pos, bias) || findFrom($pos, -bias) || new AllSelection(...)` (`selection.ts:135–137`). The fallback to `AllSelection` only kicks in for genuinely empty / leaf-only documents.
+- **`atStart(doc)` / `atEnd(doc)`** — search inward from position 0 / `doc.content.size` for the first valid selection; fall back to `AllSelection(doc)` (`selection.ts:143–151`). Used everywhere a "default" selection is needed: `EditorState.create` defaults the `selection` field to `Selection.atStart(doc)` (`state.ts:28`), `AllSelection.replace` re-cursors via `Selection.atStart(tr.doc)` after wiping the doc (`selection.ts:408`), and command-style "select all" implementations are built on top.
+- **`between($anchor, $head, bias?)`** is technically on `TextSelection`, not `Selection`, but functions as the *dispatcher* used by view-side `selectionBetween` / pointer-selection logic. It tries to produce a `TextSelection` whose endpoints both land in `inlineContent`; if either endpoint is in non-inline content, it walks outwards via `findFrom($head, bias, /*textOnly*/true)` to find the nearest inline position, and falls back to `Selection.near($head, bias)` if no inline neighbourhood exists (`selection.ts:287–304`). The optional `bias` defaults to the sign of `$anchor.pos - $head.pos` so that empty/equal positions get a deterministic search direction.
+- **`jsonID(id, cls)`** — registers `cls` in a module-private `classesById` table and stamps `cls.prototype.jsonID = id`. `fromJSON` dispatches on `json.type` (`selection.ts:155–171`). **Throws** on duplicate `id` (`selection.ts:167`), so each selection class can register only once per process.
 
 ### Multi-range default `replace`
 
@@ -84,6 +88,7 @@ replace(tr: Transaction, content = Slice.empty) {
 Notes:
 - Only the *first* range gets `content`; subsequent ranges are deleted (`Slice.empty`). This is what cell-selection-like multi-range selections rely on.
 - After replacing range 0, `selectionToInsertionEnd` re-points the transaction's selection to a `Selection.near` of the last new position. `bias = -1` if the last replaced thing was inline (cursor sits *after* the inline), `+1` otherwise. (`selection.ts:454–462`.)
+- **Open-end accounting.** The loop walks `content.openEnd` levels into `content.content.lastChild` to find the *deepest last node* of the slice — this is what the bias decision uses (`lastNode ? lastNode.isInline : lastParent && lastParent.isTextblock`). `tr.replaceRange` itself does the heavy `fitLeft`/`fitRight` work in `prosemirror-transform` to make the slice fit at both edges of the deletion (closing as many open levels as needed and inserting the rest as new content); see `04-transforms.md` for that machinery. The reason `replace` is polymorphic: subclasses (`AllSelection`, `CellSelection`) override it precisely because the default's "replace each range with the slice (or empty)" doesn't match their structural semantics.
 
 ---
 
@@ -97,6 +102,15 @@ export class SelectionRange {
 ```
 
 A pair of resolved positions. `Selection.ranges` is the canonical list; for single-range selections it's `[new SelectionRange(min, max)]`. Multi-range selections (e.g. `CellSelection`) use multiple entries.
+
+### Invariants
+
+- **Order:** `$from.pos <= $to.pos` for every range. The default range constructed by the abstract `Selection` constructor uses `$anchor.min($head)` / `$anchor.max($head)` (`selection.ts:22`), which guarantees this regardless of whether `$anchor` is before or after `$head`. Subclasses that build ranges manually (e.g. `CellSelection`) must respect this themselves.
+- **Same document:** Both `$from.doc` and `$to.doc` must point at the same `Node` (the document the selection lives in). The `setSelection` runtime check (`transaction.ts:83–84`) validates this against `tr.doc`.
+- **Non-overlap (multi-range only):** for selections with multiple ranges, ranges must not overlap. Selection's abstract constructor doesn't enforce this — it's the responsibility of the subclass. `CellSelection` constructs ranges from disjoint cell content positions, so overlap is naturally avoided.
+- **Resolved positions are immutable, but bound to a doc.** A `SelectionRange` is only meaningful for `range.$from.doc`; mapping it to a different doc requires going through `Selection.map` or a bookmark.
+
+These invariants are *load-bearing*. The mark-handling code in `TextSelection.replace` (`selection.ts:248–254`) calls `this.$from.marksAcross(this.$to)`, which assumes `$from <= $to`. The `selection.ranges[0]` shortcut everywhere (`from`/`to`/`$from`/`$to` getters at `selection.ts:35–48`) assumes range[0] exists.
 
 ---
 
@@ -158,6 +172,10 @@ class TextBookmark {
 
 Two raw integer positions. Mapping is just two `mapping.map` calls; resolution goes through `between` so it tolerates positions that have drifted to non-inline locations.
 
+> **Mapping bias.** `mapping.map(pos)` without an explicit `assoc` argument uses the default bias of **`1`** (forward). Both `anchor` and `head` get the same `+1` bias, which means: when a deletion happens *exactly at* the cursor, the resulting bookmark position is pushed *forward* past the deletion — never stuck inside the deleted range. This is deterministic on purpose: plugin authors who store a bookmark and later resolve it know the cursor will end up just after a coincident deletion, never before. If you need the opposite ("stick before deletions at this point") you can't use `TextBookmark` directly; either build a custom bookmark type that stores `(pos, assoc)` and calls `mapping.map(pos, -1)`, or pre-bias the anchor by `-1` before constructing the bookmark.
+>
+> Note that `TextBookmark` does **not** have an `eq` method. Comparing two bookmarks for equality is application-level: typically `a.anchor === b.anchor && a.head === b.head`. `Selection.eq` (the resolved form, `selection.ts:256–258`) is what plugin state minimisation actually uses; bookmarks are an intermediate form that resolves back to a `Selection` before equality matters.
+
 ---
 
 ## 4. `NodeSelection`
@@ -199,7 +217,7 @@ Selection.jsonID("node", NodeSelection)
 
 Highlights:
 - `from === anchor`, `to === anchor + node.nodeSize`, `head === to`. The selection literally brackets the single node.
-- **Selectability** — `isSelectable` excludes text nodes and any node type whose spec sets `selectable: false`. Used by `findSelectionIn` (`selection.ts:446`) and `NodeBookmark.resolve` (`selection.ts:390`).
+- **`isSelectable(node)` static** (`selection.ts:373–375`) — returns `!node.isText && node.type.spec.selectable !== false`. The opt-in default is "every non-text node is selectable"; opt out by setting `selectable: false` in the node spec. Used by `findSelectionIn` (`selection.ts:446`) and `NodeBookmark.resolve` (`selection.ts:390`). Constructing a `NodeSelection` over a non-selectable node still *works* (the constructor doesn't check), but `findFrom`/`atStart`/etc. won't ever produce one, and the view's pointer logic respects the spec opt-out.
 - **`content()`** — returns the node wrapped in a closed `Slice` (open depths both `0`). This differs from the default `Selection.content()` which uses `$from.doc.slice(...)` and would include open boundaries.
 - **`visible = false`** — the browser's native selection isn't shown for node selections; `prosemirror-view` instead renders a `.ProseMirror-selectednode` class on the node's DOM (covered in file 09).
 - **Mapping** — if the original position was deleted (`mapResult.deleted`), fall back to `Selection.near($pos)`. Otherwise re-construct around `nodeAfter` at the mapped position.
@@ -261,13 +279,15 @@ const AllBookmark = {
 
 Highlights:
 - Spans the whole top node — useful when leaf blocks at the document's edges prevent a `TextSelection` from covering the entire document.
-- **`replace` empty** — explicit `tr.delete(0, doc.content.size)` then re-cursor via `Selection.atStart`. This is required because the default `Selection.replace` would call `replaceRange` which can preserve outer structure; here we genuinely want to wipe and re-cursor.
+- **`$anchor` and `$head` are *placeholders*, not user-meaningful endpoints.** The constructor sets `$anchor = doc.resolve(0)` and `$head = doc.resolve(doc.content.size)` (`selection.ts:401–402`) just to satisfy the abstract base class's invariants. Code that reads `selection.$anchor` or `selection.$head` for an `AllSelection` will get those edge positions; this is correct as a "selection bounds" query but **not** as a "where did the user start dragging" query (which has no answer for `AllSelection`). When you need to branch on this, prefer `selection instanceof AllSelection` over inspecting `$anchor`/`$head`.
+- **`replace` empty case — special-cased path.** When `content === Slice.empty`, the override **does not** delegate to `super.replace`; it does `tr.delete(0, tr.doc.content.size)` and then re-cursors via `Selection.atStart(tr.doc)` (`selection.ts:405–410`). The reason: the default `Selection.replace` runs each range through `tr.replaceRange`, which calls `Transform.replaceRange` — that method tries to *preserve outer structure* by closing slices smartly. For an all-selection emptying, that produces a "minimum-replacement" delete that may leave wrapping nodes intact. Here we want a true wipe-to-empty, which `tr.delete(0, doc.content.size)` does directly.
+- **`replace` non-empty case** delegates to `super.replace(tr, content)`, which loops over `this.ranges` (one range, covering the whole doc) and runs `tr.replaceRange(0, doc.content.size, content)`. The slice's open ends are honoured via `replaceRange`'s `fitLeft`/`fitRight` machinery, so e.g. pasting an open paragraph slice over `AllSelection` works.
 - **`map` is identity** — the all-selection of any document version is "all of it", so mapping is just `new AllSelection(doc)`.
 - **`getBookmark`** — singleton `AllBookmark` whose `map` is `() => this` (no-op) and whose `resolve(doc)` is `new AllSelection(doc)`.
 
 ---
 
-## 6. `CellSelection` (forward note)
+## 6. `CellSelection` (forward note) and writing your own subclass
 
 `CellSelection` is **not** in `prosemirror-state`. It lives in **`prosemirror-tables`** and is registered there with `Selection.jsonID("cell", CellSelection)`. Sketched:
 
@@ -279,6 +299,90 @@ Highlights:
 - Plays with the view through standard mechanics: it is a normal `Selection` subclass, so all of `state`'s machinery (transaction selection map, `tr.setSelection`, etc.) applies unchanged.
 
 The `prosemirror-state` package never imports it; the only seam is `Selection.jsonID` and the abstract base class.
+
+### Worked example — minimal custom `Selection` subclass
+
+A toy `LineSelection` that selects a whole textblock by its position. The contract a custom selection must satisfy:
+
+```ts
+import { Selection, SelectionBookmark, TextSelection } from "prosemirror-state"
+import { Node, ResolvedPos, Slice, Fragment } from "prosemirror-model"
+import { Mappable } from "prosemirror-transform"
+
+class LineBookmark implements SelectionBookmark {
+  constructor(readonly pos: number) {}
+  map(mapping: Mappable) {
+    const { deleted, pos } = mapping.mapResult(this.pos)
+    // If the line was deleted, demote to a text bookmark at the mapped pos
+    return deleted ? new (require("prosemirror-state") as any).TextBookmark(pos, pos)
+                   : new LineBookmark(pos)
+  }
+  resolve(doc: Node) {
+    const $pos = doc.resolve(Math.min(this.pos, doc.content.size))
+    return LineSelection.fromResolved($pos) || Selection.near($pos)
+  }
+}
+
+export class LineSelection extends Selection {
+  constructor(readonly $pos: ResolvedPos) {
+    // Bracket the parent textblock: anchor at start of parent, head at end
+    const start = $pos.start($pos.depth)
+    const end   = $pos.end($pos.depth)
+    super($pos.doc.resolve(start), $pos.doc.resolve(end))
+  }
+
+  // Required overrides:
+  eq(other: Selection): boolean {
+    return other instanceof LineSelection && other.$anchor.pos === this.$anchor.pos
+  }
+  map(doc: Node, mapping: Mappable): Selection {
+    const { deleted, pos } = mapping.mapResult(this.$anchor.pos)
+    if (deleted) return Selection.near(doc.resolve(pos))
+    const $pos = doc.resolve(pos)
+    return $pos.parent.isTextblock ? new LineSelection($pos) : Selection.near($pos)
+  }
+  toJSON(): any { return { type: "line", pos: this.$anchor.pos } }
+  getBookmark(): SelectionBookmark { return new LineBookmark(this.$anchor.pos) }
+
+  // Recommended overrides:
+  content() {
+    const start = this.$anchor.pos, end = this.$head.pos
+    return new Slice(Fragment.from(this.$anchor.parent), 0, 0)
+  }
+
+  // Required for fromJSON dispatch via Selection.jsonID:
+  static fromJSON(doc: Node, json: any): LineSelection {
+    return new LineSelection(doc.resolve(json.pos))
+  }
+  static fromResolved($pos: ResolvedPos): LineSelection | null {
+    return $pos.parent.isTextblock ? new LineSelection($pos) : null
+  }
+}
+
+// Register exactly once. Throws on duplicate id.
+Selection.jsonID("line", LineSelection)
+```
+
+Checklist for any `Selection` subclass:
+
+| Method | Required? | Purpose |
+|---|---|---|
+| `eq(other)` | yes | Used by `applyInner`'s no-op detection and by view-side diffing. |
+| `map(doc, mapping)` | yes | Called by `tr.selection` getter when steps land. |
+| `toJSON()` | yes | Symmetric with `fromJSON`. Always include `type: <jsonID>` so `Selection.fromJSON` dispatches. |
+| `static fromJSON(doc, json)` | yes (for `jsonID`) | Reverse of `toJSON`. |
+| `getBookmark()` | recommended | Custom bookmark survives mapping without a doc; default falls back to `TextSelection.between(...).getBookmark()` which is wrong for non-textual selections. |
+| `replace(tr, content)` / `replaceWith(tr, node)` | optional | Override when default range-by-range replacement doesn't match your semantics (e.g. `AllSelection`'s wipe, `CellSelection`'s clear-all-cells). |
+| `content()` | optional | Default uses `$from.doc.slice(from, to, true)` with open boundaries; override to return a closed slice or a custom shape. |
+| `Selection.jsonID(id, cls)` | yes (one-shot) | Module-init registration. **Throws** on duplicate id, so don't call it inside a function that may run twice. |
+| `cls.prototype.visible = false` | optional | Set when the browser shouldn't paint the native selection (e.g. you'll render your own decoration). |
+
+Common pitfalls when writing a custom selection:
+- Forgetting `jsonID` → `state.toJSON()` produces `{type: undefined}`, `fromJSON` throws on round-trip.
+- Returning `this` from `map` when the doc has changed → stale `ResolvedPos`, downstream crashes.
+- Not handling `mapResult.deleted` in `map`/`getBookmark.map` → selection points into a hole.
+
+`prosemirror-tables`' `CellSelection` is the reference implementation for a non-trivial multi-range subclass — read its source for the patterns around custom decorations and view integration.
 
 ---
 
@@ -517,7 +621,163 @@ The view reads `state.selection` to drive the browser's native selection:
 - `AllSelection` → DOM selection is set to span the whole editable content.
 - `CellSelection` (tables) → custom decorations render the highlight; native DOM selection is collapsed somewhere safe.
 
-Detailed mechanics — `selectionchange` debouncing, IME composition, `forceUpdate`, `Selection.scrollIntoView`, the `scrollToSelection` field counter — are covered in **file 09 (view & DOM sync)**.
+Detailed mechanics — `selectionchange` debouncing, IME composition, `forceUpdate`, `Selection.scrollIntoView`, the `scrollToSelection` field counter — are covered in **file 09 (view & DOM sync)**. The `scrollToSelection` mechanism specifically is documented in `07-state-and-plugins.md` §1 (it's a counter, not a flag).
+
+---
+
+## 11.5 Design notes (whys) and API clarifications
+
+### Why is `storedMarks` on `EditorState` and not on `Selection`?
+
+A naive design would attach pending marks to the cursor itself: "marks the cursor is ready to apply on next typing". But two requirements break that:
+
+1. **Stored marks must survive transactions whose selection didn't move.** When the user clicks the bold button without typing first, the resulting tr has no steps and no `setSelection`. If marks lived on `Selection`, you'd need to construct a *new* `Selection` (with the same anchor/head) just to attach the marks — and either invalidate the existing `ResolvedPos` references or invent a "marks side-channel" on the same class. Both are leaky.
+2. **`Selection` is content-shaped; marks aren't.** A `NodeSelection` has no concept of a cursor. An `AllSelection` has no specific point either. Stored marks only make sense for the *inline-typing* moment, which is `TextSelection.$cursor`. That's why the storedMarks field's `apply` (`state.ts:34`) explicitly drops marks unless the new selection is a caret: it's a global "next typed character takes these marks" register, gated on the selection happening to be a cursor. Lifting that gate into the selection class would mean every selection subclass needs to know about marks — a leaky abstraction that wouldn't even buy ergonomics.
+
+The current design — a separate `storedMarks: Mark[] | null` field, gated on `selection.$cursor !== null` — is minimal *and* lets the toolbar's "make the next char bold" pattern work without ever touching `Selection`.
+
+### Why doesn't `NodeSelection` extend `TextSelection`?
+
+Both expose `$from` / `$to`, but:
+
+- For `TextSelection`, `from === anchor`, `to === head` (or swapped if reverse). Both endpoints are *cursor-shaped* — they live in inline content.
+- For `NodeSelection`, `from === anchor`, `to === anchor + node.nodeSize`. **`to` is computed from `from`**, not stored. The endpoint isn't a free cursor; it's structurally tied to a specific node.
+
+Inheriting `TextSelection` would force `NodeSelection` to maintain a fictional `$head` separate from `$anchor`, with rules about keeping them consistent (`$head = $anchor + node.nodeSize`). It would also drag along irrelevant features (`$cursor`, the inline-content invariant, `marksAcross`). Composition over inheritance: both share the abstract `Selection` base but implement `from`/`to` semantics independently.
+
+The same argument applies to `AllSelection`: its endpoints are derived from `doc.content.size`, not from anchor/head endpoints the user can move.
+
+### Why bookmarks instead of `{ anchor, head }` literals?
+
+The "obvious" persistence representation — store `anchor` and `head` integers, map them through the `Mapping`, resolve back — works fine for `TextSelection`. But:
+
+1. **Different selection classes have different persistence shapes.** `NodeSelection` needs only `anchor` (the node position); `AllSelection` needs no positions at all (it's a singleton); `CellSelection` needs two cell positions plus the node-sizes context. A single-shape literal forces all selections to lossily project into `{anchor, head}` and lose information on round-trip.
+2. **Mapping policy varies.** `TextBookmark` uses bias `+1` for both endpoints (`selection.ts:312`), so deletions at the cursor push forward. `NodeBookmark` *demotes* itself to a `TextBookmark` when its node is deleted (`selection.ts:382–391`) — there's no sensible way to preserve "selected node" if the node is gone, but a fallback caret position is salvageable. Hard-coding `mapping.map` calls in plugin code couldn't express that demotion without re-implementing it everywhere.
+3. **Resolution policy varies.** `AllBookmark.resolve(doc)` is `new AllSelection(doc)` (a constant function of the doc). `TextBookmark.resolve(doc)` goes through `TextSelection.between` to handle endpoints that drifted into non-inline content. `NodeBookmark.resolve(doc)` checks `isSelectable` and falls back to `Selection.near`. Each class encapsulates its own "if mapping made me invalid, here's the fallback" logic.
+
+In short: bookmarks let each selection subclass control both its mapping and its resolution policy without leaking those policies into callers. The history plugin, the only major consumer, calls `bookmark.map(mapping)` and `bookmark.resolve(doc)` polymorphically without ever needing to know which subclass it has.
+
+### `Selection.find` does not exist
+
+The `prosemirror-state` API surface for "find a selection at/near a position" is:
+
+| Function | Returns | Source |
+|---|---|---|
+| `Selection.findFrom($pos, dir, textOnly?)` | `Selection \| null` | `selection.ts:118–130` |
+| `Selection.near($pos, bias?)` | `Selection` (never null; `AllSelection` fallback) | `selection.ts:135–137` |
+| `Selection.atStart(doc)` / `Selection.atEnd(doc)` | `Selection` | `selection.ts:143/149` |
+| `findSelectionIn(doc, node, pos, index, dir, text?)` | `Selection \| null` (package-private) | `selection.ts:439–452` |
+
+There is **no** `Selection.find`. If older docs or examples reference it, treat them as out-of-date — the modern entry points are `findFrom` (when you want a directional search and can handle `null`) and `near` (when you want a guaranteed result). `findSelectionIn` is internal and not exported.
+
+### `AllSelection.$head` / `$anchor` are placeholders, not user data
+
+Already noted in §5: `AllSelection`'s constructor stamps `$anchor = doc.resolve(0)` and `$head = doc.resolve(doc.content.size)` to satisfy the abstract base class. These positions are correct as *bounds*, but they are **not** the result of any user gesture — there's no "drag start" for an all-selection. Code that wants to know "did the user actively select all" should branch on `selection instanceof AllSelection` rather than inspect `$anchor`/`$head`. Code that wants the geometric bounds (e.g. for a decoration) is fine using them.
+
+---
+
+## 11.6 Worked traces
+
+### Deleting a range that spans the selection's anchor
+
+Setup:
+
+```
+Doc:          "Hello [bold]world[/bold]!"
+              positions: 0  6                 17 18
+TextSelection: anchor=4 ("Hel|lo"), head=12 ("wo|rld")
+Plain bookmark: TextBookmark { anchor: 4, head: 12 }
+```
+
+Apply a transform that deletes positions `2..8` (covers anchor):
+
+```
+tr.delete(2, 8)
+   ─ creates ReplaceStep deleting "llo bo"
+   ─ tr.mapping has one map: positions [2..8] removed (length 6)
+```
+
+Map the bookmark:
+
+```
+TextBookmark.map(mapping):
+  new anchor = mapping.map(4)
+    pos 4 falls inside the deleted [2,8) range
+    default bias = +1 → maps to the position *after* the deletion = 2
+  new head   = mapping.map(12)
+    pos 12 is after the deleted range, shifted by -6
+    → 6
+  → TextBookmark { anchor: 2, head: 6 }
+```
+
+Resolve back:
+
+```
+new TextBookmark(2, 6).resolve(newDoc)
+  = TextSelection.between(newDoc.resolve(2), newDoc.resolve(6))
+  = TextSelection with anchor=2, head=6 (assuming both land in inline content)
+```
+
+Result: the selection's anchor was inside the deleted range, but bias `+1` pushed it forward to position `2` (immediately after the deletion). The selection now covers what was previously `[8..12]` — the "rld" portion of "world", in the new coordinate system positions `[2..6]`. This is the deterministic behaviour `TextBookmark` guarantees: an anchor inside a deletion never gets stranded *inside* the deletion (which would be impossible after the delete) and never moves *backward* of where it was. If you needed the anchor to stick to the *start* of the original range instead, you'd need a custom bookmark using bias `-1`.
+
+### `TextSelection` over deleted styled text → mark inheritance
+
+Setup:
+
+```
+Doc:          "Hello [strong]bold[/strong] world"
+TextSelection: anchor=6, head=10 (covers "bold", entirely within the strong mark)
+```
+
+Apply:
+
+```ts
+const tr = state.tr.deleteSelection().insertText("X")
+```
+
+Trace:
+
+1. `deleteSelection` calls `this.selection.replace(this)` with `Slice.empty`.
+2. `TextSelection.replace` (selection.ts:248–254) runs `super.replace(tr, Slice.empty)` — does the actual delete.
+3. Then, because `content === Slice.empty`, it computes `marks = this.$from.marksAcross(this.$to)`. Both `$from` (pos 6) and `$to` (pos 10) sit inside `strong`, so `marksAcross` returns `[strongMark]`.
+4. `tr.ensureMarks([strongMark])` — sets `tr.storedMarks = [strongMark]`, `UPDATED_MARKS = 1`.
+5. `insertText("X")` (with no `from`/`to`) calls `replaceSelectionWith(schema.text("X"), true)`.
+6. `replaceSelectionWith` reads `this.storedMarks` (which is `[strongMark]`), creates a text node carrying that mark, and replaces.
+7. `addStep` fires inside the replace, *clearing* `tr.storedMarks` to `null` again — but the text was already created with the mark before that point.
+8. State field's `apply` for `storedMarks`: new selection is a caret, so it returns `tr.storedMarks` (which is `null`). New state has `storedMarks = null`.
+
+Result: the deleted "bold" was replaced with "X" carrying the `strong` mark. Subsequent typing (without intervention) inherits the natural marks at the new cursor position — which, since "X" is bold, will continue to be bold via `$from.marks()`. So the user's intuition ("I selected bold text, deleted it, typed something else, it should still be bold") is satisfied without any mark-tracking effort on their part.
+
+### `appendTransaction` returning a tr based on `oldState` (anti-pattern)
+
+Setup:
+
+```ts
+new Plugin({
+  appendTransaction(trs, oldState, newState) {
+    // BUG: building tr on oldState, not newState
+    return oldState.tr.insertText("oops", 0, 0)
+  }
+})
+```
+
+Inside the fixpoint loop (state.ts:160):
+
+```
+trs.push(tr); newState = newState.applyInner(tr)
+                                    │
+                                    ▼
+applyInner(tr):
+  if (!tr.before.eq(this.doc)) throw new RangeError("Applying a mismatched transaction")
+                                    │
+                                    │  tr.before = oldState.doc  ← built from oldState
+                                    │  this      = newState      ← which already incorporates rootTr
+                                    │  oldState.doc !== newState.doc  (rootTr added/changed content)
+                                    ▼
+                          throw RangeError
+```
+
+Always build appended transactions on `newState.tr`, not on `oldState.tr` or any captured earlier state. The `oldState` parameter is supplied for *inspection* (computing the diff between then and now) — never for transaction construction.
 
 ---
 

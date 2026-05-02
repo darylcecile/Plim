@@ -28,6 +28,33 @@ points at our own dossier file.
 * **Mitigation:** PM caches `ContentMatch` per node type and surfaces
   `defaultType` and `fillBefore` so editors don't have to think in NFA terms
   ([03 §6.3, §6.6](./03-schema-and-content-expressions.md)).
+* **Pathological example.** The classic NFA-to-DFA blow-up is `(a|aa)*`
+  for regexes; the analog in PM content expressions is:
+
+  ```
+  // schema:
+  group_a: { content: "para+" },
+  group_b: { content: "(para | para para)*" }
+  // group_b's NFA has overlapping epsilon transitions: accept para,
+  // OR consume two paras and recurse. The NFA does not blow up
+  // exponentially because PM's matcher is non-backtracking, but
+  // ContentMatch.matchType has to enumerate both branches every
+  // time it sees a `para`, doubling the work for every additional
+  // child node. On a doc with 10,000 paragraphs in a `group_b`,
+  // matchType becomes a measurable hot spot.
+
+  // A worse case — mark-style overlap on inline content:
+  inline: "(text | text mention)*"
+  // Same shape: each text token has two matching paths. Multiplied
+  // by the inline parser's per-token call, this can dominate parse
+  // time on large documents.
+  ```
+
+  Equivalent of `(a|aa)*` in PM grammar:
+  `"(text | text text)*"` — every text node consumed has two NFA
+  paths to track. Authors should write `"text*"` instead. PM's
+  `ContentMatch.compile` does *not* warn about this; it cheerfully
+  builds the over-permissive NFA.
 * **Redesign:** Provide a higher-level "this node accepts these children
   in this order" DSL with an explicit "auto-fill" operator. Reject
   expressions whose DFA blows up (`*` over groups with overlap).
@@ -176,6 +203,40 @@ points at our own dossier file.
 * **Manifests as:** Two steps that work individually fail when reordered.
 * **Source:** [05 §2 StepResult](./05-transform-and-steps.md).
 * **Mitigation:** Use `tr.steps` order or rely on `Mapping`.
+* **2-step counterexample.**
+
+  ```
+  Doc (positions in [brackets]):
+    [0]<p>[1]hello[6]</p>[7]
+                                                      // doc length = 7
+
+  Step S1: ReplaceStep(from=1, to=1, slice=" world ")  // insert at start
+  Step S2: ReplaceStep(from=6, to=6, slice="!")        // insert at end
+
+  Apply [S1, S2]:
+    after S1 → <p> worldhello</p>      length 13
+    S2.from=6 still refers to the old position 6 (which was end of "hello").
+    To map: tr.mapping.map(6) = 12 (after the 6 inserted chars).
+    But ReplaceStep(6,6,"!") does NOT auto-map; it operates on raw
+    positions. Applying it to the post-S1 doc yields:
+      <p> worl!dhello</p>   ← INSERT AT WRONG SPOT
+
+  Apply [S2, S1]:
+    after S2 → <p>hello!</p>            length 8
+    S1.from=1, to=1 still valid (no shift before pos 1) → insert at 1
+    yields: <p> worldhello!</p>         length 14   ← CORRECT-LOOKING
+
+    But this is only correct because S1 is *before* S2's range.
+    Reverse the example (S1 inserts at end, S2 at start) and the
+    bug surfaces in the [S2, S1] order instead.
+  ```
+
+  The general rule: a raw `Step` only knows its pre-image positions;
+  `Transform` re-maps automatically as you call `tr.replaceWith` etc.
+  Reordering raw `Step`s without re-mapping breaks them. Two steps
+  commute only if their ranges are disjoint AND neither shifts a
+  position the other depends on. Mapping operationally serializes them.
+
 * **Redesign:** Consider an "operational transform" model where steps carry
   the metadata needed to commute.
 
@@ -208,7 +269,32 @@ points at our own dossier file.
   whichever is first wins.
 * **Source:** [19 §3.3](./19-commands-keymap-inputrules.md), [07 §6](./07-state-and-plugins.md).
 * **Mitigation:** Document order; users must read source to know.
+* **Why this is more subtle than "first wins".** Plugins have *two*
+  orderings, and they can diverge:
+
+  1. **Init order** is `state.plugins` declaration order. `EditorState.create`
+     walks plugins front-to-back and calls `state.init(config, instance)` on
+     each plugin's state field. If plugin B's init reads plugin A's state
+     via `pluginA.getState(instance)`, it works only if A precedes B.
+  2. **Apply order** is also declaration order (front-to-back). On every
+     transaction, each plugin field's `apply(tr, value, oldState, newState)`
+     runs in declaration order. The `newState` argument is a *partially-built*
+     state in which fields earlier in the plugin list have already been
+     updated, but later fields still hold their old values.
+
+  These orderings normally coincide. The divergence happens when plugin
+  B's `apply` *also* reads plugin A's state (now correctly the new value)
+  but plugin B's *init* runs before A — possible only if plugins were
+  reconfigured in a different order between sessions.
+
+  Concrete trap: a "selection-history" plugin that records the previous
+  selection on every `apply`. If a "decoration-of-selection" plugin
+  declared *after* it reads the selection-history's *new* value, that
+  works. If declared *before*, it reads the *old* value — a one-step lag.
+  Because both are valid plugin patterns, neither error is caught.
+
 * **Redesign:** Explicit priority on `PluginSpec`; document it; reject ties.
+  Topological sort by declared dependency on other `PluginKey`s.
 
 ### 4.4 `PluginKey` collisions
 
@@ -285,7 +371,42 @@ points at our own dossier file.
 * **Source:** [09 §1.4 setProps](./09-view-and-viewdesc.md).
 * **Mitigation:** Re-read `view.dom` after any `setProps`/`updateState` that
   could change it.
-* **Redesign:** Stable outer container; `view.dom` is a child.
+* **React/Vue/Svelte lifecycle interactions.** Frameworks own DOM lifecycles
+  on their schedule, which collides with PM's ownership of `view.dom`:
+
+  * **React StrictMode double-mount.** In development, React intentionally
+    mounts → unmounts → re-mounts components to catch effect leaks. If your
+    PM wrapper component creates `new EditorView` in `useEffect` without
+    a destroy in the cleanup, you end up with two `EditorView`s pointing
+    at the same DOM after the second mount. The first one's `DOMObserver`
+    is still alive and races with the second on every keystroke.
+    Fix: always return a cleanup that calls `view.destroy()` and null
+    out the ref. Verify by setting StrictMode and watching for duplicate
+    selectionchange listeners.
+
+  * **React 18 concurrent rendering.** A render that's interrupted (Suspense,
+    transitions) may have created a `view.dom` that never gets attached.
+    PM doesn't know it's orphaned and will leak it. Solution: gate
+    `EditorView` construction on `useLayoutEffect` (synchronous) so it
+    can never be interrupted, or use a `useRef` + `useEffect` pattern
+    that ties view lifetime to a stable container ref.
+
+  * **Vue 3 keep-alive / Svelte component caching.** When a parent keeps
+    a component "alive" but unmounts its DOM (route transition), PM's
+    `view.dom` is detached but `view.destroy` was not called. On
+    re-activation, PM tries to reconcile against detached DOM nodes and
+    `getBoundingClientRect` returns zeros, which cascades into wrong
+    `coordsAtPos` results. Fix: hook `onDeactivated`/`onActivated` and
+    either destroy/recreate the view or `view.dom.replaceWith(currentDom)`.
+
+  * **HMR (hot module replacement).** Reloading the schema or a plugin via
+    HMR replaces the module but leaves the existing `EditorView` running
+    against old plugin instances. Symptoms: keymap commands stop working
+    or use the old version. Fix: register an HMR `dispose` handler that
+    destroys the view and reconstructs it.
+
+* **Redesign:** Stable outer container; `view.dom` is a child. See
+  [22 §20 Destroy/recreate](#20-destroying--recreating-a-view-spa-route-changes).
 
 ### 5.5 Reuse keys mistake — same node, same dom, different mark stack
 
@@ -336,6 +457,49 @@ points at our own dossier file.
 * **Manifests as:** Decorations stuck at old positions after edits.
 * **Source:** [10 §5](./10-decorations.md), [I11](./21-rendering-pipeline-end-to-end.md).
 * **Mitigation:** Plugin convention.
+* **Concrete corruption example.** A spell-check plugin keeps inline
+  decorations at error positions. The naive plugin `apply`:
+
+  ```ts
+  apply(tr, set: DecorationSet) {
+    // BUG: not mapping
+    return set
+  }
+  ```
+
+  Initial doc: `<p>helo world</p>`, decoration at (1, 5) underlining "helo".
+
+  User selects "helo" and replaces with "HELLO" (length 5 → 5). Doc
+  becomes `<p>HELLO world</p>`. The decoration is still at (1, 5),
+  which now points at "HELLO" — coincidentally still correct.
+
+  Now user types "X" at position 1: doc becomes `<p>XHELLO world</p>`,
+  length now 13. The decoration is still at (1, 5) but the underlined
+  range is now "XHELL" — *wrong word, wrong boundaries*.
+
+  The corruption escalates: user deletes paragraph and types a new
+  one. Doc becomes `<p>fresh</p>`, length 7. The decoration at (1, 5)
+  points into a position past the doc end. PM's `DecorationSet.add`
+  silently clamps; the decoration "lands" inside the new word it never
+  applied to. Worse, `DecorationSet.find` still reports the underline
+  exists, so any plugin that reads "is there an error here" gets a
+  false positive.
+
+  Fix:
+
+  ```ts
+  apply(tr, set: DecorationSet) {
+    return set.map(tr.mapping, tr.doc)  // remaps positions; drops
+                                        // decorations whose range
+                                        // was entirely deleted
+  }
+  ```
+
+  `DecorationSet.map` walks the set, applies `tr.mapping.map(pos)` to
+  each decoration's from/to, and drops decorations whose mapping
+  collapsed (start == end and not a widget). This is the canonical
+  pattern; PM's lack of an automatic mechanism is the war story.
+
 * **Redesign:** First-class `decorations: DecorationField` that auto-maps.
 
 ### 6.5 Widget DOM with focusable/editable contents
@@ -512,8 +676,59 @@ Word)
 * **Manifests as:** Bolding inside an IME run yields mixed-mark output.
 * **Source:** [14 §9](./14-ime-composition.md), [08 §10](./08-selection.md).
 * **Mitigation:** `storedMarks` applied at flush.
+* **Code-level repro.**
+
+  ```ts
+  // Setup: caret at end of <p>hello|</p>
+  // User toggles bold via toolbar button → state.tr.setStoredMarks([bold])
+  toolbarButton.onmousedown = (e) => {
+    e.preventDefault()  // keep focus
+    view.dispatch(view.state.tr.setStoredMarks([
+      view.state.schema.marks.strong.create()
+    ]))
+  }
+
+  // User starts an IME composition, types ぁ → ah → "ah" candidate
+  //   t1: compositionstart fires; view.input.composing = true
+  //       PM does NOT consume storedMarks yet (no insert happened).
+  //   t2: compositionupdate × N — DOM mutates with composing text;
+  //       PM ignores at the state level.
+  //   t3: compositionend fires; view.input.composing = false.
+  //       forceFlush → readDOMChange diffs old vs new fragment →
+  //       tr = state.tr.replaceWith(from, to, schema.text("ah"))
+  //       Note: tr.replaceWith does NOT honor storedMarks.
+  //       (storedMarks would have been consumed by tr.insertText,
+  //       which IS the path PM takes for typing — but composition
+  //       goes through replaceWith based on the diff result.)
+
+  // Result: "ah" is inserted WITHOUT bold. The user's intent was
+  // "bold the IME-composed text" but storedMarks fire-and-forget
+  // semantics meant they were consumed by some intervening event
+  // (selection change, or simply because storedMarks reset on most
+  // transactions per 08 §10).
+
+  // Workaround at the user level:
+  function insertComposedText(view: EditorView, text: string,
+                              from: number, to: number) {
+    let { storedMarks } = view.state
+    let tr = view.state.tr.replaceRangeWith(
+      from, to,
+      view.state.schema.text(text, storedMarks ?? undefined)
+    )
+    view.dispatch(tr)
+  }
+  ```
+
+  The deeper bug: the composition-flush path in
+  [15 §5g](./15-domobserver-and-domchange.md) calls `tr.replace` for
+  composition ends with multi-character changes, which constructs a
+  `Slice` directly and bypasses `storedMarks`. Single-character
+  composition ends *do* go through `tr.insertText` and inherit marks.
+  This means "bold then type one IME character" works; "bold then type
+  three IME characters" doesn't.
 * **Redesign:** Compose mark intent + text intent independently, merged at
-  commit.
+  commit. Treat composing text as a first-class transaction in the queue,
+  not a diff result, so the path through `tr.insertText` is preserved.
 
 ### 10.4 Safari composition end with no text change
 
@@ -837,33 +1052,50 @@ windows — are all listed in [18 §3](./18-cross-browser-quirks.md).
 
 ## 17. "If we were redesigning…"
 
-The 25 highest-leverage observations from this dossier, in priority order.
+The 31 highest-leverage observations from this dossier, in priority order.
 
 ### Architecture & invariants
 1. **Make appendTransaction loop bounded by topology, not by author hygiene.**
    Cycles must be detected and rejected.
-   ([4.2](#42-appendtransaction-infinite-loop))
+   ([4.2](#42-appendtransaction-infinite-loop);
+   `prosemirror-state/src/state.ts` `applyInner` loop — see
+   [07 §5](./07-state-and-plugins.md))
 2. **Single mutation-source token.** Every PM write tags its DOM mutations so
    the observer can ignore them at the record level.
-   ([11.1](#111-feedback-loops))
+   ([11.1](#111-feedback-loops);
+   `prosemirror-view/src/domobserver.ts` `currentSelection` — see
+   [15 §6](./15-domobserver-and-domchange.md), [15 §8 ignoreMutation](./15-domobserver-and-domchange.md))
 3. **Composition as a first-class editor state**, not a flag on `view.input`.
    NodeView authors must opt-in to composition handling explicitly.
-   ([10.5](#105-composition-view-desc-shielding))
+   ([10.5](#105-composition-view-desc-shielding);
+   `prosemirror-view/src/input.ts` compositionstart/end handlers — see
+   [14 §3](./14-ime-composition.md), [14 §5](./14-ime-composition.md))
 4. **Boundaries are types.** `LeftPosition`/`RightPosition`, doc-versioned
    positions, branded `PluginKey`s, frozen attrs.
    ([2.2](#22-assoc-flips-behaviour-at-deletion-boundaries),
-    [4.4](#44-pluginkey-collisions))
+    [4.4](#44-pluginkey-collisions);
+   `prosemirror-model/src/resolvedpos.ts` — see
+   [04 §3](./04-resolved-positions.md), [07 §7](./07-state-and-plugins.md))
 
 ### Schema / model
 5. **Replace content expressions with a tractable DSL** that auto-fills
    common patterns and rejects exponential DFAs.
-   ([1.1](#11-content-expressions-are-nfas-not-regexes))
+   ([1.1](#11-content-expressions-are-nfas-not-regexes);
+   `prosemirror-model/src/content.ts` `ContentMatch.parse` — see
+   [03 §4](./03-schema-and-content-expressions.md))
 6. **Single `kind` enum** for inline/block/leaf/atom/isolating.
-   ([1.3](#13-atom-true-vs-leaf-vs-isolating-true--three-orthogonal-flags))
+   ([1.3](#13-atom-true-vs-leaf-vs-isolating-true--three-orthogonal-flags);
+   `prosemirror-model/src/schema.ts` NodeSpec — see
+   [02 §2.2](./02-document-model.md))
 7. **Auto-derive parseDOM from toDOM** as a baseline. Authors can override.
-   ([1.5](#15-forgetting-parsedom-makes-a-node-un-pasteable))
+   ([1.5](#15-forgetting-parsedom-makes-a-node-un-pasteable);
+   `prosemirror-model/src/from_dom.ts`,
+   `prosemirror-model/src/to_dom.ts` — see
+   [11 §4](./11-dom-parser.md), [12 §3](./12-dom-serializer.md))
 8. **Stable, schema-declared mark order.** Ban `addToSet` ordering surprises.
-   ([1.2](#12-marks-order-matters-and-is-implicit), [8.3](#83-mark-order-in-serializenode))
+   ([1.2](#12-marks-order-matters-and-is-implicit), [8.3](#83-mark-order-in-serializenode);
+   `prosemirror-model/src/mark.ts` `addToSet` — see
+   [02 §4.2](./02-document-model.md))
 
 ### Transform
 9. **Tree-template rewrite primitive** instead of dual `ReplaceStep` /
@@ -927,30 +1159,562 @@ The 25 highest-leverage observations from this dossier, in priority order.
     coalescing. Commands declare their own boundary.
     ([16.5](#165-closehistorykey-event-boundary-detection))
 
+### Accessibility
+26. **`role="textbox"` and ARIA by default**, not author-supplied. PM
+    sets `contenteditable` but leaves accessible-name, role, aria-multiline,
+    aria-readonly, and live-region announcement for collab presence to
+    the consumer. Result: the median PM editor is not screen-reader-usable
+    out of the box. Default ARIA, with hooks to override.
+    See [23-accessibility.md](./23-accessibility.md).
+27. **NodeView accessibility contract.** `nodeViews` should require an
+    accessible-name function and keyboard-handler descriptors. Atom
+    NodeViews without keyboard handling and proper `tabindex`/`role`
+    are silently inaccessible; the API gives no feedback.
+    See [23-accessibility.md §4 NodeView a11y](./23-accessibility.md).
+
+### Internationalization & RTL
+28. **First-class bidi.** PM's `dir` handling is left to the host;
+    `unicode-bidi: plaintext` should be the default, with per-paragraph
+    direction stored in the doc model. Selection movement, `coordsAtPos`,
+    and clipboard round-trip must all be bidi-aware by construction,
+    not by browser quirk patches.
+    ([13.3](#133-rtl-bidi-ranges); see
+    [28-i18n-bidi.md](./28-i18n-bidi.md).)
+
+### Async commands & data
+29. **Async commands with cancellation.** Commands today are sync
+    `(state, dispatch) => boolean`. Real apps need "fetch a mention,
+    insert it" — a placeholder/replace pattern is the only recourse.
+    Bake async commands and their cancellation into the type so
+    transactions composing async results have first-class semantics
+    (mapping through history, collab, and undo).
+    See [37-async-transactions.md](./37-async-transactions.md).
+
+### Testing
+30. **Built-in test harness with selection markers.** `prosemirror-test-builder`
+    is the de facto standard but lives outside PM core, and has no
+    integration test recipes. Bake `<a>`/`<b>` selection markers into a
+    canonical `view.simulateInput`/`expectDoc` API, with jsdom and
+    Playwright presets. See [27-testing.md](./27-testing.md).
+
+### Plugin authoring & idioms
+31. **Plugin cookbook in core.** Placeholders, mention-autocomplete,
+    decoration-as-cache, async-fetch, cursor decorations, word-count —
+    these are the patterns that every PM consumer reinvents. Ship them
+    as opt-in core packages with a single coherent style guide so
+    plugin ecosystems don't fragment. See
+    [31-plugin-cookbook.md](./31-plugin-cookbook.md).
+
+### Mobile-first
+32. **Pointer events end-to-end with mobile defaults.** Tap-vs-drag
+    disambiguation, virtual keyboard layout shifts (`visualViewport`),
+    iOS magnifier hit-testing, Android predictive text, and
+    long-press context menus are all retro-fits in PM today. A mobile-first
+    redesign would build on Pointer Events from day one and treat the
+    desktop case as the simplification, not the other way around.
+    ([9.3](#93-touch-tap-vs-drag-disambiguation), [10.1](#101-android-chrome-compositionend-not-firing);
+    see [25-mobile.md](./25-mobile.md).)
+
 > The full takeaways list (priorities for our editor) appears in
-> [01 §8](./01-architecture-overview.md) — these 25 supplement it with the
+> [01 §8](./01-architecture-overview.md) — these 31 supplement it with the
 > war-story evidence.
 
 ---
 
-## 18. Quick reference — pitfall to file map
+## 19. Memory leaks
+
+PM editors are often long-lived (a page-app session, hours of use). Three
+classes of leak appear in production.
+
+### 19.1 Plugin state retention via closures
+
+* **Manifests as:** Memory grows monotonically over a session; heap snapshots
+  show plugin state objects with retained refs to old `EditorState`s.
+* **Source:** `prosemirror-state/src/plugin.ts`,
+  [07 §6](./07-state-and-plugins.md).
+* **Repro:**
+
+  ```ts
+  // BAD: plugin.spec.view captures `view` and a counter that holds
+  // the previous state for diffing.
+  let plugin = new Plugin({
+    view(view) {
+      let prevState: EditorState | null = null
+      return {
+        update(view, lastState) {
+          // BAD: stores prevState across updates, holds onto big docs
+          prevState = lastState
+        },
+        destroy() {
+          // BAD: forgot to null prevState
+        }
+      }
+    }
+  })
+  ```
+
+  Each `EditorState` snapshot retains its `doc`, all plugin field values,
+  and (transitively) every `Mark`/`Attrs` instance referenced. On a 10MB
+  doc, holding one extra state means holding ~10MB extra.
+
+* **Mitigation:** Plugin views must null out captured state in `destroy()`
+  and avoid retaining `lastState` across `update` calls. Use shallow
+  derived data instead.
+* **Detection:** Heap snapshot, look for multiple `EditorState` instances
+  with `next` chains.
+
+### 19.2 Plugin views with un-removed event listeners or timers
+
+* **Manifests as:** After `view.destroy()`, console errors fire on
+  document/window events because old listeners are still registered.
+* **Source:** plugin.spec.view contracts, [21 §K.5](./21-rendering-pipeline-end-to-end.md).
+* **Mitigation:**
+
+  ```ts
+  view(view) {
+    let onResize = () => { /* ... */ }
+    window.addEventListener("resize", onResize)
+    let timer = setInterval(() => { /* ... */ }, 1000)
+    return {
+      destroy() {
+        window.removeEventListener("resize", onResize)
+        clearInterval(timer)
+      }
+    }
+  }
+  ```
+
+* **Detection:** In Chrome DevTools, `getEventListeners(window)` after
+  `view.destroy()` should not show plugin-installed listeners.
+
+### 19.3 DecorationSet accumulation in long-running sessions
+
+* **Manifests as:** Memory grows steadily even with a stable doc size.
+* **Source:** [10 §5](./10-decorations.md).
+* **Cause:** A plugin that recomputes a *fresh* `DecorationSet` on every
+  transaction, even when the underlying data hasn't changed, creates
+  garbage at every keystroke. Old sets are reachable from the history
+  rope until that history event is pruned.
+* **Mitigation:** Memoize: return the same `DecorationSet` reference if
+  the input data is unchanged. Use `DecorationSet.map(tr.mapping, doc)`
+  and only call `.add()`/`.remove()` when content differs.
+
+### 19.4 History rope retention
+
+* **Manifests as:** Memory grows during long undo-able sessions.
+* **Source:** [20 §1.4 newGroupDelay & pruning](./20-history-and-collab.md).
+* **Cause:** `Branch` keeps inverted steps + bookmarks for every event,
+  capped by `depth`. The cap defaults to 100 events; each event in a
+  large doc retains a slice of the doc.
+* **Mitigation:** Lower `depth` for memory-constrained pages; call
+  `closeHistory(state)` to flush the current event and allow pruning.
+
+### 19.5 `view.destroy()` checklist
+
+When tearing down an editor, PM destroys: docView tree, ViewDescs and
+their NodeViews, plugin views (calling each `destroy()`), DOMObserver,
+input listeners, and the `view.dom` element ownership. PM does NOT
+destroy: plugin state values, `view.state.doc`, history items, or any
+references the host has captured. The host must:
+
+1. Null out any refs to `view`, `view.state`, `view.dom`.
+2. Cancel any in-flight async work tagged with this view.
+3. Disconnect any `IntersectionObserver`/`ResizeObserver` watching
+   `view.dom`.
+4. Verify `view.dom.parentNode` is null after destroy.
+
+See [33-memory.md](./33-memory.md) for the full memory-management deep dive.
+
+---
+
+## 20. Destroying & recreating a view (SPA route changes)
+
+A common SPA pattern: route from `/doc/123` to `/doc/456` keeps the same
+`<Editor>` component mounted but needs to swap the underlying document.
+
+### 20.1 The naive approach (broken)
+
+```tsx
+function Editor({ docId }: { docId: string }) {
+  let viewRef = useRef<EditorView | null>(null)
+  let containerRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!containerRef.current) return
+    fetchDoc(docId).then(doc => {
+      // BAD: creates a NEW view on every docId change without
+      // destroying the old one
+      viewRef.current = new EditorView(containerRef.current!, {
+        state: EditorState.create({ doc, plugins: [...] })
+      })
+    })
+  }, [docId])
+
+  return <div ref={containerRef} />
+}
+```
+
+Symptoms: stacked `EditorView`s, duplicate selectionchange listeners,
+duplicate DOM trees inside the container, IME confusion (multiple
+DOMObservers fight over the same DOM).
+
+### 20.2 The correct pattern
+
+```tsx
+function Editor({ docId }: { docId: string }) {
+  let viewRef = useRef<EditorView | null>(null)
+  let containerRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetchDoc(docId).then(doc => {
+      if (cancelled || !containerRef.current) return
+      // Destroy any prior view first
+      if (viewRef.current) {
+        viewRef.current.destroy()
+        viewRef.current = null
+      }
+      viewRef.current = new EditorView(containerRef.current, {
+        state: EditorState.create({ doc, plugins: [...] })
+      })
+    })
+    return () => {
+      cancelled = true
+      if (viewRef.current) {
+        viewRef.current.destroy()
+        viewRef.current = null
+      }
+    }
+  }, [docId])
+
+  return <div ref={containerRef} />
+}
+```
+
+### 20.3 The "prefer setState over recreate" alternative
+
+If schema and plugins are unchanged, prefer to swap the doc in-place:
+
+```ts
+viewRef.current.updateState(
+  viewRef.current.state.reconfigure({ /* same plugins */ }).apply(
+    /* a tr that replaces the doc */
+    state.tr.replaceWith(0, state.doc.content.size, newDoc.content)
+  )
+)
+```
+
+This keeps the same `EditorView` (no DOM rebuild, no listener churn,
+preserves focus state if appropriate). Pitfall: history is preserved
+across the swap unless you pass a fresh state with empty history. In
+collab apps, a doc swap should always destroy/recreate to reset
+collab's `unconfirmed` queue.
+
+### 20.4 Edge cases
+
+* **Modal-close during typing.** If the route change happens mid-IME,
+  call `view.dom.blur()` *before* `view.destroy()` to force composition
+  end. Otherwise, on Android, the IME holds a stale reference to
+  `view.dom` and the next focus crashes.
+* **Plugin view cleanup ordering.** PM destroys plugin views in *reverse*
+  declaration order; symmetric to construction.
+* **Strict-mode double-destroy.** `destroy()` is idempotent in core PM,
+  but custom plugin views often aren't. Make `destroy` safe to call twice.
+
+---
+
+## 21. Multiple editors per page
+
+Common patterns: a comment thread with N editors, a spreadsheet with
+per-cell editors, a side-by-side diff with two editors. Several traps.
+
+### 21.1 Plugin key collisions across editors
+
+* **Manifests as:** Plugin from editor A reads state via `myKey.getState`
+  and gets editor B's state by mistake (in custom plumbing).
+* **Source:** [07 §7](./07-state-and-plugins.md).
+* **Cause:** `PluginKey` is intentionally shared across editor instances —
+  the same key references the same plugin's *spec*, not the same
+  state instance. Authors who pass `view` and key around can confuse
+  which view's state they want.
+* **Mitigation:** Always pass the `EditorState` with the `PluginKey`.
+  Never store `myKey.getState(globalView.state)` in module scope.
+
+### 21.2 Focus stealing
+
+* **Manifests as:** Clicking inside editor A while typing in editor B
+  silently transfers focus mid-keystroke; the keystroke lands in A
+  but with B's stored marks / IME state.
+* **Source:** [13 §8 focus](./13-input-pipeline.md).
+* **Mitigation:** Each editor should track its own focus state via
+  `view.hasFocus()` and reject transactions that arrive while
+  unfocused (toolbar `mousedown.preventDefault` is critical when the
+  toolbar serves multiple editors).
+
+### 21.3 Paste race conditions
+
+* **Manifests as:** User copies in editor A, switches to editor B (still
+  via OS clipboard), pastes — but `application/x-prosemirror` payload
+  was set by A's clipboard hook and contains schema-incompatible
+  content.
+* **Source:** [16 §3.3 data-pm-slice, §3.4 cross-editor](./16-clipboard.md).
+* **Mitigation:** Each editor's clipboard reader should validate the
+  schema namespace embedded in `data-pm-slice` and fall back to
+  HTML parsing if schemas mismatch. PM does this validation as a
+  best-effort.
+
+### 21.4 Selection arbitration
+
+* **Manifests as:** Both editors think they have selection because they
+  both responded to a `selectionchange` event.
+* **Source:** [13 §2 selection events](./13-input-pipeline.md).
+* **Mitigation:** PM filters `selectionchange` to events whose
+  `document.activeElement` matches the view's `dom`. Custom code that
+  reads `window.getSelection()` directly must do the same check.
+
+### 21.5 Resource accumulation
+
+* **Manifests as:** A page with 50 editors uses 500MB.
+* **Mitigation:** Each `EditorView` constructs a full ViewDesc tree, a
+  DOMObserver, input handlers, and plugin views. Use lazy mounting
+  (build the editor on focus, tear down on blur for unfocused
+  cells). Or use a single `EditorView` and switch its document on
+  cell focus.
+
+---
+
+## 22. Server-side rendering & hydration
+
+PM is fundamentally a contenteditable host; it cannot run on the server.
+But many SSR frameworks (Next.js, Nuxt, SvelteKit) need to render *something*
+during SSR and then upgrade to interactive on the client.
+
+### 22.1 The "render static HTML server-side, hydrate to PM client-side" pattern
+
+```tsx
+// Server: render a static, non-editable representation of the doc
+function ServerView({ doc }: { doc: Node }) {
+  let html = useMemo(() => {
+    let serializer = DOMSerializer.fromSchema(doc.type.schema)
+    let div = jsdom.document.createElement("div")
+    div.appendChild(serializer.serializeFragment(doc.content))
+    return div.innerHTML
+  }, [doc])
+  return <div dangerouslySetInnerHTML={{ __html: html }} />
+}
+```
+
+The server uses `DOMSerializer` with a `jsdom`-provided `document`
+([22 §8.5](#85-ssr--no-document-available)) to produce static markup.
+
+### 22.2 Hydration mismatches
+
+* **Manifests as:** React/Vue console warning "Hydration mismatch:
+  server rendered X, client rendered Y" because PM injects sentinel
+  attributes (`pm-padding`, `data-prosemirror-marker`) that the server
+  did not.
+* **Source:** [09 §1.5 view init](./09-view-and-viewdesc.md),
+  [12 §3 serializer](./12-dom-serializer.md).
+* **Mitigation:** The hydration boundary must be the wrapper *around*
+  `view.dom`, not `view.dom` itself. Render an empty container on the
+  server; on `useEffect`/`onMounted`, parse the server-rendered HTML
+  via `DOMParser.fromSchema` and construct the `EditorView` with the
+  parsed doc. Or render a non-editable preview server-side and replace
+  the entire subtree on client mount.
+
+### 22.3 The "no document available" hard failure
+
+* **Manifests as:** Importing `prosemirror-view` in a server-only file
+  throws on module load because PM accesses `document` at top-level
+  (e.g., `document.documentElement` in `browser.ts`).
+* **Mitigation:** Lazy-import `prosemirror-view` only inside client-only
+  code paths. Use Next.js `dynamic({ ssr: false })`, Nuxt's
+  `<ClientOnly>`, or SvelteKit's `browser` guard.
+
+### 22.4 Schema availability on the server
+
+`prosemirror-model` and `prosemirror-schema-basic` *are* SSR-safe (no
+DOM access at top-level). `prosemirror-view`, `prosemirror-keymap`,
+`prosemirror-inputrules`, and `prosemirror-history` are not. Author your
+code so the schema and `Node`-level operations can run server-side
+(serialize, validate JSON, derive a content summary), with
+`prosemirror-view` strictly client-only.
+
+### 22.5 Streaming SSR / Suspense
+
+If your framework streams HTML chunks (React 18 Suspense), the editor
+container appears in the stream before its hydration script runs. Make
+sure the placeholder is non-interactive (`tabindex="-1"`) so users
+who interact early don't see ghost behavior. Set the editor up in a
+`useEffect` (post-paint) for predictability.
+
+---
+
+## 23. Virtualized containers (react-window, react-virtuoso, etc.)
+
+Embedding PM inside a virtualized list (e.g., comment editors in an
+infinite-scroll thread) creates problems specific to each virtualization
+strategy.
+
+### 23.1 Editor unmount during scroll
+
+* **Manifests as:** User starts typing in an editor near the viewport
+  edge, scrolls slightly, virtualizer unmounts the editor's container,
+  the user's keystrokes vanish.
+* **Source:** virtualization decisions live in the host, not PM.
+* **Mitigation:** Keep editors that are *focused* in the active set
+  regardless of viewport. Most virtualizers support an `extraOverscan`
+  prop or a "pinned items" API; pin focused editors. Alternatively,
+  detect the unmount in your wrapper component and serialize the
+  pending `view.state` to the host before destroying.
+
+### 23.2 Recycled DOM containers
+
+* **Manifests as:** A virtualizer reuses the same `<div>` container for
+  different rows as the user scrolls; PM's `view.dom` ends up in a
+  container belonging to a different doc.
+* **Source:** PM is unaware of virtualization.
+* **Mitigation:** The wrapper must call `view.destroy()` and create a
+  fresh `EditorView` whenever the container is being reassigned to a
+  different logical doc. React-window with `itemKey` and a stable
+  React component identity helps; pass the docId as the key.
+
+### 23.3 `coordsAtPos` returns wrong values
+
+* **Manifests as:** Cursor positioning, scroll-to-cursor, decorations
+  positioned by coordinates all show wrong layout in virtualized
+  containers.
+* **Source:** [17 §2 coordsAtPos](./17-coordinates-and-hit-testing.md).
+* **Cause:** `coordsAtPos` uses `getBoundingClientRect`, which reports
+  layout *after* the virtualizer's own transforms (scroll-translate,
+  fixed-position items). PM does not adjust for arbitrary parent
+  transforms beyond standard browser behavior.
+* **Mitigation:** When dispatching `scrollIntoView`, do it after the
+  next animation frame so the virtualizer has settled; or use
+  `view.coordsAtPos(pos, side)` and combine with the virtualizer's
+  scrollOffset manually.
+
+### 23.4 Resize observation
+
+* **Manifests as:** Editor's `view.dom` changes height as the user
+  types but the virtualizer's row heights remain stale; rows after
+  the editor render at the wrong y-coordinate.
+* **Mitigation:** Wire a `ResizeObserver` to `view.dom` and propagate
+  height changes to the virtualizer's measureRow API.
+
+---
+
+## 24. Error semantics — what happens if a transaction throws mid-`state.apply`?
+
+* **Manifests as:** A custom plugin's `apply` throws (network error in
+  `apply`, schema mismatch, programmer error). PM's behavior is
+  surprising and varies by where the throw originates.
+* **Source:** `prosemirror-state/src/state.ts:apply`,
+  [07 §5](./07-state-and-plugins.md).
+
+### 24.1 Throw in `filterTransaction`
+
+The transaction is *aborted*. `state.apply` propagates the throw to the
+caller (`view.dispatch`), which propagates to the user code that called
+`view.dispatch`. The state is not modified. The view is not updated.
+The DOM may be in a transient state (the keystroke that triggered the
+event has already mutated DOM), and PM does NOT roll back the DOM.
+On the next keystroke, `readDOMChange` re-detects the divergence and
+generates a corrective transaction.
+
+### 24.2 Throw in `StateField.apply` (a plugin field's apply)
+
+Catastrophic: the loop building `newFields` is interrupted partway
+through. Earlier fields have updated, later fields have not. The throw
+propagates to `state.apply`, which lets it bubble. **The half-built
+state is discarded.** But:
+
+* `view.state` is not updated; the view holds the *previous* state.
+* If the caller catches the throw and continues, subsequent
+  transactions will be applied to the previous state — the failed
+  transaction effectively never happened.
+* If the caller does *not* catch, the entire JS task aborts with the
+  exception, and depending on host (browser, framework error
+  boundary), the editor becomes unrecoverable.
+
+### 24.3 Throw in `appendTransaction`
+
+The base transaction has succeeded. The append is discarded. The
+combined-transactions list is truncated at the failing plugin. State
+applies cleanly with whatever appended trs preceded the failure.
+This is the *safest* failure mode.
+
+### 24.4 Throw in `Step.apply` itself
+
+Means a step is invalid for the current doc (e.g., bad position). PM
+returns `StepResult.fail(message)` *as a value*, not as an exception.
+`Transform` throws `TransformError` if `setStep` is called with a
+failing result; the throw propagates up through `apply`. Same
+semantics as 24.2.
+
+### 24.5 Recovery patterns
+
+```ts
+// Wrap dispatch in a try/catch at the integration boundary.
+try {
+  view.dispatch(tr)
+} catch (e) {
+  console.error("PM dispatch failed", e)
+  // The editor is in a consistent state (the failing tr never
+  // committed), but the user's input may not have produced the
+  // expected effect. Surface a notification.
+  notifyUser("Edit failed; please retry")
+}
+
+// In a plugin's apply, never let internal errors escape:
+apply(tr, value, oldState, newState) {
+  try {
+    return computeNewValue(tr, value)
+  } catch (e) {
+    console.error("plugin internal error", e)
+    return value  // fall back to old value; do not throw
+  }
+}
+```
+
+* **Redesign:** `state.apply` should return a discriminated result —
+  `{ ok: true, state } | { ok: false, error }` — so callers must
+  handle the failure explicitly. The current behavior conflates
+  "program bug" with "user-visible failure".
+
+---
+
+## 25. Quick reference — pitfall to file map
+
+See also [00-index.md](./00-index.md) for the master index across the
+entire dossier and [01 §7](./01-architecture-overview.md) for the
+single-file architecture map.
 
 ```
-Schema design         → 03-schema-and-content-expressions.md, 02-document-model.md
-Position arithmetic   → 04-resolved-positions.md, 06-position-mapping.md
-Transform / Step      → 05-transform-and-steps.md
-State / plugins       → 07-state-and-plugins.md
-View / reconciliation → 09-view-and-viewdesc.md
-Decorations           → 10-decorations.md
-Parser                → 11-dom-parser.md
-Serializer            → 12-dom-serializer.md
-Input pipeline        → 13-input-pipeline.md
-IME / composition     → 14-ime-composition.md
-DOMObserver           → 15-domobserver-and-domchange.md
-Clipboard             → 16-clipboard.md
-Coordinates           → 17-coordinates-and-hit-testing.md
-Cross-browser         → 18-cross-browser-quirks.md
-Commands / keymap     → 19-commands-keymap-inputrules.md
-History / collab      → 20-history-and-collab.md
-End-to-end synthesis  → 21-rendering-pipeline-end-to-end.md
+Schema design          → 03-schema-and-content-expressions.md, 02-document-model.md
+Position arithmetic    → 04-resolved-positions.md, 06-position-mapping.md
+Transform / Step       → 05-transform-and-steps.md
+State / plugins        → 07-state-and-plugins.md
+View / reconciliation  → 09-view-and-viewdesc.md
+Decorations            → 10-decorations.md
+Parser                 → 11-dom-parser.md
+Serializer             → 12-dom-serializer.md
+Input pipeline         → 13-input-pipeline.md
+IME / composition      → 14-ime-composition.md
+DOMObserver            → 15-domobserver-and-domchange.md
+Clipboard              → 16-clipboard.md
+Coordinates            → 17-coordinates-and-hit-testing.md
+Cross-browser          → 18-cross-browser-quirks.md
+Commands / keymap      → 19-commands-keymap-inputrules.md
+History / collab       → 20-history-and-collab.md
+End-to-end synthesis   → 21-rendering-pipeline-end-to-end.md
+Accessibility          → 23-accessibility.md
+Mobile / touch         → 25-mobile.md
+Performance & profiling→ 26-performance.md
+Testing                → 27-testing.md
+i18n / RTL / bidi      → 28-i18n-bidi.md
+Plugin cookbook        → 31-plugin-cookbook.md
+Security               → 32-security.md
+Memory management      → 33-memory.md
+Async transactions     → 37-async-transactions.md
 ```

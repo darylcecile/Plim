@@ -627,3 +627,388 @@ to avoid clobbering the IME's internal state. This is where the
 5. **Keep a clear acyclic package graph.** ProseMirror's split lets you
    run the model on a server, ship a custom view, or unit-test commands
    without DOM. Replicate that boundary discipline.
+
+---
+
+## 9. Addenda — gap fills
+
+The sections above were originally written before files 02–22 existed. The
+following sub-sections fill in cross-cutting gaps surfaced during a later
+audit. They are organized to mirror the gap report (GAP-01-1 … GAP-01-10
+plus GAP-X-1, X-2).
+
+### 9.1 `prosemirror-state` — full public surface
+
+§1.2 only namedrops the headline classes. The complete export list from
+`prosemirror-state/src/index.ts:1-9`:
+
+```ts
+export {Selection, SelectionRange, TextSelection, NodeSelection,
+        AllSelection, SelectionBookmark} from "./selection"
+export {EditorState, EditorStateConfig} from "./state"
+export {Transaction, Command} from "./transaction"
+export {Plugin, PluginSpec, StateField, PluginKey, PluginView} from "./plugin"
+```
+
+The five plugin-system classes (`Plugin`, `PluginSpec`, `StateField`,
+`PluginKey`, `PluginView`) plus `Command` are the foundational types every
+non-trivial editor touches; treat them as part of the headline API, not
+"advanced".
+
+- `Plugin<S>` (`prosemirror-state/src/plugin.ts:71`) — owns a
+  `PluginSpec<S>`. Construction performs `bindProps(this)` to make every
+  prop's `this` reference the plugin instance.
+- `PluginKey<S>` (`prosemirror-state/src/plugin.ts:129`) — string-tagged
+  identity used to look up a plugin instance or its state in an
+  `EditorState` without holding a direct reference. `PluginKey.getState`
+  and `Plugin.getState` are both exposed because callers sometimes only
+  have one of the two handles.
+- `StateField<T>` (`prosemirror-state/src/plugin.ts:7-21`) — `{init, apply,
+  toJSON?, fromJSON?}`; the unit of plugin-owned state.
+- `PluginView` (`prosemirror-state/src/plugin.ts:49-65`) — the optional
+  `view(view) → {update?, destroy?}` factory. See §9.4.
+- `Command` (`prosemirror-state/src/transaction.ts`) — the universal
+  `(state, dispatch?, view?) => boolean` type used by keymap, menus,
+  inputrules, and `chainCommands`.
+
+### 9.2 `prosemirror-transform` — `Mappable` and `MapResult`
+
+The §1.2 transform surface now also includes:
+
+- `Mappable` (`prosemirror-transform/src/map.ts:3-17`) — interface with
+  `map(pos, assoc?)` and `mapResult(pos, assoc?)`. Implementers in the
+  ecosystem: `StepMap` (`map.ts:72`), `Mapping` (`map.ts:172`). Functions
+  that take any `Mappable` therefore accept a single step's map *or* a
+  full transform's mapping.
+- `MapResult` (`prosemirror-transform/src/map.ts:32-46`) — the value
+  returned by `mapResult`. Carries flags `deleted`, `deletedBefore`,
+  `deletedAfter`, `deletedAcross` so callers can branch on "what
+  happened" rather than just "where am I now". `Selection.map` consults
+  these flags when collapsing or rebuilding selections after a delete.
+
+### 9.3 Plugin prop aggregation rules
+
+The view layer composes plugins through *props*. Two classes of prop
+exist, with sharply different aggregation rules
+(`prosemirror-view/src/index.ts:294-316` — `someProp`):
+
+```ts
+someProp(propName, f?) {
+  // 1. directProps (passed to view.update / setProps)
+  let prop = this._props && this._props[propName], value
+  if (prop != null && (value = f ? f(prop as any) : prop)) return value
+  // 2. directPlugins (props.plugins, in order)
+  for (let i = 0; i < this.directPlugins.length; i++) { /* same */ }
+  // 3. state.plugins (in order)
+  for (let i = 0; i < this.state.plugins.length; i++) { /* same */ }
+}
+```
+
+- **Handler props** (`handleKeyDown`, `handleClick`, `handleDOMEvents.*`,
+  `handlePaste`, `handleDrop`, `handleTextInput`, `handleScrollToSelection`,
+  `editable`, etc.) are short-circuited by `someProp`: the *first plugin
+  whose handler returns a truthy value wins*. Order: `view._props` (the
+  direct props passed to the constructor / `setProps`) → `view.directPlugins`
+  (the constructor's `plugins`) → `state.plugins` (those registered in the
+  `EditorState`'s `Configuration`). Within each list, declaration order
+  decides priority.
+- **Accumulator props** (`decorations`, `nodeViews`, `markViews`,
+  `attributes`) are *unioned* across all plugins (and the direct props),
+  not short-circuited. They are gathered with explicit loops:
+  `viewDecorations(view)` (`prosemirror-view/src/decoration.ts`),
+  `buildNodeViews` (`prosemirror-view/src/index.ts:565-566`),
+  `attrsForView` (`index.ts:521`).
+
+This is the canonical "how do plugins compose?" answer. A plugin
+inserted earlier in the array can therefore *block* a later plugin's
+keydown handler (by returning true), but its decorations always coexist
+with everyone else's. See `09-view-and-viewdesc.md` for the full
+breakdown.
+
+### 9.4 PluginView lifecycle
+
+`Plugin.view(view) → {update?, destroy?}` — declared in
+`prosemirror-state/src/plugin.ts:49-65`, instantiated in
+`prosemirror-view/src/index.ts:579-595` (`buildPluginViews` /
+`updatePluginViews`).
+
+```ts
+// view/src/index.ts: simplified
+function buildPluginViews(view) {
+  view.pluginViews = []
+  for (let plugin of [...view.directPlugins, ...view.state.plugins]) {
+    if (plugin.spec.view) view.pluginViews.push(plugin.spec.view(view))
+  }
+}
+
+function updatePluginViews(view, prevState) {
+  for (let pv of view.pluginViews) pv.update?.(view, prevState)
+}
+```
+
+Lifecycle invariants:
+
+- `view(view)` is called *once per `EditorView`* during the constructor's
+  `updatePluginViews` (after the DOM is mounted).
+- `update(view, prevState)` is called *after every state change*, after
+  the DOM has been reconciled and selection has been written back. The
+  view's `state` is already the new state; `prevState` is the previous.
+- `destroy()` is called when the `EditorView` is destroyed *or* when the
+  plugin is removed via `state.reconfigure`.
+- The order matches plugin registration order; plugin views never see
+  each other's intermediate states because `update` runs strictly after
+  reconciliation.
+
+### 9.5 Annotated `dispatchTransaction` flow
+
+§3.1's lifecycle diagram is the bird's-eye view; the concrete trace,
+including the `dispatchTransaction` override and the `appendTransaction`
+fixpoint, is:
+
+```
+view.dispatch(tr)                    [view/src/index.ts:511]
+  │
+  ├─ if props.dispatchTransaction → host code                ─┐
+  │     (host typically calls view.updateState(state.apply(tr)))
+  │                                                           │
+  └─ else view.updateState(view.state.apply(tr))              │
+        │                                                     ▼
+        │       [Both paths converge at updateState]
+        ▼
+  view.updateState(state)            [view/src/index.ts:149]
+    │
+    └─ updateStateInner(state, prev) [view/src/index.ts:152]
+         │  domObserver.stop()
+         │  docView.update(...)
+         │  selectionToDOM(...)
+         │  domObserver.start()
+         │  updatePluginViews(prev)
+         ▼
+       (DOM repainted, plugin views .update called)
+
+state.apply(tr)                      [state/src/state.ts:118]
+  │
+  └─ applyTransaction(tr)            [state/src/state.ts:138]
+       │  filterTransaction(tr)?  → if false: return {state, transactions:[]}
+       │
+       │  newState = applyInner(tr) [state.ts:170]
+       │     for each field: field.apply(tr, value, this, newState)
+       │
+       │  loop:
+       │     for each plugin i:
+       │        if plugin.appendTransaction:
+       │           newTr = plugin.appendTransaction(unseenTrs, oldState, newState)
+       │           if newTr && filterTransaction(newTr, ignore=i):
+       │              newState = newState.applyInner(newTr)
+       │     until no plugin appended in a full pass
+       │
+       └─ return {state: newState, transactions: trs}
+```
+
+Key things `dispatchTransaction` does **not** change:
+
+- `state.apply` runs unconditionally (it's `view.state.apply(tr)` in the
+  `else` branch and `state.apply(tr)` in user code).
+- `filterTransaction`, `appendTransaction`, and `applyInner` are part of
+  `state.apply` — they fire even if the host overrides `dispatchTransaction`.
+- The host's `dispatchTransaction` *can* drop the transaction entirely,
+  reroute it (e.g. to a remote server), or compose it with siblings before
+  ultimately calling `view.updateState`.
+
+### 9.6 Unidirectional flow with `appendTransaction` and `filterTransaction`
+
+The §3.1 diagram is a simplification; here it is annotated with the
+plugin hooks:
+
+```
+   ┌─────────────────────────────────────────────────────────────┐
+   │                       view.dispatch(tr)                     │
+   └────────────────────────────┬────────────────────────────────┘
+                                │
+                                ▼
+                       ┌────────────────┐
+                       │ filterTransaction│  ── any plugin returns false? ──┐
+                       └────────┬────────┘                                  │
+                                │ pass                                      │ veto
+                                ▼                                           ▼
+                        ┌──────────────┐                              [no-op]
+                        │  applyInner  │  StateField.apply per plugin
+                        └──────┬───────┘
+                               │ newState (after primary tr)
+                               ▼
+   ┌────────────────────────────────────────────────────────────┐
+   │  appendTransaction loop                                    │
+   │    for each plugin i:                                      │
+   │       see only trs unseen by plugin i                      │
+   │       newTr = plugin.appendTransaction(unseen, old, new)?  │
+   │       if newTr && filterTransaction(newTr, ignore=i):      │
+   │          newState.applyInner(newTr)                        │
+   │       record (state, trsLength) in seen[i]                 │
+   │    repeat until a full pass with no appends                │
+   └────────────────────────┬───────────────────────────────────┘
+                            │ final newState
+                            ▼
+              ┌──────────────────────────┐
+              │    view.updateState      │
+              │  (DOM diff, selectionToDOM,│
+              │   updatePluginViews)     │
+              └──────────────────────────┘
+```
+
+- **`filterTransaction(tr, state)`** (`state/src/state.ts:123-129`) — any
+  plugin returning `false` aborts the entire transaction (the *root* tr
+  and any appended trs by other plugins). The plugin index is passed as
+  `ignore` for appended-tr filtering so a plugin doesn't veto its own
+  appended tr in cycles.
+- **`appendTransaction(trs, oldState, newState)`** — fixpoint loop. Each
+  plugin sees only the suffix of `trs` that arrived after its last
+  invocation (`seen[i].n`). Termination depends on plugins eventually
+  returning `null` (see §5 of `07-state-and-plugins.md`).
+
+### 9.7 `prosemirror-model` — full public surface
+
+Adding the items elided from §1.2:
+
+- `ContentMatch` (`prosemirror-model/src/content.ts:10`) — the DFA state
+  used by every legality check.
+- `ReplaceError` (`prosemirror-model/src/replace.ts`) — thrown by
+  `replace()` when open depths or schema validity fail.
+- `SchemaSpec` (`prosemirror-model/src/schema.ts:351`) — the user-supplied
+  config object.
+- `AttributeSpec` (`prosemirror-model/src/schema.ts:548`) — `{default?,
+  validate?}`.
+- `ParseOptions` (`prosemirror-model/src/from_dom.ts`) — passed to
+  `DOMParser.parse` / `parseSlice`.
+- `TagParseRule`, `StyleParseRule`, `GenericParseRule` — discriminated
+  variants of `ParseRule` covering tag-selector rules, CSS-style rules,
+  and the generic catch-all (`prosemirror-model/src/from_dom.ts`).
+- `DOMOutputSpec` (`prosemirror-model/src/to_dom.ts`) — the
+  `[tag, attrs?, ...children]` JSON-style spec returned from `toDOM`.
+
+### 9.8 End-to-end "user types 'a'" trace
+
+A unified annotated trace through every layer (the missing diagram from
+§6):
+
+```
+1. Browser fires `keydown` for 'a'.
+   prosemirror-view/src/input.ts:100 dispatchEvent → handlers list
+   ├─ plugins' handleKeyDown (someProp("handleKeyDown", f => f(view, event)))
+   │   • keymap plugin: not bound → returns false
+   │   • inputrules plugin: not bound on plain key → false
+   │   • capturekeys.ts: not arrow/backspace → no-op
+   └─ no handler returned true; browser is allowed to mutate the DOM.
+
+2. Browser inserts the character into the contenteditable text node;
+   fires `beforeinput`/`input` and queues a MutationRecord.
+
+3. MutationObserver callback (domobserver.ts:48) pushes records and
+   calls flush() (or flushSoon for known-quirky browsers).
+
+4. domobserver.flush() calls back into the view with the bounded mutation
+   range → readDOMChange(view, from, to, typeOver, added)
+   prosemirror-view/src/domchange.ts:81
+
+5. readDOMChange:
+   a. Maps DOM range to doc range (sharedDepth → enclosing nodes).
+   b. parseBetween reparses live DOM into a Slice via DOMParser.
+   c. findDiff (prosemirror-model/src/diff.ts) computes minimal
+      (start, endA, endB) replacement region.
+   d. Builds tr = state.tr.replace(from, to, slice).
+   e. view.dispatch(tr).
+
+6. view.dispatch (view/src/index.ts:511):
+   if props.dispatchTransaction → host
+   else view.updateState(view.state.apply(tr)).
+
+7. state.apply → applyTransaction (state/src/state.ts:138):
+   a. filterTransaction(tr) — any plugin can veto.
+   b. applyInner(tr): for each StateField, value = field.apply(tr, …).
+      • doc, selection (built-ins) updated.
+      • history field records inverse step + StepMap.
+      • decoration plugins map their DecorationSet through tr.mapping.
+   c. appendTransaction loop — typically no-op for plain typing.
+
+8. view.updateState(newState) → updateStateInner (view/src/index.ts:152):
+   a. domObserver.stop().
+   b. docView.update(doc, outerDeco, innerDeco, view) — diffs ViewDesc
+      tree; for plain typing only the affected text node is touched.
+   c. selectionToDOM — write the new selection; usually a no-op because
+      the browser already moved the caret.
+   d. domObserver.start().
+   e. updatePluginViews(prevState).
+
+9. Browser repaints. Cycle ends.
+```
+
+### 9.9 Why four packages, not one?
+
+`prosemirror-state/README.md` makes the case explicitly: separating
+`model` from `state` from `view` gives:
+
+- **Optional view.** A server can run model+transform+state to validate
+  documents, run collab rebases, or render to HTML *without ever
+  loading a DOM*.
+- **Testability.** Commands can be unit-tested with `(state) => state`
+  transitions, never instantiating an `EditorView`.
+- **Custom rendering.** A React/Vue/Svelte editor can replace `view`
+  while keeping the same model + state.
+- **Collab without DOM.** `prosemirror-collab` depends only on `state`
+  (which depends on `model` + `transform`) — the rebasing engine is
+  reusable in workers, servers, and CRDT bridges.
+- **Acyclic dependencies.** The dependency graph in §1.1 has no cycles,
+  which keeps each package independently versionable and tree-shakable.
+
+### 9.10 Transactionless updates
+
+`view.updateState(state)` accepts an `EditorState` directly. This is the
+escape hatch used by `prosemirror-collab` after a rebase
+(`prosemirror-collab/src/collab.ts: receiveTransaction → state.apply`)
+and by hosts that want to swap state without a transaction (e.g. external
+"reset to this snapshot" actions).
+
+```ts
+// view/src/index.ts:149
+updateState(state: EditorState) { this.updateStateInner(state, this.state) }
+```
+
+Because no `tr` is involved:
+
+- `filterTransaction`/`appendTransaction` do **not** fire (these are part
+  of `state.apply`, not `updateStateInner`).
+- Plugin views' `update(view, prevState)` *does* fire — they always run
+  on `updateStateInner`.
+- Decorations are simply re-read from the new state's plugins; no
+  mapping happens because there is no `Mapping`.
+
+Use cases:
+
+- Setting an entirely new document (initial load, server-pushed snapshot).
+- Recovering from collab divergence with a server-canonical state.
+- Time-travel debugging — jump to any historical state object.
+
+Caveat: any plugin storing position-dependent data (e.g. local
+`DecorationSet`s) must be designed to *re-derive* from the new state, not
+incrementally `map` — there is no `Mapping` to map through.
+
+### 9.11 Cross-cutting forward references
+
+Throughout this file, references to internal `§N` paragraphs of other
+files have been spelled out as `<file>.md §N` so a reader following the
+broken-then-fixed index in `00-index.md` can navigate. In particular:
+
+- Selection mechanics: see `08-selection.md`.
+- Decorations: see `10-decorations.md`.
+- DOM round-trip (`DOMParser` / `DOMSerializer`): see `11-dom-parser.md`
+  and `12-dom-serializer.md`.
+- Collab rebasing walk-through: see `06-position-mapping.md` and
+  `20-history-and-collab.md`.
+
+### 9.12 Reference index — versioning note
+
+The line numbers in §7 are accurate against the snapshot dates in
+`00-index.md` §5.1. They drift across upstream `master` commits; if a
+citation is off by a few lines, search for the named symbol (e.g.
+`EditorState.applyInner`, `StepMap._map`) instead. A future revision of
+this dossier should pin a tagged release per package and re-verify line
+numbers, or convert all citations to symbol-only references.

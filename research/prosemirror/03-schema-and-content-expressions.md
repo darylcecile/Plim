@@ -1285,3 +1285,492 @@ Things to inherit:
 6. **Distinguish `markSet = null` ("anything") from `[]` ("nothing").** A nullable allow-list with the right defaults (inline-content → all, otherwise → none) gives schemas concise, intuitive defaults.
 7. **Singleton attrs + singleton mark instances.** Pre-compute `defaultAttrs` and `MarkType.instance` at compile time. Saves allocation on the hot path.
 8. **Static schema, dynamic queries.** The schema never changes after construction; that immutability is what makes the cached DFA, the wrap cache, and the type-identity equality checks safe.
+
+---
+
+## 14. Addenda — gap fills
+
+The following sections add coverage that was elided from the main body.
+
+### 14.1 `Schema.cached` — per-schema memoization
+
+`prosemirror-model/src/schema.ts:640`:
+
+```ts
+cached: {[key: string]: any} = Object.create(null)
+```
+
+A free-form per-schema cache that the schema constructor itself
+populates with `cached.wrappings = Object.create(null)` (line 630), and
+that `prosemirror-transform` extends with its own keys (e.g.
+`structure.ts` stores `findWrapping` results keyed by `(parentType,
+target)`).
+
+For plugin authors who memoize per-schema metadata (e.g. "list of all
+block types that allow `text` content", or compiled regex tables for
+input rules), `schema.cached["my-plugin:foo"] = …` is the idiomatic
+location. The cache is reset only when a new `Schema` is constructed —
+never within the lifetime of a single schema.
+
+### 14.2 Schema factory shortcuts
+
+`prosemirror-model/src/schema.ts:646-689` provides convenience methods
+for constructing nodes/marks/text against the schema:
+
+```ts
+schema.node(type, attrs?, content?, marks?)   // → createChecked
+schema.text(text, marks?)                     // → new TextNode directly
+schema.mark(type, attrs?)                     // → markType.create(attrs)
+schema.nodeType(name)                         // → throws if unknown
+```
+
+Notes:
+
+- `schema.node` accepts `type` as either a name string or a `NodeType`
+  instance (and validates the `NodeType` belongs to *this* schema —
+  cross-schema use throws, see §9.4).
+- `schema.text` is the **only** way to construct a text node.
+  `nodeType("text").create()` throws (`node.ts:153`: "NodeType.create
+  can't construct text nodes").
+- `schema.mark` returns the cached singleton for marks with no required
+  attrs (see §3.2).
+- `schema.nodeType(name)` is the validated lookup; bare
+  `schema.nodes[name]` returns `undefined` for unknown names while
+  `nodeType(name)` throws `RangeError("Unknown node type: …")`.
+
+### 14.3 `Schema.nodeFromJSON`, `Schema.markFromJSON`
+
+`prosemirror-model/src/schema.ts:627-628`:
+
+```ts
+this.nodeFromJSON = json => Node.fromJSON(this, json)
+this.markFromJSON = json => Mark.fromJSON(this, json)
+```
+
+Bound methods — they capture `this` so the reference can be passed
+around without losing context (e.g. `array.map(schema.nodeFromJSON)`).
+This is the round-trip entry point for `EditorState.fromJSON`, snapshot
+restoration, and any wire-protocol that delivers JSON documents.
+
+The `Node.fromJSON` / `Mark.fromJSON` static factories use the schema
+to:
+
+1. Look up the type by name (throws on unknown).
+2. Construct the value via `create` (and explicit `checkAttrs`).
+3. Recurse into `content` and `marks` arrays.
+
+`Fragment.fromArray` in the construction path means adjacent same-mark
+text nodes are re-merged on the way in (see `02-document-model.md`
+§3.1), so a wire-format that emitted unmerged text nodes still produces
+canonical fragments.
+
+### 14.4 `create` vs `createChecked` vs `createAndFill` — failure modes
+
+`prosemirror-model/src/schema.ts:152-184`:
+
+```ts
+create(attrs, content?, marks?)        // node.ts:152
+createChecked(attrs, content?, marks?) // node.ts:160
+createAndFill(attrs, content?, marks?) // node.ts:172
+```
+
+| Method | Schema check | Failure mode | When to use |
+|---|---|---|---|
+| `create` | None on content | Always succeeds (modulo `computeAttrs` throwing on missing required attrs); produces an *invalid* node if content doesn't match the type's content expression | Test builders, internal performance-critical paths, code that has *just* validated content |
+| `createChecked` | `checkContent(content)` runs | Throws `RangeError("Invalid content for node X: …")` | "I expect this to be valid, fail loudly if it's not" |
+| `createAndFill` | `contentMatch.fillBefore` + `matchFragment` + trailing `fillBefore(empty, true)` | Returns `null` if no fitting wrapping/filling exists | "Construct a node, auto-supplying any required content (e.g. a `list_item` whose content is `paragraph block*` will be filled with an empty paragraph)" |
+
+Beginners frequently conflate the three. The right rule of thumb:
+
+- Building a doc from user input or untrusted JSON: `createChecked`.
+- Building a *required* node where some content may be missing (e.g. a
+  fresh `list_item` from a "make a new list" command): `createAndFill`,
+  and bail if it returns `null`.
+- Test code with hand-written valid content: `create` is fine.
+
+`createAndFill` is also recursive in spirit: the auto-generated fillers
+themselves use `createAndFill` so a chain of required nesting can be
+filled in one call. See §6.6 for the algorithm.
+
+### 14.5 `NodeType.allowsMarkType`, `allowsMarks`, `allowedMarks`
+
+§3.3 covered these. Worth emphasizing the `allowedMarks` contract:
+
+```ts
+allowedMarks(marks: readonly Mark[]): readonly Mark[]
+```
+
+Returns:
+
+- The *same* array (identity-equal `==`) if all marks are allowed.
+- A *new* array with disallowed marks dropped. If everything was
+  dropped, returns `Mark.none` (the shared empty singleton).
+
+This identity-preserving contract matters: callers can compare
+`result === marks` to detect "did anything change?" without iterating.
+`prosemirror-transform`'s `clearIncompatible` uses this to short-circuit
+mark-stripping when no marks are filtered.
+
+```ts
+let cleaned = nodeType.allowedMarks(child.marks)
+if (cleaned !== child.marks) {
+  // some mark was dropped; rebuild the child with the cleaned set
+  child = child.mark(cleaned)
+}
+```
+
+### 14.6 `MarkType.excludes`, `removeFromSet`, `isInSet`
+
+The exclusion semantics:
+
+- Default `excludes: null` → mark excludes itself only (one `link` per
+  text run; multiple `strong` would coexist if `strong` declared
+  `excludes: ""`).
+- `excludes: ""` → mark excludes nothing; multiple of the same type can
+  coexist.
+- `excludes: "_"` → excludes all marks (typically used by `code`-style
+  marks in some schemas to suppress formatting inside code).
+- `excludes: "em strong"` → excludes those types specifically.
+
+The compiled `MarkType.excluded` is an array of `MarkType` instances
+(`schema.ts:622-625`). `MarkType.excludes(other)` is a simple `indexOf`:
+
+```ts
+excludes(other: MarkType): boolean {
+  return this.excluded.indexOf(other) > -1
+}
+```
+
+`Mark.removeFromSet(set)` (`mark.ts:49-53`) returns a new array with the
+matching mark removed (or the same array if not present).
+`Mark.isInSet(set)` is a linear `eq` scan. Both are exposed for plugin
+use (e.g. menu state: "is the cursor inside a `link` mark?").
+
+### 14.7 `AttributeSpec.validate` — security-relevant attrs guards
+
+`prosemirror-model/src/schema.ts:548-563` plus `validateType` (lines
+249-255). Used to harden attrs against attacker-controlled JSON:
+
+```ts
+nodes: {
+  image: {
+    attrs: {
+      src:  {validate: "string"},
+      alt:  {default: "", validate: "string"},
+      width: {default: null, validate: "number|null"}
+    },
+    /* ... */
+  }
+}
+```
+
+The `validate` value can be:
+
+- A `|`-separated string of primitive type names (`"number"`, `"string"`,
+  `"boolean"`, `"null"`); any value whose `typeof` (or `=== null`)
+  matches passes. Compiled to a closure by `validateType` at schema
+  construction.
+- A function `(value) => void` that throws on invalid input. Use this
+  for custom invariants (`href` must be a same-origin URL, `level` must
+  be in `1..6`, etc.).
+
+`checkAttrs` (`schema.ts:41-48`) runs every registered `validate` when
+called, which happens from `Node.check`, `NodeType.checkAttrs`, and
+`Mark.fromJSON`. So untrusted JSON deserialization is the canonical
+hardening site — make sure your `Node.fromJSON` path goes through
+something that calls `checkAttrs` (it does by default; the explicit
+`type.checkAttrs(node.attrs)` call after `create` in `Node.fromJSON` is
+that line).
+
+### 14.8 `linebreakReplacement` — schema-side semantics
+
+`prosemirror-model/src/schema.ts:486` (NodeSpec) and lines 593, 613-617
+(Schema):
+
+```ts
+// NodeSpec
+linebreakReplacement?: boolean
+
+// Schema constructor enforces:
+if (type.spec.linebreakReplacement) {
+  if (this.linebreakReplacement) throw new RangeError("Multiple linebreak nodes defined")
+  if (!type.isInline || !type.isLeaf) throw new RangeError("Linebreak replacement nodes must be inline leaf nodes")
+  this.linebreakReplacement = type
+}
+```
+
+Constraints:
+
+1. **At most one** node type per schema may set `linebreakReplacement: true`.
+2. The marked type **must be inline** and **must be a leaf**. (Typically
+   `hard_break`.)
+3. `Schema.linebreakReplacement` (the field on the schema instance) is
+   auto-derived to point at that type, or `null` if none.
+
+How it's used downstream:
+
+- **`prosemirror-transform.setBlockType`** consults
+  `schema.linebreakReplacement` when the destination block type has
+  `whitespace: "pre"` (e.g. `code_block`), translating literal `<br>`
+  inline leaf nodes into `\n` characters in the resulting text — and
+  vice versa when leaving `pre` whitespace. This is what makes
+  "convert paragraph to code block (and back)" round-trip cleanly.
+- **`prosemirror-view`'s clipboard pipeline** uses the same node when
+  serializing a paste-friendly representation.
+- The model itself does not branch on it directly; it just holds the
+  pointer.
+
+### 14.9 `topNode` and `topNodeType`
+
+`SchemaSpec.topNode` (default `"doc"`) names the document root type.
+The constructor (`schema.ts:629`) resolves it:
+
+```ts
+this.topNodeType = this.nodes[this.spec.topNode || "doc"]
+```
+
+If `topNode` references an unknown type, `NodeType.compile` throws
+(`schema.ts:241-242`):
+
+```ts
+if (!result[topType]) throw new RangeError("Schema is missing its top node type ('" + topType + "')")
+```
+
+`prosemirror-state.EditorState.create({schema})` calls
+`schema.topNodeType.createAndFill()` to build the initial doc when no
+`doc` is supplied. So:
+
+- For a schema with `doc: {content: "block+"}`, the initial doc has one
+  auto-generated child (typically a paragraph).
+- For a schema with `doc: {content: "block*"}`, the initial doc is
+  empty.
+
+Custom `topNode` (e.g. `topNode: "page"` for a page-aware schema) is
+fully supported as long as the type is registered in `nodes`.
+
+### 14.10 NodeSpec flags driving editor behavior
+
+Beyond the headline `content` / `marks` / `group`, `NodeSpec` carries
+many flags that drive transform and view behaviors. Cited from
+`prosemirror-model/src/schema.ts:371-491`:
+
+| Flag | Default | Used by | Effect |
+|---|---|---|---|
+| `code` | `false` | commands, `whitespace` default | Marks block as containing code; `whitespace` defaults to `"pre"`. |
+| `atom` | `false` | view, transforms | Treat as a single editable unit; selection lands on it as `NodeSelection`, not inside. Atoms with content render the content but disallow direct caret entry. |
+| `isolating` | `false` | `Slice.maxOpen`, transforms (`liftTarget`, `findWrapping`) | Editing operations don't cross this boundary. Used for table cells, list items in some configurations. |
+| `definingForContent` | `false` | clipboard paste | When pasting *content from* this node, preserve it as a wrapping (e.g. paste from inside a heading should keep the heading). |
+| `definingAsContext` | `false` | clipboard paste | When pasting *into* this node, prefer to keep it as the surrounding context (paste into a list item should stay inside the list item). |
+| `defining` | `false` | shortcut | Sets both above. |
+| `selectable` | `true` | view selection | Whether the node may be selected as a `NodeSelection`. |
+| `draggable` | `false` | view drag/drop | Whether the node can be dragged by its handle. |
+| `whitespace` | `"normal"` (or `"pre"` if `code: true`) | DOMParser | `"pre"` preserves whitespace literally; `"normal"` collapses runs. |
+| `leafText` | none | `Node.textContent`, `textBetween` | `(node) => string` for what a leaf contributes to text-extraction. |
+| `linebreakReplacement` | `false` | `setBlockType`, clipboard | See §14.8. |
+| `allowGapCursor` | undef | `prosemirror-gapcursor` | Allow gap-cursor insertion between this and siblings. |
+| `tableRole` | undef | `prosemirror-tables` | `"table"`/`"row"`/`"cell"`/`"header_cell"` — drives table command dispatch. |
+| `inline` | `false` | type bookkeeping | Marks this type as inline (text is implicitly inline). |
+| `attrs` | `{}` | model | Per-attribute spec; required attrs (no `default`) must be supplied at construction. |
+| `parseDOM` | `[]` | DOMParser | Parse rules. |
+| `toDOM` | none | DOMSerializer | Serialization spec returning `DOMOutputSpec`. |
+
+A schema author tuning editor behavior typically sets `defining`,
+`isolating`, and `atom` to control paste/lift/wrap; `selectable` and
+`draggable` for view interaction; `whitespace`/`linebreakReplacement`
+for content-with-whitespace correctness.
+
+### 14.11 `parseDOM` / `toDOM` — DOM round-trip overview
+
+A full treatment lives in `11-dom-parser.md` and `12-dom-serializer.md`,
+but the schema-side surface deserves at least a complete sketch here.
+
+`parseDOM` is an array of `ParseRule` (`from_dom.ts`). The two main
+shapes:
+
+```ts
+{tag: "p", getAttrs?: …}                          // TagParseRule
+{style: "font-weight=bold", clearMark?: …}        // StyleParseRule
+```
+
+Plus generic rules with `node`/`mark`/`getContent` for non-standard
+shapes. Each rule may declare:
+
+- `priority` (default 50) — higher wins ties.
+- `context` — a CSS-ish parent path selector (`"blockquote/"` means
+  "this rule only applies inside a `blockquote`").
+- `getAttrs(domNode) => Attrs | false` — extract attrs, or return
+  `false` to *reject* this rule and try the next match.
+- `consuming: false` — let other rules also see this DOM node.
+
+`toDOM` returns a `DOMOutputSpec`:
+
+```ts
+type DOMOutputSpec =
+  | string                                 // text node
+  | DOMNode                                // existing DOM node
+  | [string, ...children]                  // ['p', 'hello']
+  | [string, attrs, ...children]           // ['p', {class:'x'}, 'hello']
+  | [string, attrs, 0]                     // ['p', {class:'x'}, 0]  — content hole
+  | [string, 0]                            // ['p', 0]
+```
+
+The integer `0` marks the "content hole" — where the node's children
+should be rendered. A `toDOM` returning `["pre", ["code", 0]]` renders
+`<pre><code>{children}</code></pre>`.
+
+For full coverage of `ParseOptions`, `context`, ambiguous-style
+handling, and the parse algorithm itself, see `11-dom-parser.md`.
+
+### 14.12 `findWrapping` — BFS over wrappings
+
+§6.7 covered the API. The algorithm is BFS over the *type graph*: from
+the current `ContentMatch` state, find any chain of node types that,
+when wrapped around `target`, lands inside an accepting state.
+
+Concrete trace for "wrap a `paragraph` so it fits inside a position
+expecting a `bullet_list`":
+
+```
+Active = [{match: <doc-content match>, type: null, via: null}]
+
+Iteration 1: pop {match: doc, type: null}
+  match.matchType(paragraph)? — depends on schema (often yes for doc)
+  if yes → return [] (no wrappers needed, paragraph fits directly)
+  if no → enqueue all reachable types whose contentMatch could lead to paragraph
+    e.g. bullet_list whose content is "list_item+" — enqueue
+    {match: <bullet_list-content match>, type: bullet_list, via: <self>}
+
+Iteration 2: pop {match: bullet_list, type: bullet_list, via: ...}
+  match.matchType(paragraph)? — bullet_list contains list_item, not paragraph
+  if no → enqueue list_item
+    {match: <list_item-content>, type: list_item, via: <prev>}
+
+Iteration 3: pop {match: list_item, type: list_item, via: ...}
+  match.matchType(paragraph)? — list_item content is "paragraph block*", yes!
+  → walk via chain: list_item → bullet_list
+  → return [bullet_list, list_item] (outer first)
+```
+
+Result: wrap the paragraph in `[bullet_list, list_item]` (outer to
+inner) to fit. `prosemirror-transform.findWrapping` (`structure.ts`)
+calls this and then materializes the wrappers into actual nodes via
+`createAndFill`.
+
+The BFS visits each type at most once (`seen` map), and per-state
+results are cached in `wrapCache`. So repeated calls during a single
+transform (e.g. probing many positions for a wrap command) are cheap.
+
+The `(!current.type || next.validEnd)` guard (line 908) ensures we only
+enter a non-root candidate type if its outer state can validly *end*
+where we left it — i.e. the partial match we're abandoning is in an
+accepting state. This prevents the algorithm from suggesting wrappers
+that would themselves leave the surrounding position invalid.
+
+### 14.13 Failing parse — example
+
+Suppose the schema declares `paragraph` with `parseDOM: [{tag: "p"}]`
+plus a custom rule:
+
+```ts
+parseDOM: [
+  {tag: "p"},                                    // priority 50 (default)
+  {tag: "p.note", priority: 60,                  // higher priority wins
+   getAttrs: dom => dom.getAttribute("data-id")
+                     ? {id: dom.getAttribute("data-id")} : false}
+]
+```
+
+Parsing `<p class="note" data-id="42">…</p>`:
+
+1. Both rules tag-match. `priority: 60` wins.
+2. `getAttrs(dom)` returns `{id: "42"}` — attrs assigned.
+3. Children are parsed (recursive descent).
+
+Parsing `<p class="note">…</p>` (no `data-id`):
+
+1. `priority: 60` rule tag-matches.
+2. `getAttrs(dom)` returns `false` → **rule rejected**.
+3. Parser falls through to the next matching rule (`tag: "p"` at
+   priority 50). That rule has no `getAttrs`, so attrs are `null`
+   (defaults applied via `computeAttrs`).
+4. Children parsed normally.
+
+`getAttrs` returning `false` is the canonical "this rule doesn't
+actually apply" signal. Returning `null` or an attrs object means
+*matched* (with `null` meaning "use defaults").
+
+`context: "blockquote/"` is a parent-path selector: the rule only
+applies if the parse stack has a `blockquote` ancestor. Use it to
+declare "treat `<p>` differently inside `<blockquote>`" without altering
+the global `<p>` rule.
+
+For the full grammar of `context`, ambiguous-style handling
+(`StyleParseRule` ordering when multiple `style:` rules match the same
+inline DOM), and the `parseSlice` entry point, see `11-dom-parser.md`.
+
+### 14.14 `Schema.linebreakReplacement` getter
+
+§14.8 covered the constructor logic. The instance field
+
+```ts
+linebreakReplacement: NodeType | null = null
+```
+
+(`schema.ts:593`) is auto-derived during construction. It is *not* a
+getter; it's a plain field set once and never mutated.
+
+To add `linebreakReplacement` support to an existing schema (extending
+the spec via `OrderedMap.update`), you build a *new* `Schema` — there's
+no in-place mutation API. See §14.15.
+
+### 14.15 Extending an existing schema — the spec-merge pattern
+
+The canonical example is `prosemirror-schema-list`, which adds list
+nodes to any base schema:
+
+```ts
+import {Schema} from "prosemirror-model"
+import {schema as baseSchema} from "prosemirror-schema-basic"
+import {addListNodes} from "prosemirror-schema-list"
+
+const mySchema = new Schema({
+  nodes: addListNodes(baseSchema.spec.nodes, "paragraph block*", "block"),
+  marks: baseSchema.spec.marks
+})
+```
+
+`addListNodes(map, listContent, listGroup)` (from
+`prosemirror-schema-list/src/schema-list.ts`) does:
+
+```ts
+function addListNodes(nodes, itemContent, listGroup) {
+  return nodes.append({
+    ordered_list: { content: "list_item+", group: listGroup, /* … */ },
+    bullet_list:  { content: "list_item+", group: listGroup, /* … */ },
+    list_item:    { content: itemContent, defining: true, /* … */ }
+  })
+}
+```
+
+Key idioms:
+
+1. **Start from `baseSchema.spec.nodes`** (an `OrderedMap`).
+2. **`OrderedMap.append({…})`** to add new node specs at the end (or
+   `prepend` for the start, or `update(name, spec)` to replace).
+3. **Pass the merged map to `new Schema({nodes: …, marks: …})`** — the
+   constructor compiles fresh `NodeType`/`MarkType` instances; you
+   cannot reuse types across schemas.
+4. **Update content expressions of existing nodes** if the new types
+   need to be reachable. E.g. adding `bullet_list` to a schema whose
+   `doc.content` is `"paragraph+"` won't make lists usable; you need
+   `doc.content: "block+"` (or `"(paragraph | bullet_list)+"`) and your
+   list types in the `block` group.
+
+A common mistake: trying to mutate `baseSchema` in place. Every
+`Schema` is frozen-by-convention; extension is *spec-merge then
+re-construct*, never mutation.
+
+For mark extension, the same `OrderedMap` pattern applies to
+`spec.marks`. New marks at the end of the order get *higher* `rank` —
+i.e. they sort *later* in `addToSet`'s output, meaning they render
+*innermost* in the DOM serialization.

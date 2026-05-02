@@ -765,3 +765,425 @@ Helpers stack:
 ```
 
 Every editor command in `prosemirror-commands` and every paste-handler in `prosemirror-view` is built by composing these primitives. The contract is rigid: nothing changes the doc except by emitting a `Step`; every `Step` is invertible, mappable, and serializable. That contract is what makes the rest of the system possible.
+
+---
+
+## 11. Addenda — gap fills
+
+These extend the sections above without superseding them. Citations are to `prosemirror-transform/src/*.ts` unless prefixed with `model/` (= `prosemirror-model/src/*.ts`).
+
+### 11.1 `Transform.maybeStep` and the `StepResult` algebra
+
+The two entry points to apply a step are deliberately different shapes:
+
+```ts
+// transform.ts:48-52
+step(step) {
+  let result = this.maybeStep(step)
+  if (result.failed) throw new TransformError(result.failed)
+  return this
+}
+
+// transform.ts:56-60
+maybeStep(step) {
+  let result = step.apply(this.doc)
+  if (!result.failed) this.addStep(step, result.doc!)
+  return result
+}
+```
+
+- `step(step)` — fluent; throws `TransformError` (transform.ts:11-21) on failure. Use when failure is a logic error in the calling code.
+- `maybeStep(step)` — never throws; returns the `StepResult`. Use in commands that *speculatively* try a step and want to fall back to a different strategy on failure. Typical pattern in `prosemirror-commands`:
+
+  ```ts
+  let result = tr.maybeStep(new ReplaceStep(from, to, slice))
+  if (result.failed) {
+    // try a different fitting
+  }
+  ```
+
+`StepResult` is the algebra:
+
+```ts
+// step.ts:71-97
+class StepResult {
+  constructor(readonly doc: Node | null, readonly failed: string | null) {}
+  static ok(doc)            { return new StepResult(doc, null) }
+  static fail(message)      { return new StepResult(null, message) }
+  static fromReplace(doc, from, to, slice) {
+    try { return StepResult.ok(doc.replace(from, to, slice)) }
+    catch (e) { if (e instanceof ReplaceError) return StepResult.fail(e.message); throw e }
+  }
+}
+```
+
+Three factories, one disjoint-union meaning: a successful result has a `doc` and `failed === null`; a failed result has `doc === null` and a string `failed`. There is no "partial success". `fromReplace` is the conventional bridge — most steps' `apply` is just `return StepResult.fromReplace(doc, from, to, slice)` — because `Node.replace` is the one place that throws `ReplaceError`, and step authors want to convert that into a `StepResult.fail` rather than letting it escape.
+
+`Step.apply` *itself* should never throw a `ReplaceError`; if you write a custom step, follow the convention of using `StepResult.fromReplace` rather than calling `doc.replace` raw. Anything else (a programmer error, e.g. nodeAt returning null) is fine to throw as a normal Error.
+
+### 11.2 `replaceStep()` — the public Fitter entry point
+
+`replaceStep` (replace.ts:12-19) is the *function* that constructs a `Step` (a `ReplaceStep`, a `ReplaceAroundStep`, or `null`) for replacing `[from, to)` with a slice:
+
+```ts
+export function replaceStep(doc: Node, from: number, to = from, slice = Slice.empty): Step | null {
+  if (from == to && !slice.size) return null
+  let $from = doc.resolve(from), $to = doc.resolve(to)
+  if (fitsTrivially($from, $to, slice)) return new ReplaceStep(from, to, slice)
+  return new Fitter($from, $to, slice).fit()
+}
+```
+
+It is exported from the package (re-exported via `transform/src/index.ts`). Use it directly when you want the *step object* without applying it to a transform — e.g. when serializing a step over the wire from a non-Transform context, or when manually constructing collab steps.
+
+`Transform.replace` (transform.ts:98-102) is a thin wrapper:
+
+```ts
+replace(from, to = from, slice = Slice.empty) {
+  let step = replaceStep(this.doc, from, to, slice)
+  if (step) this.step(step)
+  return this
+}
+```
+
+so passing an empty slice over an empty range is a no-op (returns `null` and no step is applied), which is the primary reason the function returns `Step | null` rather than throwing.
+
+### 11.3 `replaceOuter` / `replaceTwoWay` / `replaceThreeWay` — the model's slice surgery
+
+Source: `prosemirror-model/src/replace.ts`, exported via `Node.replace(from, to, slice)`.
+
+These three functions implement the *raw* algorithm that produces a new document tree from `($from, $to, slice)`. The transform-side `replaceStep`/`Fitter` (above) is a separate concern — it figures out *which* `(from, to, slice)` to pass; here we cover what happens when you *do* pass them.
+
+Top-level `replace($from, $to, slice)` (model/replace.ts:122-128) only validates open-depth invariants and then calls `replaceOuter(_, _, _, 0)`.
+
+```
+replace
+   │
+   ▼
+replaceOuter(depth=0)         ← walks down outer ancestors
+   │
+   ├── (slice.content empty)            ──▶ replaceTwoWay     ← join $from to $to, no slice
+   │
+   ├── (depth < $from.depth - openStart, both ends share index)
+   │     recurse: replaceOuter(depth+1)  ← descend into the unique child that contains both ends
+   │
+   ├── (flat case: !openStart && !openEnd && both at this depth)
+   │     concat:  parent.cut(0,$from.parentOffset) ⊕ slice.content ⊕ parent.cut($to.parentOffset)
+   │
+   └── (general open-slice case)
+         prepareSliceForReplace(slice, $from)  ← wrap slice in extra ancestors above openStart so it can be re-resolved
+         replaceThreeWay($from, $start, $end, $to, depth)
+```
+
+The three "way" functions describe how many *positions* are stitched together at each level:
+
+- **`replaceTwoWay($from, $to, depth)`** (model/replace.ts:207-216) — used when there's no slice. Closes the gap between `$from` and `$to`. At each `depth`, it appends the content of `$from`'s parent up to `$from.index(depth)` (via `addRange(null, $from, depth, content)`), then if both positions go deeper, recursively builds the joined inner node, then appends the content of `$to`'s parent from `$to.index(depth)` onward (`addRange($to, null, depth, content)`).
+- **`replaceThreeWay($from, $start, $end, $to, depth)`** (model/replace.ts:187-205) — used when there's a non-trivial slice with positive open ends. Stitches together *four* segments at each level: `< $from`, the slice's left-open edge joined to `$from` (`replaceTwoWay($from, $start, depth+1)`), `[$start, $end]` (the slice's body via `addRange`), the slice's right-open edge joined to `$to` (`replaceTwoWay($end, $to, depth+1)`), and `> $to`. When `$start.index(depth) === $end.index(depth)` the two `Two-Way`s collapse into a single recursive `replaceThreeWay` (the slice's content is in a single descendant at that depth).
+- **`replaceOuter`** is the dispatcher that decides which of the four cases applies at the current depth.
+
+`prepareSliceForReplace(slice, $along)` (model/replace.ts:218-225) is the trick that lets `replaceThreeWay` resolve into the slice as if it were part of the doc: it wraps `slice.content` in a copy of `$along`'s ancestors above the slice's `openStart`, then calls `resolveNoCache` to produce `$start` and `$end` resolved positions *inside that synthetic node*. Those synthetic positions can then be used identically to `$from` and `$to` in the recursion.
+
+`addRange($start, $end, depth, target)` (model/replace.ts:165-180) is the per-level "append the children of node(depth) between `$start.index(depth)` and `$end.index(depth)`". With `$start === null` it starts at index 0; with `$end === null` it goes to the end. Two corner cases are important:
+
+- If `$start.depth > depth`, we are not on a flat boundary — the descendant containing `$start` was already added by the recursive call above us, so skip it (`startIndex++`).
+- If `$start.textOffset > 0` (we're inside a text node at this depth), include only the **after** part of that text node (`addNode($start.nodeAfter!, target)` then `startIndex++`). Symmetric handling at `$end` with `nodeBefore`.
+
+`addNode(child, target)` (model/replace.ts:157-163) coalesces adjacent text children with `sameMarkup` — important when stitching slices over text boundaries (otherwise you'd end up with two `Text` nodes instead of one merged one, which `Fragment` does not allow at runtime).
+
+`close(node, content)` (model/replace.ts:182-185) re-checks `node.type.checkContent(content)` — this is where a structurally invalid replacement (e.g. inserting a block into an inline-only parent) throws `ReplaceError` from deep inside the recursion; the error propagates out of `Node.replace`, gets caught by `StepResult.fromReplace`, and turns into a step failure.
+
+When you read these functions in PM source, the recursion shape is the same in both `Two-Way` and `Three-Way`: at each level, append left segment, recurse, append right segment, return a fragment. The difference is *how many* segments are appended — and `Three-Way` has an extra "merge into single child" branch when the slice is contained in one descendant.
+
+Why care? When you're debugging a `ReplaceError("Cannot join X onto Y")`, the function name in the stack trace tells you whether you're dealing with a slice's open edges (`replaceThreeWay` → `joinable($from, $start, depth+1)` or `joinable($end, $to, depth+1)`) or just the gap-closing for an empty slice (`replaceTwoWay`). The `joinable` check (model/replace.ts:151-155) calls `compatibleContent` on the two nodes — so the message tells you exactly which two node types refused to merge.
+
+### 11.4 `Transform.docChanged` and `Transform.changedRange`
+
+```ts
+get docChanged() { return this.steps.length > 0 }                          // transform.ts:64-66
+```
+
+A trivial getter, but it's the canonical "did anything happen?" check used everywhere — `prosemirror-history` decides whether to record an undo entry, plugins decide whether to run their `apply`, view decides whether to redraw. Cheaper than diffing docs. **Note**: a step that produces an identity map (e.g. an `AddMarkStep` whose `getMap` is empty) still flips `docChanged` to true — *any* step counts.
+
+```ts
+changedRange() {                                                           // transform.ts:72-86
+  let from = 1e9, to = -1e9
+  for (let i = 0; i < this.mapping.maps.length; i++) {
+    let map = this.mapping.maps[i]
+    if (i) { from = map.map(from, 1); to = map.map(to, -1) }
+    map.forEach((_f, _t, fromB, toB) => {
+      from = Math.min(from, fromB)
+      to   = Math.max(to,   toB)
+    })
+  }
+  return from == 1e9 ? null : {from, to}
+}
+```
+
+Returns the union of all changed ranges *in post-transform coordinates*, or `null` if no `getMap()` reported any range. Used by view diffing to limit DOM redraws to the affected region. Note:
+
+- The `if (i)` skips mapping the running window through the *first* map — that map *defined* the initial window, so re-mapping would double-count.
+- `forEach` callback receives `(oldStart, oldEnd, newStart, newEnd)`; this loop only uses the new-side bounds to grow the window.
+- An `AddMarkStep` does *not* contribute (its `getMap` is `StepMap.empty` ⇒ `forEach` is a no-op). Hence the docstring caveat "ignores changes that add/remove marks without replacing the underlying content".
+
+### 11.5 `TransformError`
+
+```ts
+// transform.ts:11-21
+export let TransformError = class extends Error {}
+TransformError = function TransformError(this: any, message: string) {
+  let err = Error.call(this, message)
+  ;(err as any).__proto__ = TransformError.prototype
+  return err
+} as any
+TransformError.prototype = Object.create(Error.prototype)
+TransformError.prototype.constructor = TransformError
+TransformError.prototype.name = "TransformError"
+```
+
+The dance is to ensure `instanceof TransformError` works under ES5-compiled code where `class extends Error` doesn't always preserve prototype chains correctly (the so-called "Babel Error subclass bug"). Behaviour:
+
+- `tr.step(step)` throws a `TransformError` whose `message` is the failed `StepResult`'s message.
+- `tr.maybeStep(step)` does **not** throw.
+- Calling code catching `TransformError` (e.g. command code that wants to fall back) should use `instanceof`, which works thanks to the manual prototype patching above.
+- The class is exported (in the package's `index.ts`) — third-party code can throw it from custom step helpers if it wants to integrate with PM's failure conventions.
+
+### 11.6 `setNodeAttribute` / `setDocAttribute` / `addNodeMark` / `removeNodeMark`
+
+```ts
+// transform.ts:203-218
+setNodeAttribute(pos, attr, value) { return this.step(new AttrStep(pos, attr, value)) }
+setDocAttribute(attr, value)       { return this.step(new DocAttrStep(attr, value)) }
+addNodeMark(pos, mark)             { return this.step(new AddNodeMarkStep(pos, mark)) }
+
+// transform.ts:222-236
+removeNodeMark(pos, mark) {
+  let node = this.doc.nodeAt(pos)
+  if (!node) throw new RangeError("No node at position " + pos)
+  if (mark instanceof Mark) {
+    if (mark.isInSet(node.marks)) this.step(new RemoveNodeMarkStep(pos, mark))
+  } else {
+    let set = node.marks, found, steps = []
+    while (found = mark.isInSet(set)) {
+      steps.push(new RemoveNodeMarkStep(pos, found))
+      set = found.removeFromSet(set)
+    }
+    for (let i = steps.length - 1; i >= 0; i--) this.step(steps[i])
+  }
+}
+```
+
+Five methods, all thin step constructors. Two notes:
+
+- `setNodeAttribute(pos, attr, value)` requires `pos` to point at a node's open token (i.e. `doc.nodeAt(pos)` must be non-null). If you have a `ResolvedPos` `$p` and want to change attrs on `$p.parent`, use `tr.setNodeAttribute($p.before(), attr, value)`. To change the doc node itself, use `setDocAttribute` (no position — there is no position outside the doc).
+- `removeNodeMark(pos, MarkType)` is the only one with control flow: it finds *all* instances of that mark type on the node and removes them one by one, applying the steps **in reverse order** (`for (let i = steps.length - 1; i >= 0; i--)`). Each `RemoveNodeMarkStep` has `getMap === StepMap.empty`, so positions don't actually shift — the reverse application is purely defensive against a future change in step semantics. (Today it would also work forward.)
+
+### 11.7 `Transform.split`'s `typesAfter`
+
+```ts
+split(pos, depth = 1, typesAfter?) { split(this, pos, depth, typesAfter); return this }
+```
+
+`structure.ts:213-221` builds the `ReplaceStep` for a split. The interesting parameter is `typesAfter`:
+
+- **Default (omitted)** — the new nodes opened to the *right* of the split inherit the type & attrs of the originals. E.g. splitting in the middle of `<heading level=2>foo|bar</heading>` produces `<heading level=2>foo</heading><heading level=2>bar</heading>`.
+- **`typesAfter = [{type, attrs}, …]`** — override the right-side opens, outermost first. The standard "Enter at end of heading should give a paragraph" command does `tr.split(pos, 1, [{type: schema.nodes.paragraph}])`. The *left* side keeps the heading; the *right* side becomes a paragraph.
+- **`typesAfter = [null, …]`** — `null` at a level means "use the original node's type" (default). Mix and match.
+
+`canSplit(doc, pos, depth, typesAfter?)` (structure.ts:189-211) is the corresponding pre-flight check. The two functions read `typesAfter` identically — one returns a boolean, the other emits the step.
+
+### 11.8 Worked example — `replaceRange` choosing `ReplaceStep` vs `ReplaceAroundStep`
+
+This is the most asked-about lowering in the whole API. Let me walk through three pastes onto the same doc, watching which kind of step pops out.
+
+Starting doc (with token positions annotated):
+
+```
+0  <doc>
+0    <p>1 H 2 e 3 l 4 l 5 o 6 </p>
+7    <p>8 W 9 o 10 r 11 l 12 d 13 </p> 14
+   </doc>
+```
+
+So `doc.content.size === 14`; we have two paragraphs with text "Hello" (positions 1-6) and "World" (8-13).
+
+#### Case A — pure-text paste into a single paragraph
+
+- `from = 3`, `to = 3` (cursor between "He" and "llo")
+- `slice = Slice(<p_text("X")>, 1, 1)` — a slice with openStart=1, openEnd=1, content `<p>X</p>`. (PM treats clipboard text as wrapped in a paragraph that's open on both sides.)
+
+`replaceRange` (replace.ts:334-403):
+
+1. Slice is non-empty → continue.
+2. `fitsTrivially($from, $to, slice)` — false (slice has openStart=1).
+3. `coveredDepths` returns `[]` (the range `[3, 3)` is collapsed; no covered nodes).
+4. `targetDepths = [-2, /* nothing else */]` → after dropping any depth-0 entries.
+5. The `for d = $from.depth; d > 0; d--` loop walks up from depth 1: doc node has no defining/isolating spec → `targetDepths.indexOf(1) === -1`, so add `targetDepths.splice(1, 0, -1)` if `$from.before(1) === 2` — but `$from.before(1) === 0` (start of p₁) and pos-1 is 2, so the condition `$from.before(d) == pos` (where `pos` decrements with `d`) does fire here for `d=1`.
+6. **First strategy** loops over `(openDepth, targetDepth)` combinations. With `openDepth = 1` (the slice's `<p>` is the openable level) and target `-2` ($from.depth+1 = 2 — i.e. don't expand): try `parent.canReplaceWith($from.before(2)._index, ..., insert.type, insert.marks)`. With `target = -2 = -($from.depth + 1)` and slice depth = 1: `parent` is `p₁`, `index = 0` … `canReplaceWith` says "yes, p can hold text" → emit `tr.replace(...)`. This goes through `replaceStep`, which sees `openDepth = 1` reduces to `openStart = 0` (because the wrapper `<p>` is *closed*, i.e. drops to its content), so we end up with a `Slice(text("X"), 0, 0)` and a flat `ReplaceStep(3, 3, slice)`. **Result: `ReplaceStep`.**
+
+#### Case B — block paste at the *end* of a paragraph
+
+- `from = 6`, `to = 6` (cursor at end of "Hello", just before `</p>`)
+- `slice = Slice(<heading><text("Big")></heading>, 0, 0)` — a fully-closed heading slice.
+
+`replaceRange`:
+
+1. Non-empty, not trivial.
+2. `coveredDepths = []`.
+3. `targetDepths = [-2]`.
+4. Walk up: `$from.before(1) === 0`, `pos-1 = 5` ≠ 0; no addition. `targetDepths` stays `[-2]`.
+5. **First strategy**: with `openDepth = 0` (slice is closed) and `target = -2`: `parent = p₁`, `index = $from.index(targetDepth - 1) = $from.index(0) = 0`. `p₁.canReplaceWith(0, 0, heading.type)` — false; you can't put a heading inside a paragraph. The whole inner loop gives no fit.
+6. **Fallback** (`replace.ts:395-402`): try plain `tr.replace(6, 6, slice)`. This calls `replaceStep`, which calls `Fitter`; the Fitter sees `$from.depth === 1`, the slice's heading can't fit *inside* the paragraph, but if it expands the replaced range outward to include `</p>` (the paragraph's close token) and `<h>` (the heading's open token)…
+
+Actually, the inner-loop expansion in step 6 is *targetDepths-driven*: it sets `from = $from.before(depth); to = $to.after(depth)` for each remaining depth and re-tries. With `targetDepths = [-2]`, the only retry is `depth = -2 → no expansion` — so we fall through to a plain `tr.replace(6, 6, slice)`. The `Fitter`'s `mustMoveInline()` check (`replace.ts:235-244`) determines whether the post-replacement should be a `ReplaceAroundStep` (because we need to preserve `</p>` content while inserting *around* it).
+
+For a closed-slice paste at end-of-paragraph though, `Fitter.fit` (replace.ts:77-107) emits a plain `ReplaceStep(6, 6, slice)` if the schema allows the heading to follow the paragraph. **Result: `ReplaceStep`** (the surrounding paragraph remains untouched).
+
+#### Case C — paste a `<li>` into the middle of `<li>` content (the wrap-around case)
+
+This is the canonical `ReplaceAroundStep` example. Suppose:
+
+```
+<ul>
+  <li><p>Hel|lo</p></li>     ← cursor at pos 5 (inside "Hello")
+</ul>
+```
+
+Paste a slice `Slice(<li><p>X</p></li>, 2, 2)` (a list item open on both sides — typical from copying half of one list item).
+
+1. `replaceRange` notices `$from.depth === 3` (doc → ul → li → p), the slice has `openStart === openEnd === 2`, and the slice's leftmost spine is `[<li>, <p>]`.
+2. `coveredDepths` finds nothing (collapsed range).
+3. `targetDepths` includes negative entries for `$from`-anchored ancestors — but only up to a defining barrier. `<li>` is **not** marked `defining`/`isolating` in the typical schema-list spec, but `<p>` is.
+4. The first-strategy loop hits `(openDepth=2, target=-($from.depth+1)=-4)` then `(openDepth=2, target=-3)` etc. At `target=-3` ($from.depth = 3, so we're trying to fit at the `<li>` boundary), `parent = <li>`, `index = 0`. `<li>.canReplaceWith(0, 0, <p>)` → yes (the slice's leftmost child is `<p>`). Emits `tr.replace($from.before(3), $to (negative -> not expanded), closedSlice)`.
+5. Inside `tr.replace` → `replaceStep` → `Fitter.fit`:
+   - The Fitter sees `$from = before(<p>)`, `$to = inside-the-original-paragraph-after-the-cursor`. The slice contributes a complete `<li>` to the *left* of `$to`. But after that placement, we still have `</p>` (close of the original `<li>`'s `<p>`), `</li>` (close of the original `<li>`), and the new content placed.
+   - The `mustMoveInline()` check (replace.ts:235-244) is **true**: the frontier node after fitting is a textblock (`<p>`), and the inline content right after `$to` (the `"llo"` text node) needs to move into the *new* `<p>` opened by the slice's right edge. That triggers `ReplaceAroundStep`.
+6. The Fitter constructs the donut: `from = $from.before(3)`, `to = end-of-original-paragraph-after-cursor`, `gapFrom = $to.pos`, `gapTo = $to.end()`, `slice` = the list item structure with a textblock open on the right, `insert` = the position inside the slice where the gap content (`"llo"`) is re-injected. **Result: `ReplaceAroundStep`.**
+
+The net effect on the doc: the `<li>` is split, `"Hel"` stays in the original paragraph, `"llo"` gets moved into the *new* `<li>`'s `<p>`, and the slice's `X` lives between them. This is the classic "Enter inside a list item splits the list item" outcome — `replaceRange` lowers it to one `ReplaceAroundStep`.
+
+#### Reading the rule
+
+Whenever the slice has open edges that need to *re-wrap existing content*, `Fitter.mustMoveInline` triggers and `ReplaceAroundStep` is emitted. Whenever the slice can be inserted as-is (closed, or open ends that join cleanly without pulling content into the slice), `ReplaceStep` suffices.
+
+Mnemonic for inspecting `Transform.steps[0]` when debugging a paste:
+
+- `instanceof ReplaceStep` ⇒ "slice was inserted; surrounding nodes were not split."
+- `instanceof ReplaceAroundStep` ⇒ "slice was wrapped *around* preserved content; an existing block was split or restructured."
+
+### 11.9 Why `Step.map` returns `null`
+
+Every concrete step's `map` follows the same pattern:
+
+```ts
+map(mapping: Mappable): Step | null {
+  let from = mapping.mapResult(this.from, +1)
+  let to   = mapping.mapResult(this.to,   -1)
+  if (from.deletedAcross && to.deletedAcross) return null   // (*)
+  return new ConcreteStep(from.pos, to.pos, …)
+}
+```
+
+Line `(*)` is the universal "drop the step" rule. `deletedAcross` is true when the position fell *strictly inside* a deleted range (DEL_ACROSS bit, see file 06 §2.4). If **both** ends were strictly inside deleted content, the step's range was completely engulfed — there's nothing left for the rebased step to act on, so we drop it. Specifically:
+
+- For `ReplaceStep`: if the entire `[from, to)` is gone, the rebased replace would target an empty (or nonexistent) range; the safest thing is to skip it. (`replace_step.ts:42-47`)
+- For `AddMarkStep`/`RemoveMarkStep`: if the range is fully deleted, the mark step would touch zero content. `mark_step.ts:44-48` has a slightly stronger condition: also drops if `from.pos >= to.pos` (the range collapsed to empty after mapping).
+- For `AddNodeMarkStep`/`RemoveNodeMarkStep`/`AttrStep`: a single position; uses `mapResult(pos, +1).deletedAfter` (the node directly after `pos` was the target; if that's deleted, drop). `mark_step.ts:163-166`, `attr_step.ts:33-37`.
+- For `DocAttrStep`: never returns `null` — the doc always exists.
+
+The dropped-step case is essential to **collab rebasing** — see file 06 §6 and §11.4 below for the full walk-through. The rule is: when remote steps land that delete everything your local step was going to touch, your local step is dropped silently.
+
+### 11.10 `Step.merge` — coalescing across steps
+
+```ts
+// step.ts:38-40 (default)
+merge(other: Step): Step | null { return null }
+```
+
+The default is "no merge". Three steps override it:
+
+- **`ReplaceStep.merge`** (replace_step.ts:49-63) — combines two adjacent replaces when they form a contiguous typing run. Two cases:
+  - Forward typing: `this.from + this.slice.size == other.from` and the touching ends are closed (`!this.slice.openEnd && !other.slice.openStart`). E.g. typing "a" then "b" → one step inserting "ab".
+  - Backspace-then-type: `other.to == this.from` and `!this.slice.openStart && !other.slice.openEnd`. E.g. backspace then immediate retype.
+
+  Returns a `ReplaceStep` with concatenated content and outer open-ends.
+
+- **`AddMarkStep.merge`** (mark_step.ts:50-57) and **`RemoveMarkStep.merge`** (mark_step.ts:106-113) — combine two adjacent mark range edits when:
+  - `this.mark.eq(other.mark)` (same mark instance — *not* mark type alone).
+  - Ranges overlap or touch: `this.from <= other.to && other.from <= this.to`.
+
+  Returns a single step over `[min(from, other.from), max(to, other.to)]`. Note "overlap or touch" is more permissive than `ReplaceStep.merge`'s "exact adjacency".
+
+Other steps (`ReplaceAroundStep`, `AddNodeMarkStep`, `RemoveNodeMarkStep`, `AttrStep`, `DocAttrStep`) always return `null` — they are not coalesced. `prosemirror-history` calls `prevStep.merge(newStep)` when the user's typing rate is fast enough that the input rules consider them part of the same logical edit; the results compact the undo stack and keep collab traffic small.
+
+The protocol is one-directional: `prev.merge(new)` returns the merged step or `null`. Callers do not try `new.merge(prev)` if the first attempt fails.
+
+### 11.11 `clearIncompatible`'s `convertNewlines` parameter
+
+Full signature (mark.ts:75-106):
+
+```ts
+clearIncompatible(tr, pos, parentType, match = parentType.contentMatch, clearNewlines = true)
+```
+
+`clearNewlines` (called `convertNewlines` in some external docs) controls one specific behaviour: whether literal `\n` / `\r\n` / `\r` characters in text children are replaced with single spaces:
+
+```ts
+if (clearNewlines && child.isText && parentType.whitespace != "pre") {
+  // regex-finds /\r?\n|\r/g and emits ReplaceSteps to convert each to " "
+}
+```
+
+Why have a flag? Because the *only* parent that wants to keep literal newlines is a `code_block` (or any node with `whitespace: "pre"` — see `mark.ts:97`). When you're typing into a code block, you do *not* want `\n` collapsed to `" "`. So `prosemirror-keymap`'s `code_block` Enter handler passes `clearNewlines: false` to preserve the user's intentional line break. For anything else (paragraph, heading, blockquote content, …), the default `true` ensures pasted text doesn't introduce visible line breaks where the schema doesn't allow them.
+
+Note the additional guard `parentType.whitespace != "pre"` inside the `if`: even with `clearNewlines = true`, if the parent is a pre-whitespace node, no conversion happens. So the flag is really "skip conversion *even for non-pre nodes*" (rare) vs the schema-driven default (common).
+
+### 11.12 `Transform` vs `Transaction` — the inheritance line
+
+`Transform` lives in `prosemirror-transform`; `Transaction` lives in `prosemirror-state` and `extends Transform`. The split is:
+
+- `Transform` — knows about: `doc`, `steps`, `docs`, `mapping`. Pure document transformation builder. No selection, no metadata, no scrolling.
+- `Transaction` — adds: `selection: Selection`, `storedMarks: Mark[] | null`, `time: number`, `setMeta(key, value)`, `getMeta(key)`, `scrollIntoView()`, `setSelection(s)`, `replaceSelection(slice)`, `insertText(text, from?, to?)`, `addToHistory` meta key, and so on.
+
+What "lives where" decoder ring:
+
+| Method                            | Defined on   | Notes                                                         |
+|-----------------------------------|--------------|---------------------------------------------------------------|
+| `replace`, `delete`, `insert`     | `Transform`  | Doc-only; no selection consequence.                          |
+| `replaceWith`, `replaceRange`     | `Transform`  | Same.                                                         |
+| `setNodeMarkup`, `setBlockType`   | `Transform`  | Same.                                                         |
+| `addMark`, `removeMark`           | `Transform`  | Same.                                                         |
+| `setNodeAttribute`, `setDocAttribute` | `Transform`  | Same.                                                         |
+| `lift`, `wrap`, `split`, `join`   | `Transform`  | Same.                                                         |
+| `replaceSelection(slice)`         | `Transaction` | Replaces the *current selection* with a slice; updates selection. |
+| `replaceSelectionWith(node, inheritMarks?)` | `Transaction` | Like `replaceSelection` but takes a single node.              |
+| `deleteSelection`                 | `Transaction` | `replaceSelection(Slice.empty)`.                              |
+| `insertText(text, from?, to?)`    | `Transaction` | Resolves marks at `from`, builds `Slice`, calls `replace`.    |
+| `setSelection(selection)`         | `Transaction` | Replaces `tr.selection`; selection must be valid in *current* `tr.doc`. |
+| `setStoredMarks(marks)` / `ensureMarks(marks)` | `Transaction` | Inline mark "memory" for the next typed character.            |
+| `scrollIntoView()`                | `Transaction` | Increments a counter (`tr.scrolledIntoView`); view notices.   |
+| `setMeta(key, value)` / `getMeta(key)` | `Transaction` | Plugin-readable metadata; not persisted.                      |
+| `addStoredMark` / `removeStoredMark` | `Transaction` | Plugin sugar over `setStoredMarks`.                           |
+
+When you read PM source, expect: anything that looks like "selection-aware" or "scroll-aware" or "meta-aware" lives in `prosemirror-state/src/transaction.ts`. Anything that just produces steps lives in `prosemirror-transform`. A `Transaction` is a `Transform` with selection plumbing on top.
+
+### 11.13 Quick reference — the gap-filled additions
+
+| API / concept                        | Where                                  | Behaviour                                                    |
+|--------------------------------------|----------------------------------------|--------------------------------------------------------------|
+| `Transform.maybeStep(step)`          | transform.ts:56                        | apply or no-op; never throws; returns `StepResult`           |
+| `StepResult.fromReplace`             | step.ts:89                             | wraps `Node.replace`, catching `ReplaceError`                |
+| `StepResult.ok`/`fail`               | step.ts:81/84                          | success/failure factories                                    |
+| `replaceStep(doc, from, to, slice)`  | replace.ts:12                          | builds a `ReplaceStep` or `ReplaceAroundStep` (or null)      |
+| `replaceOuter` / `Two` / `ThreeWay`  | model/replace.ts:130/207/187           | model-level slice surgery                                    |
+| `Transform.docChanged`               | transform.ts:64                        | `steps.length > 0`                                           |
+| `Transform.changedRange()`           | transform.ts:72                        | union of new-side change bounds; null if pure mark/attr      |
+| `TransformError`                     | transform.ts:11                        | thrown by `step`; caught by callers; ES5-safe `instanceof`   |
+| `setNodeAttribute(pos, attr, value)` | transform.ts:203                       | `AttrStep` wrapper                                           |
+| `setDocAttribute(attr, value)`       | transform.ts:209                       | `DocAttrStep` wrapper                                        |
+| `addNodeMark(pos, mark)`             | transform.ts:215                       | `AddNodeMarkStep` wrapper                                    |
+| `removeNodeMark(pos, markOrType)`    | transform.ts:222                       | many `RemoveNodeMarkStep`s, applied in reverse               |
+| `split(pos, depth, typesAfter)`      | structure.ts:213                       | `typesAfter` overrides right-side opens                      |
+| `Step.merge(other)`                  | step.ts:40 default; replace_step.ts:49; mark_step.ts:50/106 | adjacency-based coalescing                  |
+| `Step.map → null`                    | replace_step.ts:42; mark_step.ts:44/100/163/207; attr_step.ts:33 | both ends in deleted content              |
+| `clearIncompatible(..., clearNewlines)` | mark.ts:75                          | false for code_block; true elsewhere                         |
+| `Transform` vs `Transaction`         | (inheritance)                          | doc-only vs doc-plus-selection-plus-meta                     |

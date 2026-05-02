@@ -54,15 +54,17 @@ const observeOptions = {        // L7-14
 const useCharData = browser.ie && browser.ie_version <= 11   // L16
 ```
 
-Why those flags?
+Why those flags? — each one is load-bearing for a specific class of
+real-world DOM mutation:
 
-* `childList + subtree` — inserts/removes anywhere under `view.dom`.
-* `characterData + characterDataOldValue` — typed text. We need
-  `oldValue` to detect "characterData event with same value", which
-  Safari fires during composition (`registerMutation` returns
-  `typeOver: true` in that case, see `domobserver.ts:296-300`).
-* `attributes + attributeOldValue` — for things like
-  `class="ProseMirror-selectednode"` and Firefox style cleanups.
+| Flag                          | Catches                                                                                                                                                                                  |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `childList`                   | Element/text-node insertions and removals. Triggered by IME wrapper spans, autocorrect replacing one Text with another, drag-drop, browsers splitting paragraphs at Enter, etc.          |
+| `characterData`               | Edits *inside* an existing Text node. Triggered by typing, autocorrect, IME composition that mutates the same Text node, browser spell-checker silently fixing a typo.                   |
+| `characterDataOldValue`       | Required by Safari's composition signalling: Safari fires a `characterData` event with `oldValue === target.nodeValue` to mean "user typed over a selection without changing the literal value yet" → this becomes `typeOver: true` (`domobserver.ts:296-300`), used by `domchange.readDOMChange` to distinguish "Safari typeOver" from a no-op. |
+| `attributes`                  | `class="ProseMirror-selectednode"` toggles, plus Firefox sometimes leaves `style="..."` residue from copy-paste that PM strips.                                                          |
+| `attributeOldValue`           | Lets PM ignore attribute changes whose `oldValue === newValue` (some browsers fire spuriously).                                                                                          |
+| `subtree`                     | Recurses through every descendant of `view.dom`, including those inside node views. Without this flag the observer would only see direct-child mutations; node-view internal edits (e.g. CodeMirror inside a code block) would be invisible — but `ignoreMutation` then needs to filter those out (see §8). |
 
 Instance fields (L40-46):
 
@@ -117,6 +119,43 @@ This bracket is used everywhere PM writes to the DOM:
 * `input.ts:347-353, 365-368` around the mightDrag attribute toggles.
 * `selection.ts:75, 100-101` for selection writes (uses
   `disconnectSelection`/`connectSelection`, not full stop).
+
+#### Public escape hatch — `view.domObserver.stop() / .start()`
+
+`view.domObserver` is exposed (`index.ts` defines it as a public field
+on the EditorView) precisely so userland code that needs to make a
+known-safe DOM mutation outside the standard `ignoreMutation` flow can
+bracket it:
+
+```ts
+view.domObserver.stop()
+try {
+  // ...mutate the DOM directly, e.g. update a custom widget,
+  // animate a node-view, sync external state into a controlled DOM region.
+} finally {
+  view.domObserver.start()
+}
+```
+
+This is the official sanctioned way; `ignoreMutation` is the
+finer-grained per-record alternative (see §8). Use the bracket when:
+
+* You're touching DOM PM normally owns (rare — most node-view code
+  should *not* do this).
+* You're toggling decorations imperatively without going through
+  `view.dispatch`.
+* You're integrating with a framework that fights PM's reconciler
+  (e.g. animating a node enter/exit) for a brief window.
+
+**Detached-mid-flush behavior** is the subtle property that makes this
+safe: as the snippet above shows, `stop()` *doesn't drop records*. If
+the user typed a character a microtask before your `stop()` ran, that
+mutation is in the observer's internal buffer; `stop()` pulls it via
+`takeRecords()`, pushes it onto `this.queue`, and schedules a deferred
+`flush()` (20 ms). So your DOM write doesn't pre-empt or lose the
+user's keystroke; the keystroke flushes after your write completes,
+sees a now-divergent docView, and reconciles correctly. Without this
+property, every `stop()` would be a race condition.
 
 ### `flushSoon` / `forceFlush` (L83-94)
 
@@ -252,7 +291,14 @@ Steps:
 1. **Reentrancy guards** (L176): no docView → editor destroyed; pending
    debounced flush → bail (the timer will run).
 2. **Drain queue** (L177-178). Empty queue is fine (selection-only
-   change still proceeds via `newSel`).
+   change still proceeds via `newSel`). Note: `pendingRecords()` is
+   called *again* at the start of `flush` rather than relying on the
+   queue from the timer-callback closure. Why? Because between the
+   debounce timer firing and `flush` actually running, more mutations
+   may have arrived (the observer is still live). Also, `handleDOMChange`
+   itself dispatches transactions which can produce *more* mutations
+   (e.g. `selectionToDOM` writes to the DOM); a re-entrant `flush` call
+   is possible and `pendingRecords` lets it pick up those late records.
 3. **Compute selection delta** (L180-181). `ignoreSelectionChange`
    (L151-167) checks if the focus node is inside a custom NodeView whose
    `ignoreMutation({type: "selection", ...})` returns true; if so,
@@ -321,6 +367,42 @@ Filter cases:
 * Otherwise compute `[from, to]` from `previousSibling` / `nextSibling`
   positions (with IE11 sibling fix-up at L272-280), translating DOM
   offsets via `desc.localPosFromDOM`.
+
+#### Worked example — adjacent text node split & merge
+
+Suppose the DOM was `<p>hello world|</p>` (cursor after "world", inside
+a single Text node `"hello world"`). The user pastes "x" via the
+browser autocorrect popup, which the browser implements as
+*"split-and-replace"*: it removes the trailing portion `" world"`,
+inserts a new Text node `" x"`, and leaves the leading `"hello"` as
+the first child. The MutationObserver emits **two** records:
+
+```
+record[0]: childList; target=<p>; removed=[Text " world"]; added=[]
+record[1]: childList; target=<p>; removed=[];                added=[Text " x"]
+```
+
+`registerMutation` runs once per record, but each call's
+`{from, to}` is computed via `localPosFromDOM(target, fromOffset, -1)`
+and `localPosFromDOM(target, toOffset, 1)`. Both records share the
+same target `<p>`; the offsets straddle the same boundary (the index
+where `"hello"` ends). The accumulator in `flush` then takes
+`Math.min(from)` and `Math.max(to)`:
+
+```
+record[0]: from=5,  to=11   (positions of " world")
+record[1]: from=5,  to=7    (positions of " x")
+                     ↓
+combined:   from=5,  to=11
+```
+
+The single combined PM range `[5, 11]` is what `readDOMChange` then
+hands to `parseBetween`, which re-parses `<p>` and produces a
+`replaceWith(5, 11, "x")` step. Two adjacent DOM mutations have
+collapsed into one PM range, one parse pass, and one transaction.
+This min/max accumulation is why coalescence works correctly even
+when records arrive out of order or with overlapping but distinct
+ranges.
 
 ### attributes branch (L288-289)
 
@@ -445,6 +527,41 @@ let change = findDiff(compare.content, parse.doc.content, parse.from, preferredP
 to the wrong side of an unchanged duplicate. Surrogate-pair guard at
 L364-365 / L371-372 prevents splitting an emoji.
 
+#### Semantics of the `(from, to, typeOver)` tuple
+
+The triple is the universal "what did the user do?" handoff between the
+DOM observer and the change reader. Each component has a precise role:
+
+* **`from`** — the *PM-position lower bound* of the affected range,
+  computed as the min over every mutation record's `from`. The `from`
+  passed to `parseBetween` is then *widened* (§5b, L102-105) to the
+  shared-depth boundary so a `<p>` mutation gets re-parsed as a whole
+  paragraph, not just the inner Text. After widening it may be smaller
+  than the originally-reported `from`.
+
+* **`to`** — the upper bound, max over records, also widened. Together
+  with `from` it forms the [parseFrom..parseTo] window for
+  `parseBetween` and the `compare = doc.slice(parse.from, parse.to)`
+  baseline against which `findDiff` runs.
+
+* **`typeOver: boolean`** — set when *any* characterData record's
+  `oldValue === target.nodeValue` (`registerMutation` L296-300). This
+  is Safari's idiosyncratic way of signalling "the user typed a key
+  that produced no net change to this Text node" — typically because
+  the user *replaced* a selected range of text with a single character
+  whose content the input pipeline has already absorbed before the
+  observer fires. Without `typeOver`, `findDiff` would correctly
+  return null (the parse and the doc match), and the typed character
+  would be lost. The `typeOver`-triggered branch at L131-134
+  synthesises a same-text overwrite that re-applies the selection
+  collapse so the cursor lands in the right place.
+
+* **`uniformParentList`** is *not* part of the tuple but appears later
+  in `findDiff`'s heuristics: when both endpoints of the diff are in
+  list items at the same depth, the diff is interpreted as a
+  list-level operation rather than text editing — important for
+  shift-Tab / outdent flows.
+
 If no diff is found *and* the selection collapsed onto its `to` while
 `typeOver` is set, synthesise a same-text overwrite (L131-134); else
 just dispatch the parsed selection if it differs (L135-145).
@@ -548,6 +665,19 @@ if (view.docView && view.docView.dirty) view.updateState(view.state)
 else if (!this.currentSelection.eq(sel)) selectionToDOM(view)
 ```
 
+> **★ This `view.updateState(view.state)` line is the load-bearing
+> "force redraw" mechanism of the entire DOM-observation pipeline.** It is
+> the implicit safety net that catches every case `readDOMChange` can't
+> reason about: malformed parses, structurally impossible mutations,
+> bailed Enter/Backspace synthesis, parse rules that produced a doc the
+> schema rejected, etc. Whenever those happen, the docView is left
+> `dirty` and this line silently re-renders the affected subtree from
+> the *current* (untouched) state, overwriting the browser's mutation.
+> The browser sees its DOM revert; the user sees no change — which is
+> exactly right, because no PM transaction was dispatched. This is why
+> typing inside a `contenteditable=false` decoration "doesn't do
+> anything" rather than crashing.
+
 After `markDirty(from, to)` (L238) marks the affected subtree, the
 docView is dirty. `readDOMChange` may either:
 * dispatch a transaction that triggers `updateState`, which re-renders
@@ -567,6 +697,23 @@ Other forced redraws:
 * `index.ts:200-205` Chrome focus-node-rewrite kludge: if our update
   blew away the selection's focus node, we set `forceSelUpdate` so the
   selection is re-asserted from state.
+
+#### NodeViewDesc reuse during `parseBetween`
+
+A subtle but important property: `parseBetween` (`domchange.ts:15-56`)
+and its helper `ruleFromNode` (L58-77) **reuse existing NodeViewDescs
+rather than re-creating them**. When `parseBetween` runs,
+`DOMParser.parseSlice` walks the DOM; for each node it consults
+`ruleFromNode`, which checks `pmViewDesc.parseRule` first. If the desc
+exists, its `parseRule()` (defined on `NodeViewDesc` at `viewdesc.ts`)
+is returned and tells the parser exactly which schema node this DOM
+element corresponds to — *bypassing* the schema-wide parse-rule
+registry. The reconciler then preserves the existing desc when applying
+the resulting transaction, so the DOM identity (and any internal
+state, like CodeMirror's editor-instance, scroll position, attached
+event listeners) survives. This is critical for performance and
+correctness: re-parsing the world after every keystroke would destroy
+node-view internal state on every typo correction.
 
 ---
 
@@ -591,6 +738,58 @@ inside myself; PM, please don't touch". The selection variant
 (L159-166) when the user clicks/cursors into the widget — returning
 true keeps PM from trying to translate the DOM selection into a PM
 position (which would land somewhere weird inside an opaque node).
+
+#### Worked example — CodeMirror inside a code-block NodeView
+
+A common pattern is embedding a CodeMirror 6 instance inside a
+PM `code_block` node view. CodeMirror manages its own DOM and fires its
+own MutationRecords whenever the user types or moves the cursor inside
+it. PM must not interpret those:
+
+```ts
+const codeBlockNodeView = (node, view, getPos) => {
+  const cm = new EditorView({
+    state: EditorState.create({ doc: node.textContent, extensions: […] }),
+    dispatch: tr => {
+      cm.update([tr])
+      // sync changes back to PM:
+      if (tr.docChanged) view.dispatch(view.state.tr.replaceWith(
+        getPos() + 1, getPos() + 1 + node.content.size,
+        view.state.schema.text(cm.state.doc.toString())))
+    }
+  })
+  return {
+    dom: cm.dom,
+    contentDOM: null,           // PM should never reach into us
+    ignoreMutation: () => true, // ★ all our internal mutations are ours
+    update: (newNode) => {
+      if (newNode.type !== node.type) return false
+      // Re-sync if PM changed our content out-of-band:
+      if (newNode.textContent !== cm.state.doc.toString()) {
+        cm.dispatch({ changes: { from: 0, to: cm.state.doc.length,
+                                  insert: newNode.textContent } })
+      }
+      return true
+    },
+    selectNode: () => cm.focus(),
+    stopEvent: () => true,      // do not let PM see CM's keys/clicks
+    destroy: () => cm.destroy(),
+  }
+}
+```
+
+`ignoreMutation: () => true` is the line that prevents PM from trying
+to interpret CM's character-data and child-list mutations as PM doc
+changes. Combined with `stopEvent: () => true` (so the input pipeline
+doesn't see CM's keystrokes either) and `contentDOM: null` (so the
+reconciler doesn't try to render PM children inside CM), the embed is
+fully sealed. Sync between CM and PM happens entirely through the
+`dispatch` and `update` callbacks above — *no* DOM-level coupling.
+
+The same pattern applies to React/Vue node views, embedded video
+players, drawing canvases, etc. **Whenever an embedded component owns
+a DOM region inside the editor, it should set
+`ignoreMutation: () => true`.**
 
 ---
 
@@ -715,7 +914,94 @@ The full *autocorrect-rewrite-with-mark* case (e.g. Safari turning
 
 ---
 
-## 11. Reference index (file:line)
+## 11. Shadow DOM, iframes, and `<slot>` re-projection
+
+The DOM observer is a `MutationObserver`, which has well-defined
+behaviour across DOM "boundaries" — but those rules are subtle and PM
+ships explicit code to handle each.
+
+### 11a. Shadow DOM
+
+A `MutationObserver` configured with `subtree: true` **does observe
+mutations inside a closed or open shadow root** *if* the root host is a
+descendant of the observed node and you observe the root directly — but
+the spec is ambiguous about cross-root mutations and browsers vary. PM
+sidesteps the ambiguity by mounting `view.dom` (which gets observed) at
+whatever level the consumer chooses. If `view.dom` is *itself* inside a
+shadow root, the observer attaches inside that shadow root and works
+normally; selections inside the same shadow root are visible via the
+standard `getSelection()` calls.
+
+The hard case is **selection** inside Safari's shadow DOM, which has a
+broken `Selection.getRangeAt`:
+
+`safariShadowSelectionRange` (`domobserver.ts:332-357`) handles it:
+
+```ts
+function safariShadowSelectionRange(view, sel) {
+  let found
+  if ((sel as any).getComposedRanges) {
+    // Safari ≥ 17 — the proposed standard API
+    let range = (sel as any).getComposedRanges(view.root)[0] as StaticRange
+    if (range) return safariShadowRangeToRange(range, view.dom)
+  }
+  // Fallback for older Safari: the execCommand("indent") trick.
+  // Indent inserts a beforeinput event whose getTargetRanges() is the
+  // *real* shadow-correct selection. We capture it, then preventDefault.
+  function read(event: InputEvent) {
+    event.preventDefault()
+    event.stopImmediatePropagation()
+    found = (event as any).getTargetRanges()[0]
+  }
+  view.dom.addEventListener("beforeinput", read, true)
+  document.execCommand("indent")
+  view.dom.removeEventListener("beforeinput", read, true)
+  if (found) return safariShadowRangeToRange(found as StaticRange, view.dom)
+  return null
+}
+```
+
+Two strategies:
+1. **Modern Safari** exposes `Selection.getComposedRanges(root)` which
+   returns the selection in terms of light-DOM positions — directly
+   usable.
+2. **Older Safari** has neither `getComposedRanges` nor working
+   `getRangeAt` inside shadow roots, but `execCommand("indent")`
+   *reliably* fires a `beforeinput` event whose `getTargetRanges()`
+   returns the real selection. PM intercepts the event with
+   `preventDefault` (so the indent never actually happens), captures
+   the range, and returns it. This is one of the most beautifully evil
+   workarounds in the codebase.
+
+### 11b. iframes
+
+Each iframe has its *own* `document` and *own* `MutationObserver`.
+`view.dom` lives in exactly one document — wherever the consumer
+constructed the EditorView. Mutations in a parent document or a sibling
+iframe are not seen. If you embed PM *inside* an iframe, the observer
+runs inside that iframe's document; selection APIs use that iframe's
+`document.getSelection()`. This is automatic; no special code needed.
+
+What you *do* need to handle is `view.root`: PM uses `view.root` (set
+to `document` or the shadow root containing `view.dom`) for any
+`addEventListener` that needs to catch events bubbling all the way up.
+For an in-iframe editor, `view.root` is the iframe's own document.
+
+### 11c. `<slot>` re-projection
+
+A `<slot>` inside a shadow root projects light-DOM children into the
+shadow tree. Mutations to the *projected* light-DOM children fire
+`MutationRecord`s on their *original* parent (in the light DOM) — not
+on the slot. This is the spec-compliant behaviour and PM doesn't need
+special code, but it's worth noting: if your custom node view uses
+slots to project content, mutations inside that content are observed
+on the light-DOM ancestor. Since `view.dom` is the light-DOM ancestor
+in the typical case, the observer sees the mutation and translates it
+correctly via the desc tree.
+
+---
+
+## 12. Reference index (file:line)
 
 | concept | citation |
 |---|---|

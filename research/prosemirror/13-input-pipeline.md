@@ -56,6 +56,21 @@ event I should suppress when read-only?").
 (Note `copy` is in `handlers` but `cut` is in `editHandlers` — copy is a
 read-only operation; cut requires deletion, so it must be guarded.)
 
+**The "edit handlers gate" is the read-only switch.** The dispatch wrapper
+in `initInput` (`input.ts:51`) reads `view.editable || !(event.type in editHandlers)`.
+There is no other place in the pipeline that asks "is this view editable?" —
+the entire read-only behaviour is implemented by *which dispatch table the
+event lives in*. Any new edit-mutating event must be added to `editHandlers`
+or it will fire when the editor is read-only.
+
+**Why are `touchstart`/`touchmove` registered with `{passive: true}`
+(`input.ts:17`)?** Performance. A passive listener cannot call
+`preventDefault`, but the browser knows that and can therefore start
+scrolling the page on the very first touchmove instead of waiting for the
+JS handler to return. PM never wants to suppress page-level touch scrolling
+inside the editor — it only records `lastTouch` / sets the selection origin
+— so passive is strictly a perf win.
+
 ### 1.2 `initInput` — wiring (`input.ts:46-61`)
 
 ```ts
@@ -103,6 +118,24 @@ For every event the bound listener (`input.ts:49-52`) consults three predicates
    (`nodeType == 11`), the event is rejected. Non-bubbling events
    (`event.bubbles === false`) skip this check; events whose `defaultPrevented`
    is already true are rejected.
+
+   **Why walk the ancestor chain rather than just check `view.dom.contains(event.target)`?**
+   Two reasons:
+
+   1. **Shadow-DOM retargeting.** Events that originate inside a shadow root
+      hosted by a node view are retargeted at the shadow boundary, so a
+      simple `contains` check would either miss them entirely or catch them
+      from the wrong perspective. Walking via `parentNode` (which crosses
+      `ShadowRoot.host` because `parentNode` of a shadow root has nodeType
+      11) lets the predicate detect the boundary explicitly and bail.
+   2. **Per-node `stopEvent` opt-out.** Each ancestor's `pmViewDesc.stopEvent`
+      is consulted *along the way*. This is the canonical extension point
+      for node views (custom React/CodeMirror embeds, IFrame players, etc.)
+      that want to handle their own keydowns/clicks/etc. without PM
+      intercepting. `WidgetViewDesc.stopEvent` (`viewdesc.ts:565-568`)
+      defers to `widget.spec.stopEvent`; custom node views set it via
+      `nodeViewSpec.stopEvent(event)`. Returning true from any ancestor's
+      `stopEvent` short-circuits the entire input pipeline for that event.
 2. **`runCustomHandler(view, event)`** (`input.ts:83-88`): consults the
    `handleDOMEvents` prop. The first plugin/prop whose handler returns truthy
    *or* calls `preventDefault` wins; the built-in handler is skipped.
@@ -140,18 +173,18 @@ of browser behavior. Annotated:
 | `lastIOSEnterFallbackTimeout`    | `keydown` (`125`)                                                                                                                       | If no DOM change happens within 200ms after Enter on iOS, fire `handleKeyDown(Enter)` synthetically (`126-130`).                                                                                                            |
 | `lastFocus`                      | `focus` (`781`)                                                                                                                         | `domobserver.ts:228` — a DOM change with no `from` mapping that occurs <200ms after focus and far from any pointer activity is treated as the browser fixing up cursor on focus.                                            |
 | `lastTouch`                      | `touchstart`/`touchmove` (`423`/`429`)                                                                                                  | Same `domobserver.ts:229` heuristic — distinguish focus-induced selection from touch.                                                                                                                                        |
-| `lastChromeDelete`               | Set in `domchange.ts:202`                                                                                                              | `domchange.ts:234` — Chrome composition deletion: don't reapply if a delete just happened.                                                                                                                                   |
+| `lastChromeDelete`               | Set in `domchange.ts:202` whenever a Chrome composition fires a `change.endB == change.start` (= "delete then re-insert" pattern)        | Read in `domchange.ts:234` — when Chrome reports an empty selection at the end of a *replace-shaped* composition change within 100 ms of that delete, suppress the bogus selection update so the cursor doesn't jump. Pure Chrome-IME-during-delete-and-reinsert workaround. |
 | `composing`                      | `compositionstart/update` (`490`), cleared in `compositionend` (`504`) and `clearComposition` (`522`)                                   | Everywhere — `inOrNearComposition`, `editHandlers.paste` skip path, `endComposition`, `domchange`.                                                                                                                          |
 | `compositionNode`                | Set by `findCompositionNode` (`528-545`) called from `index.ts:199`                                                                     | The text node currently hosting an active IME composition; `domobserver` skips mutations on it.                                                                                                                               |
 | `composingTimeout`               | `scheduleComposeEnd` (`515-518`)                                                                                                       | Android: 5s inactivity → force end (`455`).                                                                                                                                                                                  |
 | `compositionNodes`               | Filled by `viewdesc` during composition; emptied by `clearComposition` (`525`)                                                          | Marks dirty parents so they're re-rendered after composition ends.                                                                                                                                                            |
-| `compositionEndedAt`             | `compositionend` (`505`); reset in `inOrNearComposition` (`448`)                                                                       | Safari fires keydown(Enter) *after* compositionend on Japanese IME; if the keydown is within 500ms it is suppressed.                                                                                                          |
+| `compositionEndedAt`             | `compositionend` (`505`); reset in `inOrNearComposition` (`448`); initialised to **`-2e8`** at field decl (`L36`)                       | Safari fires keydown(Enter) *after* compositionend on Japanese IME; if the keydown is within 500ms it is suppressed (`inOrNearComposition`, `input.ts:447`). The `-2e8` sentinel is chosen so `Math.abs(event.timeStamp - (-2e8)) < 500` is unambiguously *false* before any composition has happened — no special "uninitialised" case is needed. (`event.timeStamp` is monotonic-page-uptime, always positive, so the math is always huge.) |
 | `compositionID`                  | Bumped in `compositionend` (`510`)                                                                                                      | `domchange.ts:82` includes it as a transaction meta key so concurrent dispatches can identify "from composition X".                                                                                                          |
 | `badSafariComposition`           | Set in `domobserver.ts:68` when Safari emits weird composition mutations                                                                | `compositionend` forces a flush instead of letting it queue (`508`).                                                                                                                                                          |
 | `compositionPendingChanges`      | Set in `compositionend` (`506`); cleared in `domchange.ts:83`                                                                          | Marks "we need a microtask flush after this compositionend."                                                                                                                                                                  |
 | `domChangeCount`                 | Incremented in `domchange.ts:123`                                                                                                      | `beforeinput` Android backspace fallback (`815`) snapshots this and checks 50ms later whether anything changed.                                                                                                              |
 | `eventHandlers`                  | Filled in `initInput`/`ensureListeners`                                                                                                  | `destroyInput` removes them.                                                                                                                                                                                                  |
-| `hideSelectionGuard`             | Set in `selection.ts:138`                                                                                                              | Listener that re-shows selection styling once the user moves the caret away from a hidden selection.                                                                                                                          |
+| `hideSelectionGuard`             | Installed by `selectionToDOM` (`selection.ts:138`) when the selection is rendered as "hidden" (e.g. across a node selection / atom)     | Holds a tear-down closure: a `selectionchange` listener that fires once, removes itself, removes the `ProseMirror-hideselection` CSS class, and clears `view.input.hideSelectionGuard`. The point is to *re-show* the native selection styling the instant the user moves the caret away from the hidden range — without it, the caret would stay invisible until the next selection state write. |
 
 ---
 
@@ -226,8 +259,26 @@ Its job is **"the browser would do something contenteditable-broken with this
 key; we need to either fix the selection first or take over entirely."**
 
 The dispatch is a single switch (`capturekeys.ts:322-345`) keyed on
-`event.keyCode` plus modifiers (`getMods` returns a sorted string of
-`c`/`m`/`a`/`s`):
+`event.keyCode` plus modifiers. **`getMods`** (`capturekeys.ts:313-320`) builds
+the modifier signature by appending characters in a *fixed insertion order*:
+
+```ts
+function getMods(event: KeyboardEvent) {
+  let result = ""
+  if (event.ctrlKey)  result += "c"
+  if (event.metaKey)  result += "m"
+  if (event.altKey)   result += "a"
+  if (event.shiftKey) result += "s"
+  return result
+}
+```
+
+The string is *not* sorted — its order is **always c, m, a, s** because it's
+built by four sequential `+=` calls. Comparisons like `mods == "c"`,
+`mods == "cs"`, or `mods.indexOf("s") > -1` rely on this canonical order
+implicitly. (E.g. Ctrl+Shift always serialises to `"cs"`, never `"sc"`.)
+There is no normalisation step; if a future change reorders the four `if`s,
+every consumer breaks.
 
 | Key                        | Mac alias       | Function called                                             | Returns true when…                                                                          |
 | -------------------------- | --------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
@@ -240,6 +291,24 @@ The dispatch is a single switch (`capturekeys.ts:322-345`) keyed on
 | **Up arrow** (38)          | Ctrl-P (80)     | `selectVertically(view, -1, mods) \|\| skipIgnoredNodes`     | Returns true when motion crosses a node boundary or hits a `NodeSelection`.                  |
 | **Down arrow** (40)        | Ctrl-N (78)     | `safariDownArrowBug(view) \|\| selectVertically(view, 1, mods) \|\| skipIgnoredNodes` | First branch is a Safari-specific kludge.                                |
 | **Mod-B/I/Y/Z** (66/73/89/90) | (m on Mac, c elsewhere) | `return true` (always swallow)                       | Stop the browser from running its own bold/italic/undo/redo on the contenteditable.          |
+
+**Why does Enter (13) and Escape (27) unconditionally `return true`?** Because
+the *default* browser behaviour for these keys inside contenteditable is
+catastrophic-by-PM-standards: Enter inserts a `<div>` or `<br>` outside PM's
+schema, and Escape can blur the editor in some browsers. By returning `true`
+even when no plugin handled the key, `captureKeyDown` forces the keydown
+handler to call `event.preventDefault()`. If a user *wants* an Enter to do
+something, they bind it via `prosemirror-keymap` and that runs first
+(`handleKeyDown` props are tried before `captureKeyDown`); if no binding
+matches, swallowing is still the right answer.
+
+**Why the Ctrl-h/d/b/f/p/n branches on Mac?** macOS terminal-style readline
+shortcuts. They are listed inline in the table above (Ctrl-H = Backspace,
+Ctrl-D = Delete, Ctrl-B/F/P/N = arrows). PM mirrors them to the same handler
+as the literal arrow/delete keys so that `joinBackward`, `selectClickedNode`
+etc. fire identically. These are *only* matched when `mods == "c"` and
+`browser.mac` is true — on other platforms the same combos pass through
+to plugin keymaps unmolested.
 
 #### 3.3.1 `stopNativeHorizontalDelete` (`capturekeys.ts:266-281`)
 
@@ -254,6 +323,15 @@ Returns `true` (= "I handled it; preventDefault") in three cases:
 
 Otherwise returns `false` — let the browser delete a regular character;
 the DOM observer will pick it up.
+
+**Concrete logic** (`capturekeys.ts:266-281`): the function checks, in order,
+non-text-selection → cross-parent → end-of-textblock → adjacent non-text
+node-with-deletion. The last branch is the load-bearing case for atom
+deletion: without it the browser would just *visually* erase the atom's DOM
+(or worse, leave it in place while marking "deleted") with no corresponding
+PM transaction, leading to silent state/DOM divergence. The PM dispatch
+goes through `view.state.tr.delete(from, to)` and then returns true to
+suppress the native delete.
 
 #### 3.3.2 `skipIgnoredNodes` (`capturekeys.ts:67-157`)
 
@@ -535,6 +613,24 @@ handlers.mousedown = (view, _event) => {
 For each depth `i = $pos.depth+1` down to `1`, call the prop with either
 `(pos, $pos.nodeAfter, $pos.before(i), event, true)` (innermost, "direct")
 or `(pos, $pos.node(i), $pos.before(i), event, false)`. First truthy wins.
+
+**Concretely**: this is how a click on a deeply-nested element propagates
+through *every* `handleClickOn` (or `handleDoubleClickOn` /
+`handleTripleClickOn`) registered by plugins, walking from the most
+specific node (the directly-clicked one) outward to the document root.
+The 6th argument (the boolean `direct`) is true only on the innermost
+call — letting plugins distinguish "click landed *on* this node" from
+"click landed in some descendant of this node". A plugin that wants to
+intercept clicks on, say, `image` nodes registers `handleClickOn` and
+returns true only when the depth-passed `node.type.name === "image"`.
+
+Unlike `handleClick` (the singular variant, called once at the top level),
+`handleClickOn` fires *per ancestor* — six handlers at six depths get six
+chances to respond before falling through to `selectClickedLeaf` /
+`selectClickedNode`. The ancestor walk is also why a plugin handler
+registered on the editor as a whole still sees clicks on the innermost
+text — it just gets called with `i == $pos.depth+1` (the leaf) first, then
+each ancestor in turn.
 
 ### 6.3 `MouseDown` — the micro-state-machine (`input.ts:303-420`)
 
@@ -1024,6 +1120,66 @@ serialization of mutations and timeouts:
 `compositionPendingChanges` is the bridge between compositionend (which sets
 it) and the *next* `domchange.readDOMChange` (which clears it and includes
 the compositionID in the transaction's meta — `domchange.ts:82-83`).
+
+### 13.1 `forceDOMFlush` is the cross-cutting "stop composing now" hook
+
+`forceDOMFlush` (`input.ts:272-274`) is just `endComposition(view)`; the
+distinct name advertises that **every** event that means "the user is no
+longer talking to the IME" calls it before doing its own work:
+
+| Site                                                   | Why force-flush?                                                                                  |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `mousedown` (`input.ts:281`)                           | A click commits any active composition; we need state in sync before computing `posAtCoords`.    |
+| `touchstart` (`input.ts:424`)                          | Same as mousedown for touch devices.                                                              |
+| `contextmenu` (`input.ts:433`)                         | Right-click "Inspect Element" must show the post-composition DOM, not stale state-vs-DOM mismatch.|
+| Non-229 `keydown` (`input.ts:116`, via `forceFlush`)   | The user pressed a normal key; if there are pending IME mutations they need to apply first.       |
+
+The contract is symmetric: any *new* event handler that needs to read PM
+state and compare against DOM truth should call `forceDOMFlush` before
+inspecting `state.selection` / `domSelectionRange()`. Failing to do so is
+the canonical bug pattern for "my plugin worked everywhere except mid-IME".
+
+### 13.2 Drag-drop slice round-trip
+
+The slice carried by an intra-PM drag is plumbed through three sites:
+
+```
+dragstart (input.ts:680-708)
+    │ build slice = (sourceNodeSelection || state.selection).content()
+    │ serializeForClipboard(view, slice) → {dom, text, slice'}
+    │ dataTransfer.setData("text/html", dom.innerHTML)
+    │ dataTransfer.setData("text/plain", text)
+    │ view.dragging = new Dragging(slice', dragMoves(...), node?)
+    ▼
+dragover/dragenter (input.ts:715-717)
+    │ preventDefault — tells browser this view accepts the drop.
+    │ (prosemirror-dropcursor renders its visual cue; PM core does nothing here.)
+    ▼
+drop (input.ts:719-778)
+    │ slice = view.dragging?.slice                       // intra-PM, fast path
+    │       ?? parseFromClipboard(view, text, html, …)   // cross-window, parse from DataTransfer
+    │ transformPasted(slice, view, false)                // intra-PM only
+    │ insertPos = dropPoint(state.doc, $mouse.pos, slice) ?? $mouse.pos
+    │ if move: source-side delete (node.replace OR tr.deleteSelection)
+    │ replaceRange(pos, pos, slice)
+    │ tr.setMeta("uiEvent", "drop")
+    ▼
+dragend (input.ts:710-714)
+    │ setTimeout(50, () => { if (view.dragging == d) view.dragging = null })
+    │ — the 50ms slack lets a same-tick drop in another window still see it.
+```
+
+**Key invariants**:
+* `view.dragging` is the *only* signal distinguishing "intra-PM drag" from
+  "external HTML dropped in"; there is no MIME-type marker.
+* `dropPoint` (in `prosemirror-transform`) finds the nearest schema-legal
+  insertion point, which is why dropping a block-level slice over the middle
+  of a paragraph snaps to the block boundary.
+* The Gecko `mightDrag.setUneditable` kludge (`input.ts:343-353`) flips
+  `contentEditable=false` on the dragged element 20ms after mousedown so
+  Firefox treats it as a single drag-able unit. `MouseDown.done` reverses
+  it. Without this, Firefox tries to drag-select a text fragment instead of
+  the whole node.
 
 ---
 
