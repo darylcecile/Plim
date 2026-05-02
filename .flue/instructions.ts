@@ -1,4 +1,5 @@
-import { spawn } from 'bun';
+
+import { runPrompt } from './main';
 
 const prompts = {
 	researchProseMirror: `You are a technical researcher agent. Your first task is to research prosemirror. Understand how it works, how input is processed, and how rendering is done. We need to understand in full detail how it's data model works, and how the different components interact with each other. For context, we are going to be building a new editor inspired by prosemirror, but for better DX and extensibility. So we need to understand how prosemirror works in order to build something better, while understanding browser constraints and how to work with them. Write documents and findings in the research folder.`,
@@ -19,14 +20,68 @@ while (qualityAssuranceChecks['prosemirror-research'] === false) {
 
 	const researchPrompt = prompts.researchProseMirror + (feedbackText ? `\n\n[Feedback from Quality Assurance]: ${feedbackText}\n\n` : '');
 
-	const out = spawn({
-		cwd: process.cwd(),
-		cmd: ['copilot', '-p', researchPrompt, '-s', '--no-ask-user', '--allow-all', '--model', 'gpt-5.5'],
-	});
+	const out = await runPrompt(researchPrompt, "gpt-5.5");
 
-	if (await out.exited !== 0) {
-		console.error('Error running copilot:', out);
-		process.exit(out.exitCode);
+	console.log('[Result]:', out);
+
+	console.log('[Task]: Quality Assurance Check for prosemirror research');
+
+	const qaOut = await runPrompt(`
+		<original request>
+		${prompts.researchProseMirror}
+		</original request>
+
+		<research output>
+		${out}
+		</research output>
+
+		${prompts.qualityAssurance}
+		`.trim(), 'gpt-5.5'
+	);
+
+	if (qaOut.toLowerCase().includes('approve')) {
+		qualityAssuranceChecks['prosemirror-research'] = true;
+		console.log('[Quality Assurance]: Research approved');
+	} else {
+		console.log('[Quality Assurance]: Research not approved. Feedback:\n', qaOut);
+		feedbackText = qaOut;
 	}
 
 }
+
+feedbackText = null;
+
+while (qualityAssuranceChecks['implementation'] === false) {
+	console.log('[Task]: Implementing plim library');
+
+	const implementPrompt = prompts.implementPlim + (feedbackText ? `\n\n[Feedback from Quality Assurance]: ${feedbackText}\n\n` : '');
+	const result = await runPrompt(implementPrompt, "gpt-5.5");
+
+	console.log('[Result]: Implementation Summary:\n', result);
+
+	console.log('[Task]: Quality Assurance Check for plim implementation');
+
+	const qaText = await runPrompt(`
+		<original request>
+		${prompts.implementPlim}
+		</original request>
+
+		<implementation summary>
+		${result}
+		</implementation summary>
+
+		${prompts.implementationQualityAssurance}
+		`, "claude-opus-4.7"
+	);
+
+	if (qaText.toLowerCase().includes('approve')) {
+		qualityAssuranceChecks['implementation'] = true;
+		console.log('[Quality Assurance]: Implementation approved');
+	} else {
+		console.log('[Quality Assurance]: Implementation not approved. Feedback:\n', qaText);
+		feedbackText = qaText;
+	}
+
+}
+	
+console.log('All tasks completed successfully!');
