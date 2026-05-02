@@ -13,7 +13,15 @@ type Model = typeof models[keyof typeof models];
 export async function runPrompt(prompt:string, model:Model = OPENAI_GPT_5_5) {
 	const task = spawn({
 		cwd: process.cwd(),
-		cmd: ['copilot', '-p', prompt, '-s', '--no-ask-user', '--allow-all', '--model', model],
+		cmd: [
+			'copilot', 
+			'-p', prompt, 
+			'-s', '--no-ask-user', '--allow-all', '--enable-all-github-mcp-tools',
+			'--effort', 'high',
+			'--stream', 'on', 
+			'--model', model,
+			'--mode', 'autopilot'
+		],
 		stdio: ['ignore', 'pipe', 'pipe']
 	});
 
