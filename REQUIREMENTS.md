@@ -1,6 +1,8 @@
-# API Wishlist
+# API Requirements
 
-This doc outlines the API features that I want to see in Plim. It should be used as a strict specification requirement.
+This doc outlines the design of the API for Plim. It covers the core APIs for creating and managing the editor, as well as the APIs for defining blocks, marks, actions, and extensions. The API is designed to be flexible and extensible, allowing developers to easily customize and extend the editor's functionality to fit their specific use cases.
+
+This doc MUST be used as a guide and requirements checklist for the implementation of the Plim editor and its related packages. It should be referred to throughout the development process to ensure that all necessary features and functionalities are implemented according to the design specifications outlined in this document.
 
 ## Editor API
 
