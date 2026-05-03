@@ -33,6 +33,7 @@ export type SlashMenuProps = {
 export function SlashMenu({ onSelect }: SlashMenuProps) {
 	const [query, setQuery] = React.useState('');
 	const [active, setActive] = React.useState(0);
+	const itemRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
 
 	const filtered = React.useMemo(() => {
 		const q = query.trim().toLowerCase();
@@ -41,6 +42,15 @@ export function SlashMenu({ onSelect }: SlashMenuProps) {
 	}, [query]);
 
 	React.useEffect(() => setActive(0), [query]);
+
+	// Keep the highlighted item visible inside the scrollable list when
+	// arrow-key navigation pushes it past the panel's edges. `block: 'nearest'`
+	// only scrolls when actually needed, avoiding jitter while the cursor is
+	// already in view.
+	React.useEffect(() => {
+		const el = itemRefs.current[active];
+		if (el) el.scrollIntoView({ block: 'nearest' });
+	}, [active]);
 
 	React.useEffect(() => {
 		function onKey(ev: KeyboardEvent) {
@@ -96,6 +106,9 @@ export function SlashMenu({ onSelect }: SlashMenuProps) {
 					filtered.map((it, i) => (
 						<button
 							key={it.id}
+							ref={(el) => {
+								itemRefs.current[i] = el;
+							}}
 							className={`slash-menu-item${i === active ? ' active' : ''}`}
 							onMouseDown={(e) => {
 								e.preventDefault();
