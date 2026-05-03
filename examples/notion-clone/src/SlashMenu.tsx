@@ -27,12 +27,10 @@ const ITEMS: Item[] = [
 ];
 
 export type SlashMenuProps = {
-	x: number;
-	y: number;
 	onSelect: (id: string | null) => void;
 };
 
-export function SlashMenu({ x, y, onSelect }: SlashMenuProps) {
+export function SlashMenu({ onSelect }: SlashMenuProps) {
 	const [query, setQuery] = React.useState('');
 	const [active, setActive] = React.useState(0);
 
@@ -89,7 +87,7 @@ export function SlashMenu({ x, y, onSelect }: SlashMenuProps) {
 	}, [active, filtered, onSelect]);
 
 	return (
-		<div className="slash-menu" style={{ left: x, top: y }} role="listbox">
+		<div className="slash-menu" role="listbox">
 			<div className="slash-menu-header">{query ? `Filtering: "${query}"` : 'Basic blocks'}</div>
 			<div className="slash-menu-list">
 				{filtered.length === 0 ? (

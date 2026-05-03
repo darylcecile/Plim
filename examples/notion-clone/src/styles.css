@@ -71,6 +71,12 @@ html, body {
 	white-space: pre-wrap;
 	word-wrap: break-word;
 }
+.plim-editor ::selection {
+	background: rgba(35, 131, 226, 0.28);
+}
+.plim-editor *::selection {
+	background: rgba(35, 131, 226, 0.28);
+}
 
 /* Block defaults */
 .plim-block {
@@ -79,20 +85,23 @@ html, body {
 	margin: 1px 0;
 	min-height: 1.5em;
 }
+.plim-block:first-child {
+	margin-top: 0;
+}
 
 /* Hover affordances: + and drag handle on the gutter */
 .plim-block-handles {
 	position: absolute;
-	top: 50%;
-	left: -3.5em;
-	transform: translateY(-50%);
+	top: 3px;
+	left: -2.6em;
 	display: flex;
-	gap: 2px;
+	gap: 0;
 	align-items: center;
 	opacity: 0;
 	pointer-events: none;
 	transition: opacity 80ms ease;
 	user-select: none;
+	height: 1.5em;
 }
 .plim-block:hover > .plim-block-handles,
 .plim-block:focus-within > .plim-block-handles {
@@ -103,15 +112,16 @@ html, body {
 .plim-block-drag {
 	all: unset;
 	cursor: pointer;
-	width: 1.4em;
-	height: 1.4em;
+	width: 22px;
+	height: 22px;
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
 	border-radius: 4px;
 	color: rgba(55, 53, 47, 0.45);
-	font-size: 16px;
+	font-size: 18px;
 	line-height: 1;
+	font-weight: 400;
 }
 .plim-block-add:hover,
 .plim-block-drag:hover {
@@ -120,8 +130,9 @@ html, body {
 }
 .plim-block-drag {
 	cursor: grab;
-	font-size: 12px;
-	letter-spacing: -2px;
+	font-size: 13px;
+	letter-spacing: -2.5px;
+	padding-right: 2px;
 }
 .plim-block-drag:active {
 	cursor: grabbing;
@@ -136,18 +147,41 @@ html, body {
 	border-radius: 1px;
 	z-index: 5;
 }
-/* Hide handles for h1 hovering when inside heading is too tall — keep simple for now. */
-.plim-block[data-empty="true"] [data-block-content="true"]::before {
-	content: attr(data-placeholder);
+/* Empty-block placeholders (Notion shows these only on the focused empty block) */
+.plim-block[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
 	color: var(--text-faint);
 	pointer-events: none;
 	position: absolute;
 }
-.plim-block-paragraph[data-empty="true"]:focus-within [data-block-content="true"]::before {
+.plim-block-paragraph[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
 	content: "Type '/' for commands";
-	color: var(--text-faint);
-	pointer-events: none;
-	position: absolute;
+}
+h1.plim-block-heading[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
+	content: "Heading 1";
+}
+h2.plim-block-heading[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
+	content: "Heading 2";
+}
+h3.plim-block-heading[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
+	content: "Heading 3";
+}
+.plim-block-bulleted_list_item[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
+	content: "List";
+}
+.plim-block-numbered_list_item[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
+	content: "List";
+}
+.plim-block-to_do[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
+	content: "To-do";
+}
+.plim-block-toggle[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
+	content: "Toggle";
+}
+.plim-block-quote[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
+	content: "Empty quote";
+}
+pre.plim-block-code[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
+	content: "Type code…";
 }
 
 /* Headings */
@@ -156,6 +190,10 @@ html, body {
 	margin-bottom: 4px;
 	font-weight: 700;
 	line-height: 1.3;
+	letter-spacing: -0.01em;
+}
+.plim-block-heading:first-child {
+	margin-top: 0;
 }
 h1.plim-block-heading { font-size: 1.875em; }
 h2.plim-block-heading { font-size: 1.5em; }
@@ -234,10 +272,11 @@ h3.plim-block-heading { font-size: 1.25em; }
 /* Quote */
 .plim-block-quote {
 	border-left: 3px solid var(--quote-border);
-	padding-left: 14px;
-	font-size: 1em;
-	margin-top: 4px;
-	margin-bottom: 4px;
+	padding: 4px 0 4px 14px;
+	font-size: 1.05em;
+	line-height: 1.5;
+	margin-top: 6px;
+	margin-bottom: 6px;
 }
 
 /* Code block */
@@ -289,8 +328,6 @@ a[data-mark-type="link"] {
 
 /* Slash menu */
 .slash-menu {
-	position: fixed;
-	z-index: 100;
 	background: var(--menu-bg);
 	border-radius: 6px;
 	box-shadow: var(--menu-shadow);
@@ -403,6 +440,7 @@ a[data-mark-type="link"] {
 	height: 360px;
 	border: 1px solid var(--divider);
 	border-radius: 4px;
+	background: #fff;
 }
 
 /* Raw HTML block */
@@ -437,23 +475,43 @@ a[data-mark-type="link"] {
 .plim-table {
 	border-collapse: collapse;
 	border: 1px solid var(--divider);
+	background: #fff;
+}
+.plim-table tr:first-child td {
+	background: rgba(55, 53, 47, 0.03);
+	font-weight: 500;
 }
 .plim-table td {
 	border: 1px solid var(--divider);
-	padding: 6px 10px;
-	min-width: 80px;
-	min-height: 28px;
+	padding: 7px 10px;
+	min-width: 120px;
+	min-height: 30px;
 	vertical-align: top;
 	font-size: 14px;
+	line-height: 1.5;
 	outline: none;
+	transition: background 60ms ease;
+}
+.plim-table td:hover {
+	background: rgba(55, 53, 47, 0.025);
+}
+.plim-table tr:first-child td:hover {
+	background: rgba(55, 53, 47, 0.05);
 }
 .plim-table td:focus {
-	background: rgba(35, 131, 226, 0.08);
+	background: rgba(35, 131, 226, 0.06);
+	box-shadow: inset 0 0 0 2px var(--accent);
 }
 .plim-table-controls {
 	display: flex;
 	gap: 6px;
 	margin-top: 6px;
+	opacity: 0;
+	transition: opacity 80ms ease;
+}
+.plim-block-table:hover .plim-table-controls,
+.plim-block-table:focus-within .plim-table-controls {
+	opacity: 1;
 }
 .plim-table-controls button {
 	all: unset;
@@ -467,4 +525,5 @@ a[data-mark-type="link"] {
 }
 .plim-table-controls button:hover {
 	background: rgba(55, 53, 47, 0.06);
+	color: var(--text);
 }

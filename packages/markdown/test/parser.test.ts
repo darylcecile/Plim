@@ -25,9 +25,23 @@ describe('contentFromMarkdown', () => {
 		expect(blockPlainText(doc.children[1]!)).toBe('two');
 	});
 
+	it('parses bullet list items with * and + markers', () => {
+		const doc = contentFromMarkdown('* star', '+ plus');
+		expect(doc.children[0]!.type).toBe('bulleted_list_item');
+		expect(doc.children[1]!.type).toBe('bulleted_list_item');
+	});
+
 	it('parses numbered list items', () => {
 		const doc = contentFromMarkdown('1. one', '2. two');
 		expect(doc.children[0]!.type).toBe('numbered_list_item');
+	});
+
+	it('parses multi-digit numbered list items', () => {
+		const doc = contentFromMarkdown('10. ten', '125. lots');
+		expect(doc.children[0]!.type).toBe('numbered_list_item');
+		expect(blockPlainText(doc.children[0]!)).toBe('ten');
+		expect(doc.children[1]!.type).toBe('numbered_list_item');
+		expect(blockPlainText(doc.children[1]!)).toBe('lots');
 	});
 
 	it('parses to-do items', () => {
@@ -35,6 +49,12 @@ describe('contentFromMarkdown', () => {
 		expect(doc.children[0]!.type).toBe('to_do');
 		expect(doc.children[0]!.attrs?.checked).toBe(false);
 		expect(doc.children[1]!.attrs?.checked).toBe(true);
+	});
+
+	it('parses to-do items with capital X', () => {
+		const doc = contentFromMarkdown('- [X] caps');
+		expect(doc.children[0]!.type).toBe('to_do');
+		expect(doc.children[0]!.attrs?.checked).toBe(true);
 	});
 
 	it('parses a quote', () => {
@@ -47,10 +67,32 @@ describe('contentFromMarkdown', () => {
 		expect(doc.children[0]!.type).toBe('divider');
 	});
 
+	it('parses a divider with surrounding whitespace', () => {
+		const doc = contentFromMarkdown('   ---   ');
+		expect(doc.children[0]!.type).toBe('divider');
+	});
+
 	it('parses a code fence', () => {
 		const doc = contentFromMarkdown('```', 'function() {}', '```');
 		expect(doc.children[0]!.type).toBe('code');
 		expect(blockPlainText(doc.children[0]!)).toBe('function() {}');
+	});
+
+	it('parses code fence with language attribute', () => {
+		const doc = contentFromMarkdown('```typescript', 'const x = 1;', '```');
+		expect(doc.children[0]!.type).toBe('code');
+		expect(doc.children[0]!.attrs?.language).toBe('typescript');
+	});
+
+	it('preserves blank lines and indentation inside a code fence', () => {
+		const doc = contentFromMarkdown('```js', 'a', '', '  b', '```');
+		expect(blockPlainText(doc.children[0]!)).toBe('a\n\n  b');
+	});
+
+	it('treats unclosed code fence as code block to end of input', () => {
+		const doc = contentFromMarkdown('```', 'still code');
+		expect(doc.children[0]!.type).toBe('code');
+		expect(blockPlainText(doc.children[0]!)).toBe('still code');
 	});
 
 	it('parses inline bold and italic', () => {
@@ -61,6 +103,13 @@ describe('contentFromMarkdown', () => {
 		expect(spans.find((s) => s.marks?.some((m) => m.type === 'code'))?.text).toBe('code');
 	});
 
+	it('parses inline strikethrough', () => {
+		const doc = contentFromMarkdown('hello ~strike~ world');
+		const spans = doc.children[0]!.text!;
+		const strike = spans.find((s) => s.marks?.some((m) => m.type === 'strikethrough'));
+		expect(strike?.text).toBe('strike');
+	});
+
 	it('parses inline links', () => {
 		const doc = contentFromMarkdown('see [home](https://example.com) here');
 		const spans = doc.children[0]!.text!;
@@ -68,4 +117,55 @@ describe('contentFromMarkdown', () => {
 		expect(link?.text).toBe('home');
 		expect(link?.marks?.[0]?.attrs?.href).toBe('https://example.com');
 	});
+
+	it('parses inline marks inside headings', () => {
+		const doc = contentFromMarkdown('## **Bold** heading');
+		expect(doc.children[0]!.type).toBe('heading');
+		const spans = doc.children[0]!.text!;
+		expect(spans.find((s) => s.marks?.some((m) => m.type === 'bold'))?.text).toBe('Bold');
+	});
+
+	it('preserves text when inline asterisks are unmatched', () => {
+		const doc = contentFromMarkdown('1 * 2 = 2');
+		expect(blockPlainText(doc.children[0]!)).toBe('1 * 2 = 2');
+	});
+
+	it('treats four-hash lines as paragraphs (only h1-h3 are headings)', () => {
+		const doc = contentFromMarkdown('#### still text');
+		expect(doc.children[0]!.type).toBe('paragraph');
+		expect(blockPlainText(doc.children[0]!)).toBe('#### still text');
+	});
+
+	it('produces an empty paragraph for blank input', () => {
+		const doc = contentFromMarkdown();
+		expect(doc.children).toHaveLength(1);
+		expect(doc.children[0]!.type).toBe('paragraph');
+		expect(blockPlainText(doc.children[0]!)).toBe('');
+	});
+
+	it('produces empty paragraphs for blank lines between content', () => {
+		const doc = contentFromMarkdown('one', '', 'two');
+		expect(doc.children).toHaveLength(3);
+		expect(doc.children[1]!.type).toBe('paragraph');
+		expect(blockPlainText(doc.children[1]!)).toBe('');
+	});
+
+	it('parses bare [ ] / [x] task syntax (no leading bullet)', () => {
+		const doc = contentFromMarkdown('[ ] todo', '[x] done');
+		expect(doc.children[0]!.type).toBe('to_do');
+		expect(doc.children[0]!.attrs?.checked).toBe(false);
+		expect(doc.children[1]!.type).toBe('to_do');
+		expect(doc.children[1]!.attrs?.checked).toBe(true);
+	});
+
+	it('combines mixed marks across one line', () => {
+		const doc = contentFromMarkdown('**bold** then *ital* and `code` and ~strike~');
+		const spans = doc.children[0]!.text!;
+		const types = spans.map((s) => s.marks?.[0]?.type);
+		expect(types).toContain('bold');
+		expect(types).toContain('italic');
+		expect(types).toContain('code');
+		expect(types).toContain('strikethrough');
+	});
 });
+

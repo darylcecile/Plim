@@ -25,7 +25,7 @@ import {
 	boldMark,
 } from '@plim/core';
 import { contentFromMarkdown } from '@plim/markdown';
-import { PlimEditor, useAsyncEventListener, useEditorHandle } from '@plim/react';
+import { ActionPanel, PlimEditor, useAsyncEventListener, useEditorHandle } from '@plim/react';
 import { SlashMenu } from './SlashMenu.js';
 
 const plim = new PlimDriver({
@@ -154,12 +154,24 @@ const initialContent = contentFromMarkdown(
 
 export function App() {
 	const handle = useEditorHandle();
-	const [slash, setSlash] = React.useState<{ x: number; y: number; resolve: (cmd: string | null) => void } | null>(null);
+	const [slash, setSlash] = React.useState<{
+		anchor: Element | null;
+		caretRect: DOMRect | null;
+		resolve: (cmd: string | null) => void;
+	} | null>(null);
 
 	const onSlash = useAsyncEventListener('showSlashCommandMenu', async () => {
 		return await new Promise<string | null>((resolve) => {
 			const rect = currentCaretRect();
-			setSlash({ x: rect?.left ?? 200, y: (rect?.bottom ?? 200) + 4, resolve });
+			// Anchor to the nearest block element so the panel re-aligns on scroll.
+			let anchor: Element | null = null;
+			const sel = window.getSelection();
+			const node = sel?.anchorNode ?? null;
+			if (node) {
+				const el = node instanceof Element ? node : node.parentElement;
+				anchor = el?.closest('[data-block-id]') ?? null;
+			}
+			setSlash({ anchor, caretRect: rect, resolve });
 		});
 	});
 
@@ -259,7 +271,20 @@ export function App() {
 				autoFocus
 				asyncEventListeners={[onSlash, onMention]}
 			/>
-			{slash ? <SlashMenu x={slash.x} y={slash.y} onSelect={handleSlashChoice} /> : null}
+			{slash ? (
+				<ActionPanel
+					open
+					anchor={() => (slash.anchor ?? slash.caretRect) as Element | DOMRect | null}
+					placement="bottom-start"
+					onClose={() => {
+						slash.resolve(null);
+						setSlash(null);
+					}}
+					dismissOnOutsideClick
+				>
+					<SlashMenu onSelect={handleSlashChoice} />
+				</ActionPanel>
+			) : null}
 		</div>
 	);
 }

@@ -129,10 +129,10 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` done.
 - [x] Image / embed / raw HTML / table blocks — wired with placeholders, prompts, and slash-menu entries.
 - [x] Drag handle is wired only as a visual cue (`draggable` attr); actual drag-to-reorder not implemented.
 - [ ] StrictMode dev double-mount guarded via `destroyed` flag in `packages/editor/src/index.ts`; production unaffected.
-- [ ] Text blocks should have a placeholder when empty when focused; currently they just look empty.
-- [ ] When hovering over a block, the affordances (plus button, drag handle) should be visible and interactable
+- [x] Text blocks should have a placeholder when empty when focused; currently they just look empty.
+- [x] When hovering over a block, the affordances (plus button, drag handle) should be visible and interactable
 - [ ] Ensure IME composition is fully supported and tested (currently untested)
-- [ ] Markdown parser should handle edge cases and be tested with a comprehensive suite of markdown inputs (currently only basic rules wired and tested)
-- [ ] Where possible, we should provide `<ActionPanel />` and `<HoverMenu />` components in `@plim/react` to simplify common UI patterns for actions; currently these are expected to be implemented by the user in response to async events. In the case of action panels, these should position themselves intelligently based on the block or selection that triggered them, while remaining within the bounds of the editor container.
-- [ ] Scrolling should re-align slash menu panel and hover menu if open; currently they are positioned at trigger time and do not adjust on scroll, which can lead to misalignment.
+- [x] Markdown parser should handle edge cases and be tested with a comprehensive suite of markdown inputs (currently only basic rules wired and tested)
+- [x] Where possible, we should provide `<ActionPanel />` and `<HoverMenu />` components in `@plim/react` to simplify common UI patterns for actions; currently these are expected to be implemented by the user in response to async events. In the case of action panels, these should position themselves intelligently based on the block or selection that triggered them, while remaining within the bounds of the editor container.
+- [x] Scrolling should re-align slash menu panel and hover menu if open; currently they are positioned at trigger time and do not adjust on scroll, which can lead to misalignment.
 

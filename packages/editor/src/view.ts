@@ -63,6 +63,17 @@ export function mountView(opts: ViewOptions): View {
 		const win = rootEl.ownerDocument.defaultView ?? window;
 		const selection = win.getSelection();
 		if (!selection) return;
+		// Mark the block containing the head selection so CSS can show a
+		// placeholder only for the focused empty block (Notion-style).
+		const allBlocks = rootEl.querySelectorAll<HTMLElement>('[data-block-id]');
+		const headBlockEl = blockElementAtPath(rootEl, sel.head.path);
+		for (const b of allBlocks) {
+			if (b === headBlockEl) {
+				if (b.getAttribute('data-caret-active') !== 'true') b.setAttribute('data-caret-active', 'true');
+			} else if (b.hasAttribute('data-caret-active')) {
+				b.removeAttribute('data-caret-active');
+			}
+		}
 		const anchor = locateOffsetInDOM(rootEl, sel.anchor.path, sel.anchor.offset);
 		const head = locateOffsetInDOM(rootEl, sel.head.path, sel.head.offset);
 		if (!anchor || !head) return;
