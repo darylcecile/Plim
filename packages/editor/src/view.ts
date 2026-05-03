@@ -9,6 +9,7 @@ import {
 	type Transaction,
 	blockTextLength,
 	flattenBlocks,
+	isMacLike,
 	newId,
 } from '@plim/core';
 
@@ -163,6 +164,26 @@ export function mountView(opts: ViewOptions): View {
 			handleDeleteForward(opts);
 			return;
 		}
+		if (type === 'deleteWordBackward') {
+			ev.preventDefault();
+			handleDeleteWordBackward(opts);
+			return;
+		}
+		if (type === 'deleteWordForward') {
+			ev.preventDefault();
+			handleDeleteWordForward(opts);
+			return;
+		}
+		if (type === 'deleteSoftLineBackward' || type === 'deleteHardLineBackward') {
+			ev.preventDefault();
+			handleDeleteLineBackward(opts);
+			return;
+		}
+		if (type === 'deleteSoftLineForward' || type === 'deleteHardLineForward') {
+			ev.preventDefault();
+			handleDeleteLineForward(opts);
+			return;
+		}
 		if (type === 'insertFromPaste') {
 			// allow our paste handler to run
 			return;
@@ -173,6 +194,35 @@ export function mountView(opts: ViewOptions): View {
 	root.addEventListener('beforeinput', onBeforeInput);
 
 	const onKeyDown = (ev: KeyboardEvent) => {
+		// Some modifier+Backspace/Delete combos don't reliably fire `beforeinput`
+		// in Chrome (e.g. Option+Shift+Backspace on macOS isn't a standard text-
+		// editing binding), so intercept them at the keydown layer. We mirror
+		// macOS conventions where possible:
+		//   Backspace                                 → delete one char back   (handled by beforeinput)
+		//   Option+Backspace                          → delete word back        (beforeinput)
+		//   Cmd+Backspace                             → delete to line/block start
+		//   Option+Shift+Backspace                    → delete to line/block start
+		//   Forward variants mirror the same shape.
+		if (!opts.readonly && (ev.key === 'Backspace' || ev.key === 'Delete') && !ev.isComposing) {
+			const isLineBack =
+				ev.key === 'Backspace' &&
+				((isMacLike() && ev.metaKey && !ev.ctrlKey) ||
+					(ev.altKey && ev.shiftKey && !ev.metaKey && !ev.ctrlKey));
+			const isLineFwd =
+				ev.key === 'Delete' &&
+				((isMacLike() && ev.metaKey && !ev.ctrlKey) ||
+					(ev.altKey && ev.shiftKey && !ev.metaKey && !ev.ctrlKey));
+			if (isLineBack) {
+				ev.preventDefault();
+				handleDeleteLineBackward(opts);
+				return;
+			}
+			if (isLineFwd) {
+				ev.preventDefault();
+				handleDeleteLineForward(opts);
+				return;
+			}
+		}
 		opts.onKeyboardEvent(ev);
 	};
 	root.addEventListener('keydown', onKeyDown);
@@ -219,22 +269,11 @@ export function mountView(opts: ViewOptions): View {
 		}
 		dropTarget = null;
 	}
-	const onDragOver = (ev: DragEvent) => {
-		if (opts.readonly) return;
-		// Accept the drop if either we know about an active block drag from this
-		// view, or the dataTransfer advertises our custom type (cross-document).
-		const types = ev.dataTransfer?.types;
-		const hasOurType = !!types && Array.from(types).includes('application/x-plim-block');
-		if (!activeDragSourceId && !hasOurType) return;
-		const targetEl = (ev.target as HTMLElement | null)?.closest?.(`[${DATA_BLOCK_ID}]`) as HTMLElement | null;
-		if (!targetEl || !root.contains(targetEl)) return;
-		// Don't drop into descendant of the dragged block
+	function showDropIndicatorAt(targetEl: HTMLElement, clientY: number) {
 		const draggingEl = root.querySelector('.plim-block--dragging') as HTMLElement | null;
 		if (draggingEl && (draggingEl === targetEl || draggingEl.contains(targetEl))) return;
-		ev.preventDefault();
-		if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
 		const rect = targetEl.getBoundingClientRect();
-		const before = ev.clientY < rect.top + rect.height / 2;
+		const before = clientY < rect.top + rect.height / 2;
 		if (!dropIndicator) {
 			dropIndicator = document.createElement('div');
 			dropIndicator.className = 'plim-drop-indicator';
@@ -247,6 +286,44 @@ export function mountView(opts: ViewOptions): View {
 		dropIndicator.style.width = `${rect.width}px`;
 		dropIndicator.style.top = `${(before ? rect.top : rect.bottom) - indRect.top - 1}px`;
 		dropTarget = { el: targetEl, before };
+	}
+
+	function commitMove(sourceId: string, targetEl: HTMLElement, before: boolean): boolean {
+		const targetId = targetEl.getAttribute(DATA_BLOCK_ID);
+		if (!targetId || sourceId === targetId) return false;
+		const state = opts.getState();
+		const fromPath = pathOfBlockId(state.doc.children, sourceId, []);
+		const targetPath = pathOfBlockId(state.doc.children, targetId, []);
+		if (!fromPath || !targetPath) return false;
+		// Disallow dropping into self/descendant
+		if (targetPath.length >= fromPath.length && fromPath.every((seg, i) => targetPath[i] === seg)) return false;
+		const sameParent = fromPath.length === targetPath.length && fromPath.slice(0, -1).every((seg, i) => targetPath[i] === seg);
+		const targetLast = targetPath[targetPath.length - 1]!;
+		let insertIdx = before ? targetLast : targetLast + 1;
+		if (sameParent) {
+			const fromLast = fromPath[fromPath.length - 1]!;
+			if (fromLast < targetLast) insertIdx -= 1;
+			if (insertIdx === fromLast) return false; // no-op
+		}
+		const toPath = [...targetPath.slice(0, -1), insertIdx];
+		const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
+		tx.moveBlock(fromPath, toPath);
+		tx.commit();
+		return true;
+	}
+
+	const onDragOver = (ev: DragEvent) => {
+		if (opts.readonly) return;
+		// Accept the drop if either we know about an active block drag from this
+		// view, or the dataTransfer advertises our custom type (cross-document).
+		const types = ev.dataTransfer?.types;
+		const hasOurType = !!types && Array.from(types).includes('application/x-plim-block');
+		if (!activeDragSourceId && !hasOurType) return;
+		const targetEl = (ev.target as HTMLElement | null)?.closest?.(`[${DATA_BLOCK_ID}]`) as HTMLElement | null;
+		if (!targetEl || !root.contains(targetEl)) return;
+		ev.preventDefault();
+		if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+		showDropIndicatorAt(targetEl, ev.clientY);
 	};
 	const onDrop = (ev: DragEvent) => {
 		if (opts.readonly) return clearDropIndicator();
@@ -256,35 +333,10 @@ export function mountView(opts: ViewOptions): View {
 			return clearDropIndicator();
 		}
 		ev.preventDefault();
-		const targetId = dropTarget.el.getAttribute(DATA_BLOCK_ID);
+		const target = dropTarget.el;
 		const before = dropTarget.before;
 		clearDropIndicator();
-		if (!targetId || sourceId === targetId) return;
-		const state = opts.getState();
-		const fromPath = pathOfBlockId(state.doc.children, sourceId, []);
-		const targetPath = pathOfBlockId(state.doc.children, targetId, []);
-		if (!fromPath || !targetPath) return;
-		// Disallow dropping into self/descendant
-		if (
-			targetPath.length >= fromPath.length &&
-			fromPath.every((seg, i) => targetPath[i] === seg)
-		) return;
-		// Compute "to" path with after-removal semantics.
-		// Same parent? indices shift if from precedes target.
-		const sameParent =
-			fromPath.length === targetPath.length &&
-			fromPath.slice(0, -1).every((seg, i) => targetPath[i] === seg);
-		const targetLast = targetPath[targetPath.length - 1]!;
-		let insertIdx = before ? targetLast : targetLast + 1;
-		if (sameParent) {
-			const fromLast = fromPath[fromPath.length - 1]!;
-			if (fromLast < targetLast) insertIdx -= 1;
-			if (insertIdx === fromLast) return; // no-op
-		}
-		const toPath = [...targetPath.slice(0, -1), insertIdx];
-		const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
-		tx.moveBlock(fromPath, toPath);
-		tx.commit();
+		commitMove(sourceId, target, before);
 		activeDragSourceId = null;
 	};
 	const onDragLeave = (ev: DragEvent) => {
@@ -306,6 +358,32 @@ export function mountView(opts: ViewOptions): View {
 	};
 	root.addEventListener('plim:dragstart', onPlimDragStart);
 	root.addEventListener('plim:dragend', onPlimDragEnd);
+
+	// Pointer-event-driven custom drag for the handle button. HTML5 drag inside
+	// a `contenteditable=true` root is unreliable in Chrome — `dragstart` often
+	// doesn't fire even from a `draggable=true` button — so the handle uses
+	// pointer capture + elementFromPoint to drive `showDropIndicatorAt` and
+	// `commitMove` directly. Native dragover/drop above is kept for cross-
+	// document drops (text or files dragged in from elsewhere).
+	const onPlimCustomDragMove = (ev: Event) => {
+		if (opts.readonly || !activeDragSourceId) return;
+		const detail = (ev as CustomEvent<{ clientX: number; clientY: number }>).detail;
+		if (!detail) return;
+		const under = root.ownerDocument.elementFromPoint(detail.clientX, detail.clientY) as HTMLElement | null;
+		const targetEl = under?.closest?.(`[${DATA_BLOCK_ID}]`) as HTMLElement | null;
+		if (!targetEl || !root.contains(targetEl)) return;
+		showDropIndicatorAt(targetEl, detail.clientY);
+	};
+	const onPlimCustomDragCommit = (ev: Event) => {
+		const cancelled = (ev as CustomEvent<{ cancelled?: boolean }>).detail?.cancelled;
+		if (!cancelled && activeDragSourceId && dropTarget) {
+			commitMove(activeDragSourceId, dropTarget.el, dropTarget.before);
+		}
+		activeDragSourceId = null;
+		clearDropIndicator();
+	};
+	root.addEventListener('plim:custom-drag-move', onPlimCustomDragMove);
+	root.addEventListener('plim:custom-drag-end', onPlimCustomDragCommit);
 	root.style.position = 'relative';
 
 	return {
@@ -331,6 +409,8 @@ export function mountView(opts: ViewOptions): View {
 			root.removeEventListener('dragend', clearDropIndicator);
 			root.removeEventListener('plim:dragstart', onPlimDragStart);
 			root.removeEventListener('plim:dragend', onPlimDragEnd);
+			root.removeEventListener('plim:custom-drag-move', onPlimCustomDragMove);
+			root.removeEventListener('plim:custom-drag-end', onPlimCustomDragCommit);
 			clearDropIndicator();
 			root.remove();
 		},
@@ -461,25 +541,84 @@ function ensureBlockHandles(el: HTMLElement, opts: ViewOptions) {
 		drag.type = 'button';
 		drag.className = 'plim-block-drag';
 		drag.setAttribute('aria-label', 'Drag to move');
-		drag.setAttribute('draggable', 'true');
+		drag.setAttribute('contenteditable', 'false');
 		drag.textContent = '⋮⋮';
-		drag.addEventListener('mousedown', (e) => e.stopPropagation());
-		drag.addEventListener('dragstart', (e) => {
+		// Don't transfer focus or interrupt selection on pointerdown — the editor
+		// root is contenteditable, so a normal mousedown would otherwise move the
+		// caret into a non-editable spot.
+		drag.addEventListener('mousedown', (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+		});
+
+		// Custom pointer-driven drag. HTML5 drag-and-drop is unreliable from a
+		// `draggable=true` button inside a contenteditable root (Chrome often
+		// never fires `dragstart`). Pointer capture is rock-solid across
+		// browsers and gives us full control over the drag UI.
+		let session:
+			| { id: string; pointerId: number; startX: number; startY: number; started: boolean }
+			| null = null;
+		const startThresholdSq = 16; // ~4px movement before drag begins
+
+		const onPointerDown = (e: PointerEvent) => {
+			if (e.button !== 0) return;
 			const id = el.getAttribute(DATA_BLOCK_ID);
-			if (!id || !e.dataTransfer) return;
-			e.dataTransfer.effectAllowed = 'move';
-			e.dataTransfer.setData('application/x-plim-block', id);
-			e.dataTransfer.setData('text/plain', '');
-			el.classList.add('plim-block--dragging');
-			// Notify the view's drop pipeline (see onDragOver/onDrop). We dispatch
-			// a custom event upward so the view (which owns activeDragSourceId)
-			// can update without us holding a reference to it from this scope.
-			el.dispatchEvent(new CustomEvent('plim:dragstart', { bubbles: true, detail: { id } }));
-		});
-		drag.addEventListener('dragend', () => {
-			el.classList.remove('plim-block--dragging');
-			el.dispatchEvent(new CustomEvent('plim:dragend', { bubbles: true }));
-		});
+			if (!id) return;
+			e.preventDefault();
+			e.stopPropagation();
+			session = { id, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, started: false };
+			try {
+				drag.setPointerCapture(e.pointerId);
+			} catch {
+				/* unsupported in some test environments */
+			}
+		};
+		const onPointerMove = (e: PointerEvent) => {
+			if (!session || e.pointerId !== session.pointerId) return;
+			if (!session.started) {
+				const dx = e.clientX - session.startX;
+				const dy = e.clientY - session.startY;
+				if (dx * dx + dy * dy < startThresholdSq) return;
+				session.started = true;
+				el.classList.add('plim-block--dragging');
+				el.dispatchEvent(new CustomEvent('plim:dragstart', { bubbles: true, detail: { id: session.id } }));
+			}
+			el.dispatchEvent(
+				new CustomEvent('plim:custom-drag-move', {
+					bubbles: true,
+					detail: { clientX: e.clientX, clientY: e.clientY },
+				})
+			);
+		};
+		const finishSession = (cancelled: boolean) => {
+			if (!session) return;
+			const wasActive = session.started;
+			try {
+				drag.releasePointerCapture(session.pointerId);
+			} catch {
+				/* noop */
+			}
+			session = null;
+			if (wasActive) {
+				el.classList.remove('plim-block--dragging');
+				el.dispatchEvent(new CustomEvent('plim:custom-drag-end', { bubbles: true, detail: { cancelled } }));
+			}
+		};
+		const onPointerUp = (e: PointerEvent) => {
+			if (!session || e.pointerId !== session.pointerId) return;
+			finishSession(false);
+		};
+		const onPointerCancel = () => finishSession(true);
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === 'Escape' && session) finishSession(true);
+		};
+
+		drag.addEventListener('pointerdown', onPointerDown);
+		drag.addEventListener('pointermove', onPointerMove);
+		drag.addEventListener('pointerup', onPointerUp);
+		drag.addEventListener('pointercancel', onPointerCancel);
+		drag.addEventListener('lostpointercapture', onPointerCancel);
+		drag.addEventListener('keydown', onKey);
 		group.appendChild(add);
 		group.appendChild(drag);
 		// Insert as the first child so it doesn't disturb selection mapping.
@@ -1254,6 +1393,115 @@ function handleDeleteForward(opts: ViewOptions) {
 		return;
 	}
 	tx.replaceRange(sel.head.path, sel.head.offset, sel.head.offset + 1, []);
+	tx.commit();
+}
+
+const WORD_CHAR = /[\p{L}\p{N}_]/u;
+
+/** Find offset where a "word" ends when moving backward from `offset`. */
+function wordBoundaryBackward(text: string, offset: number): number {
+	let i = offset;
+	// skip trailing whitespace
+	while (i > 0 && /\s/.test(text[i - 1]!)) i--;
+	// if we landed on a word char, eat the run; otherwise eat one non-word char
+	if (i > 0 && WORD_CHAR.test(text[i - 1]!)) {
+		while (i > 0 && WORD_CHAR.test(text[i - 1]!)) i--;
+	} else if (i > 0) {
+		i--;
+	}
+	return i;
+}
+
+/** Find offset where a "word" ends when moving forward from `offset`. */
+function wordBoundaryForward(text: string, offset: number): number {
+	let i = offset;
+	while (i < text.length && /\s/.test(text[i]!)) i++;
+	if (i < text.length && WORD_CHAR.test(text[i]!)) {
+		while (i < text.length && WORD_CHAR.test(text[i]!)) i++;
+	} else if (i < text.length) {
+		i++;
+	}
+	return i;
+}
+
+function deleteSelectionIfAny(opts: ViewOptions): boolean {
+	const state = opts.getState();
+	const sel = state.selection;
+	if (pathsEqual(sel.anchor.path, sel.head.path) && sel.anchor.offset === sel.head.offset) return false;
+	const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
+	const fromOff = Math.min(sel.anchor.offset, sel.head.offset);
+	const toOff = Math.max(sel.anchor.offset, sel.head.offset);
+	tx.replaceRange(sel.head.path, fromOff, toOff, []);
+	tx.commit();
+	return true;
+}
+
+function handleDeleteWordBackward(opts: ViewOptions) {
+	if (deleteSelectionIfAny(opts)) return;
+	const state = opts.getState();
+	const sel = state.selection;
+	const block = blockAt(state.doc.children, sel.head.path);
+	if (!block || block.text === undefined) return;
+	if (sel.head.offset === 0) {
+		// At block start: defer to normal join/convert behavior.
+		handleDeleteBackward(opts);
+		return;
+	}
+	const plain = (block.text ?? []).map((s) => s.text).join('');
+	const target = wordBoundaryBackward(plain, sel.head.offset);
+	if (target === sel.head.offset) return;
+	const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
+	tx.replaceRange(sel.head.path, target, sel.head.offset, []);
+	tx.commit();
+}
+
+function handleDeleteWordForward(opts: ViewOptions) {
+	if (deleteSelectionIfAny(opts)) return;
+	const state = opts.getState();
+	const sel = state.selection;
+	const block = blockAt(state.doc.children, sel.head.path);
+	if (!block || block.text === undefined) return;
+	const len = blockTextLength(block);
+	if (sel.head.offset >= len) {
+		handleDeleteForward(opts);
+		return;
+	}
+	const plain = (block.text ?? []).map((s) => s.text).join('');
+	const target = wordBoundaryForward(plain, sel.head.offset);
+	if (target === sel.head.offset) return;
+	const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
+	tx.replaceRange(sel.head.path, sel.head.offset, target, []);
+	tx.commit();
+}
+
+function handleDeleteLineBackward(opts: ViewOptions) {
+	if (deleteSelectionIfAny(opts)) return;
+	const state = opts.getState();
+	const sel = state.selection;
+	const block = blockAt(state.doc.children, sel.head.path);
+	if (!block || block.text === undefined) return;
+	if (sel.head.offset === 0) {
+		handleDeleteBackward(opts);
+		return;
+	}
+	const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
+	tx.replaceRange(sel.head.path, 0, sel.head.offset, []);
+	tx.commit();
+}
+
+function handleDeleteLineForward(opts: ViewOptions) {
+	if (deleteSelectionIfAny(opts)) return;
+	const state = opts.getState();
+	const sel = state.selection;
+	const block = blockAt(state.doc.children, sel.head.path);
+	if (!block || block.text === undefined) return;
+	const len = blockTextLength(block);
+	if (sel.head.offset >= len) {
+		handleDeleteForward(opts);
+		return;
+	}
+	const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
+	tx.replaceRange(sel.head.path, sel.head.offset, len, []);
 	tx.commit();
 }
 

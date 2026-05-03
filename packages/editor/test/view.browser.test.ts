@@ -135,6 +135,61 @@ describe('editor view (real browser)', () => {
 		expect(env.editor.getState().doc.children[0]!.text![0]!.text).toBe('A');
 	});
 
+	it('deletes to start of block on Option+Shift+Backspace', () => {
+		env = setup({ initial: ['hello world foo bar'] });
+		const root = getRoot(env.container);
+		const tx = env.editor.createTransaction();
+		// caret in the middle (after "hello world ")
+		tx.setSelection({ anchor: { path: [0], offset: 12 }, head: { path: [0], offset: 12 } });
+		tx.commit();
+		const ev = new KeyboardEvent('keydown', {
+			bubbles: true,
+			cancelable: true,
+			key: 'Backspace',
+			altKey: true,
+			shiftKey: true,
+		});
+		root.dispatchEvent(ev);
+		expect(ev.defaultPrevented).toBe(true);
+		const plain = (env.editor.getState().doc.children[0]!.text ?? []).map((s) => s.text).join('');
+		expect(plain).toBe('foo bar');
+	});
+
+	it('deletes the previous word on deleteWordBackward beforeinput', () => {
+		env = setup({ initial: ['hello world foo'] });
+		const root = getRoot(env.container);
+		const tx = env.editor.createTransaction();
+		const len = 'hello world foo'.length;
+		tx.setSelection({ anchor: { path: [0], offset: len }, head: { path: [0], offset: len } });
+		tx.commit();
+		root.dispatchEvent(
+			new InputEvent('beforeinput', { inputType: 'deleteWordBackward', bubbles: true, cancelable: true })
+		);
+		const plain1 = (env.editor.getState().doc.children[0]!.text ?? []).map((s) => s.text).join('');
+		expect(plain1).toBe('hello world ');
+		root.dispatchEvent(
+			new InputEvent('beforeinput', { inputType: 'deleteWordBackward', bubbles: true, cancelable: true })
+		);
+		const plain2 = (env.editor.getState().doc.children[0]!.text ?? []).map((s) => s.text).join('');
+		expect(plain2).toBe('hello ');
+	});
+
+	it('toggleMark via Cmd+B with a backward selection applies the mark', () => {
+		env = setup({ initial: ['hello world'] });
+		// Selection: anchor=11 (end), head=6 (before "world") — i.e. backward selection of "world"
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 11 }, head: { path: [0], offset: 6 } });
+		tx.commit();
+		// Apply via toggleMark using anchor/head order (mirrors example app)
+		const sel = env.editor.getState().selection;
+		const tx2 = env.editor.createTransaction();
+		tx2.toggleMark('bold', { from: sel.anchor, to: sel.head });
+		tx2.commit();
+		const text = env.editor.getState().doc.children[0]!.text!;
+		const bolded = text.find((s) => s.marks?.some((m) => m.type === 'bold'));
+		expect(bolded?.text).toBe('world');
+	});
+
 	it('bypasses beforeinput while composing and commits on compositionend', () => {
 		env = setup();
 		const root = getRoot(env.container);
@@ -195,46 +250,83 @@ describe('editor view (real browser)', () => {
 		expect(getContent(getBlocks(env.container)[0]!).textContent).toBe('hello');
 	});
 
-	it('reorders blocks via drag-and-drop on the gutter handle', () => {
+	it('reorders blocks via pointer-driven drag on the gutter handle', () => {
 		env = setup({ initial: ['first', 'second', 'third'] });
 		const blocks = getBlocks(env.container);
 		expect(blocks.map((b) => getContent(b).textContent)).toEqual(['first', 'second', 'third']);
 		const sourceHandle = blocks[0]!.querySelector('.plim-block-drag') as HTMLElement;
 		const targetBlock = blocks[2]!;
-
-		// dragstart on the handle: writes id into the DataTransfer AND dispatches
-		// the internal plim:dragstart custom event so the view's flag-based path
-		// activates (covers Chrome same-document drags where types is empty).
-		const dt = new DataTransfer();
-		sourceHandle.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt }));
-
-		// dragover on the target with a *fresh* (empty) DataTransfer. This mimics
-		// the case where the browser doesn't expose our custom type to dragover.
+		const sRect = sourceHandle.getBoundingClientRect();
 		const tRect = targetBlock.getBoundingClientRect();
-		const emptyDT = new DataTransfer();
-		const dover = new DragEvent('dragover', {
-			bubbles: true,
-			cancelable: true,
-			dataTransfer: emptyDT,
-			clientX: tRect.left + 10,
-			clientY: tRect.bottom - 4,
-		});
-		targetBlock.dispatchEvent(dover);
-		// `preventDefault` having been called by the editor enables the drop.
-		expect(dover.defaultPrevented).toBe(true);
 
-		const ddrop = new DragEvent('drop', {
-			bubbles: true,
-			cancelable: true,
-			dataTransfer: emptyDT,
-			clientX: tRect.left + 10,
-			clientY: tRect.bottom - 4,
-		});
-		targetBlock.dispatchEvent(ddrop);
-		sourceHandle.dispatchEvent(new DragEvent('dragend', { bubbles: true, cancelable: true, dataTransfer: dt }));
+		// pointerdown on the source handle, move past the threshold, hover over
+		// the lower half of the target block, then pointerup.
+		sourceHandle.dispatchEvent(
+			new PointerEvent('pointerdown', {
+				bubbles: true,
+				cancelable: true,
+				pointerId: 1,
+				button: 0,
+				clientX: sRect.left + 5,
+				clientY: sRect.top + 5,
+			})
+		);
+		sourceHandle.dispatchEvent(
+			new PointerEvent('pointermove', {
+				bubbles: true,
+				pointerId: 1,
+				clientX: sRect.left + 20,
+				clientY: sRect.top + 20,
+			})
+		);
+		sourceHandle.dispatchEvent(
+			new PointerEvent('pointermove', {
+				bubbles: true,
+				pointerId: 1,
+				clientX: tRect.left + 10,
+				clientY: tRect.bottom - 4,
+			})
+		);
+		sourceHandle.dispatchEvent(
+			new PointerEvent('pointerup', {
+				bubbles: true,
+				pointerId: 1,
+				clientX: tRect.left + 10,
+				clientY: tRect.bottom - 4,
+			})
+		);
 
 		const after = getBlocks(env.container);
 		expect(after.map((b) => getContent(b).textContent)).toEqual(['second', 'third', 'first']);
+	});
+
+	it('cancels a pointer drag on Escape without reordering', () => {
+		env = setup({ initial: ['a', 'b', 'c'] });
+		const blocks = getBlocks(env.container);
+		const sourceHandle = blocks[0]!.querySelector('.plim-block-drag') as HTMLElement;
+		const sRect = sourceHandle.getBoundingClientRect();
+		const tRect = blocks[2]!.getBoundingClientRect();
+		sourceHandle.dispatchEvent(
+			new PointerEvent('pointerdown', {
+				bubbles: true,
+				cancelable: true,
+				pointerId: 2,
+				button: 0,
+				clientX: sRect.left + 5,
+				clientY: sRect.top + 5,
+			})
+		);
+		sourceHandle.dispatchEvent(
+			new PointerEvent('pointermove', {
+				bubbles: true,
+				pointerId: 2,
+				clientX: tRect.left + 5,
+				clientY: tRect.bottom - 4,
+			})
+		);
+		sourceHandle.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+		const after = getBlocks(env.container);
+		expect(after.map((b) => getContent(b).textContent)).toEqual(['a', 'b', 'c']);
 	});
 
 	it('renders a drag handle on every standalone block including code blocks', () => {

@@ -122,13 +122,19 @@ export class Transaction {
 	toggleMark(name: string, range: any, attrs?: Record<string, unknown>): this {
 		const mark: MarkInstance = attrs ? { type: name, attrs } : { type: name };
 		if ('path' in range) {
-			this.ops.push({ kind: 'toggleMark', path: range.path, from: range.from, to: range.to, mark });
+			// Normalize: callers may pass an unordered range (e.g. when the
+			// selection is backward and from/to come straight from anchor/head).
+			const from = Math.min(range.from, range.to);
+			const to = Math.max(range.from, range.to);
+			this.ops.push({ kind: 'toggleMark', path: range.path, from, to, mark });
 		} else {
 			// toggle across selection (single-block path supported, multi-block path expanded by applier)
 			const fromP = range.from.path as BlockPath;
 			const toP = range.to.path as BlockPath;
 			if (samePath(fromP, toP)) {
-				this.ops.push({ kind: 'toggleMark', path: fromP, from: range.from.offset, to: range.to.offset, mark });
+				const from = Math.min(range.from.offset, range.to.offset);
+				const to = Math.max(range.from.offset, range.to.offset);
+				this.ops.push({ kind: 'toggleMark', path: fromP, from, to, mark });
 			} else {
 				// cross-block: applier will expand to multiple blocks based on selection at apply time
 				// for now, store the head/anchor path-pair and let the applier resolve it

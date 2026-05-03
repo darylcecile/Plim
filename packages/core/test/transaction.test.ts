@@ -111,4 +111,27 @@ describe('Transaction', () => {
 		const next = applyTransaction(mid, t2);
 		expect(next.doc.children[0]!.text!.some((s) => s.marks?.length)).toBe(false);
 	});
+
+	it('toggleMark normalizes a backward range (path-form)', () => {
+		const state = makeState('hello world');
+		const tx = new Transaction(state);
+		// from > to (e.g. selection made backward by Option+Shift+Left)
+		tx.toggleMark('bold', { path: [0], from: 5, to: 0 });
+		const next = applyTransaction(state, tx);
+		const bolded = next.doc.children[0]!.text!.find((s) => s.marks?.some((m) => m.type === 'bold'));
+		expect(bolded?.text).toBe('hello');
+	});
+
+	it('toggleMark normalizes a backward range (selection-form)', () => {
+		const state = makeState('hello world');
+		const tx = new Transaction(state);
+		// anchor right of head — same shape as Selection.{anchor, head} when shift-selecting backward
+		tx.toggleMark('bold', {
+			from: { path: [0], offset: 5 },
+			to: { path: [0], offset: 0 },
+		});
+		const next = applyTransaction(state, tx);
+		const bolded = next.doc.children[0]!.text!.find((s) => s.marks?.some((m) => m.type === 'bold'));
+		expect(bolded?.text).toBe('hello');
+	});
 });
