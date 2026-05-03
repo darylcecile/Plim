@@ -89,6 +89,18 @@ html, body {
 	margin-top: 0;
 }
 
+/* Paragraphs and list items use a slightly tighter line-height so that
+ * Shift+Enter soft breaks (and natural word-wrap) sit closer together,
+ * matching Notion's compact paragraph rhythm. */
+.plim-block-paragraph,
+.plim-block-bulleted_list_item,
+.plim-block-numbered_list_item,
+.plim-block-to_do,
+.plim-block-toggle,
+.plim-block-quote {
+	line-height: 1.4;
+}
+
 /* Hover affordances: + and drag handle on the gutter.
  * Use `rem` so the gutter offset is identical regardless of block font-size
  * (otherwise headings push the handles much further left than paragraphs). */
