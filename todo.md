@@ -131,3 +131,5 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` done.
 - [ ] StrictMode dev double-mount guarded via `destroyed` flag in `packages/editor/src/index.ts`; production unaffected.
 - [ ] Text blocks should have a placeholder when empty when focused; currently they just look empty.
 - [ ] When hovering over a block, the affordances (plus button, drag handle) should be visible and interactable
+- [ ] Ensure IME composition is fully supported and tested (currently untested)
+- [ ] Markdown parser should handle edge cases and be tested with a comprehensive suite of markdown inputs (currently only basic rules wired and tested)
