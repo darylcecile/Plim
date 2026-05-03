@@ -206,6 +206,12 @@ export function mountView(opts: ViewOptions): View {
 
 	let dropIndicator: HTMLElement | null = null;
 	let dropTarget: { el: HTMLElement; before: boolean } | null = null;
+	// Track active drag from a block handle. Browsers vary in whether custom
+	// `dataTransfer.types` are visible during `dragover` on same-document drags
+	// (Chrome strips access in some cases for security). Tracking via a module-
+	// scoped flag is reliable and doesn't preclude the type check below for
+	// cross-tab/cross-document drops.
+	let activeDragSourceId: string | null = null;
 	function clearDropIndicator() {
 		if (dropIndicator) {
 			dropIndicator.remove();
@@ -215,8 +221,11 @@ export function mountView(opts: ViewOptions): View {
 	}
 	const onDragOver = (ev: DragEvent) => {
 		if (opts.readonly) return;
+		// Accept the drop if either we know about an active block drag from this
+		// view, or the dataTransfer advertises our custom type (cross-document).
 		const types = ev.dataTransfer?.types;
-		if (!types || !Array.from(types).includes('application/x-plim-block')) return;
+		const hasOurType = !!types && Array.from(types).includes('application/x-plim-block');
+		if (!activeDragSourceId && !hasOurType) return;
 		const targetEl = (ev.target as HTMLElement | null)?.closest?.(`[${DATA_BLOCK_ID}]`) as HTMLElement | null;
 		if (!targetEl || !root.contains(targetEl)) return;
 		// Don't drop into descendant of the dragged block
@@ -241,8 +250,11 @@ export function mountView(opts: ViewOptions): View {
 	};
 	const onDrop = (ev: DragEvent) => {
 		if (opts.readonly) return clearDropIndicator();
-		const sourceId = ev.dataTransfer?.getData('application/x-plim-block');
-		if (!sourceId || !dropTarget) return clearDropIndicator();
+		const sourceId = activeDragSourceId ?? ev.dataTransfer?.getData('application/x-plim-block');
+		if (!sourceId || !dropTarget) {
+			activeDragSourceId = null;
+			return clearDropIndicator();
+		}
 		ev.preventDefault();
 		const targetId = dropTarget.el.getAttribute(DATA_BLOCK_ID);
 		const before = dropTarget.before;
@@ -273,6 +285,7 @@ export function mountView(opts: ViewOptions): View {
 		const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
 		tx.moveBlock(fromPath, toPath);
 		tx.commit();
+		activeDragSourceId = null;
 	};
 	const onDragLeave = (ev: DragEvent) => {
 		if (ev.target === root || (ev.relatedTarget && !root.contains(ev.relatedTarget as Node))) {
@@ -283,6 +296,16 @@ export function mountView(opts: ViewOptions): View {
 	root.addEventListener('drop', onDrop);
 	root.addEventListener('dragleave', onDragLeave);
 	root.addEventListener('dragend', clearDropIndicator);
+	const onPlimDragStart = (ev: Event) => {
+		const detail = (ev as CustomEvent<{ id: string }>).detail;
+		if (detail?.id) activeDragSourceId = detail.id;
+	};
+	const onPlimDragEnd = () => {
+		activeDragSourceId = null;
+		clearDropIndicator();
+	};
+	root.addEventListener('plim:dragstart', onPlimDragStart);
+	root.addEventListener('plim:dragend', onPlimDragEnd);
 	root.style.position = 'relative';
 
 	return {
@@ -306,6 +329,8 @@ export function mountView(opts: ViewOptions): View {
 			root.removeEventListener('drop', onDrop);
 			root.removeEventListener('dragleave', onDragLeave);
 			root.removeEventListener('dragend', clearDropIndicator);
+			root.removeEventListener('plim:dragstart', onPlimDragStart);
+			root.removeEventListener('plim:dragend', onPlimDragEnd);
 			clearDropIndicator();
 			root.remove();
 		},
@@ -446,9 +471,14 @@ function ensureBlockHandles(el: HTMLElement, opts: ViewOptions) {
 			e.dataTransfer.setData('application/x-plim-block', id);
 			e.dataTransfer.setData('text/plain', '');
 			el.classList.add('plim-block--dragging');
+			// Notify the view's drop pipeline (see onDragOver/onDrop). We dispatch
+			// a custom event upward so the view (which owns activeDragSourceId)
+			// can update without us holding a reference to it from this scope.
+			el.dispatchEvent(new CustomEvent('plim:dragstart', { bubbles: true, detail: { id } }));
 		});
 		drag.addEventListener('dragend', () => {
 			el.classList.remove('plim-block--dragging');
+			el.dispatchEvent(new CustomEvent('plim:dragend', { bubbles: true }));
 		});
 		group.appendChild(add);
 		group.appendChild(drag);
@@ -488,7 +518,11 @@ function updateBlockElement(el: HTMLElement, node: BlockNode, opts: ViewOptions,
 			return;
 		}
 		case 'code': {
-			el.innerHTML = '';
+			// Wipe non-handle children, then mount a single <code> as content.
+			for (const child of Array.from(el.childNodes)) {
+				if (child instanceof HTMLElement && child.classList.contains('plim-block-handles')) continue;
+				child.remove();
+			}
 			const code = document.createElement('code');
 			code.setAttribute(DATA_BLOCK_CONTENT, 'true');
 			renderTextSpans(code, node.text ?? []);

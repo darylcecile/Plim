@@ -89,11 +89,13 @@ html, body {
 	margin-top: 0;
 }
 
-/* Hover affordances: + and drag handle on the gutter */
+/* Hover affordances: + and drag handle on the gutter.
+ * Use `rem` so the gutter offset is identical regardless of block font-size
+ * (otherwise headings push the handles much further left than paragraphs). */
 .plim-block-handles {
 	position: absolute;
-	top: 3px;
-	left: -2.6em;
+	top: 0.25rem;
+	left: -3rem;
 	display: flex;
 	gap: 0;
 	align-items: center;
@@ -101,7 +103,7 @@ html, body {
 	pointer-events: none;
 	transition: opacity 80ms ease;
 	user-select: none;
-	height: 1.5em;
+	height: 1.5rem;
 }
 .plim-block:hover > .plim-block-handles,
 .plim-block:focus-within > .plim-block-handles {

@@ -4,6 +4,7 @@ export default defineConfig({
 	test: {
 		environment: 'node',
 		include: ['packages/*/test/**/*.test.ts'],
+		exclude: ['**/*.browser.test.ts', '**/node_modules/**'],
 	},
 	resolve: {
 		alias: {
