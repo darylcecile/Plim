@@ -1,5 +1,9 @@
 # Plim Implementation Checklist
 
+```
+opencode -s ses_214d23b71ffeer6YhqE6jqyTem
+```
+
 Derived from `REQUIREMENTS.md`. Each item is a hard requirement; the implementation must allow the exact API shown in the requirements file. Items can be extended but not changed.
 
 Legend: `[ ]` pending · `[~]` in progress · `[x]` done.
