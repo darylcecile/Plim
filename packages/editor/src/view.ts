@@ -1092,9 +1092,24 @@ function renderTextSpans(parent: HTMLElement, spans: TextSpan[]) {
 		parent.appendChild(document.createElement('br'));
 		return;
 	}
+	let lastText = '';
 	for (const span of spans) {
 		const node = renderSpan(span);
 		parent.appendChild(node);
+		lastText = span.text;
+	}
+	// Trailing-newline sentinel: a `\n` at the very end of the block doesn't
+	// render a visible empty line in `white-space: pre-wrap` content (the browser
+	// collapses it before the closing inline boundary). Without a visible second
+	// line, the user can't tell Shift+Enter actually worked and presses it again,
+	// silently accumulating extra newlines. Append a `<br data-plim-trailing>`
+	// so the empty line anchors visually. The break is not part of the model
+	// — DOM→model offset mapping skips it because text-node walking ignores
+	// element nodes that aren't followed by more text.
+	if (lastText.endsWith('\n')) {
+		const br = document.createElement('br');
+		br.setAttribute('data-plim-trailing', 'true');
+		parent.appendChild(br);
 	}
 }
 

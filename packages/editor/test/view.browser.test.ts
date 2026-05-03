@@ -342,4 +342,33 @@ describe('editor view (real browser)', () => {
 		expect(block.querySelector(':scope > .plim-block-handles')).not.toBeNull();
 		expect(block.querySelector(':scope > .plim-block-handles > .plim-block-drag')).not.toBeNull();
 	});
+
+	it('appends a trailing-<br> sentinel when block text ends with a newline so the empty line is visible', () => {
+		// Reproduces the Shift+Enter "invisible linebreak" bug: a trailing `\n`
+		// in `white-space: pre-wrap` text doesn't anchor a visible empty line in
+		// any browser. Without the sentinel the user pressed Shift+Enter, saw
+		// nothing, pressed it again, and silently accumulated `\n\n`.
+		env = setup({ initial: ['xyz'] });
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 3 }, head: { path: [0], offset: 3 } });
+		tx.insertText([0], 3, '\n');
+		tx.setSelection({ anchor: { path: [0], offset: 4 }, head: { path: [0], offset: 4 } });
+		tx.commit();
+
+		const content = getContent(getBlocks(env.container)[0]!);
+		const kids = Array.from(content.childNodes);
+		expect(kids).toHaveLength(2);
+		expect(kids[0]!.nodeName).toBe('#text');
+		expect(kids[0]!.textContent).toBe('xyz\n');
+		expect(kids[1]!.nodeName).toBe('BR');
+		expect((kids[1] as HTMLElement).getAttribute('data-plim-trailing')).toBe('true');
+	});
+
+	it('omits the trailing-<br> sentinel once content follows the newline', () => {
+		env = setup({ initial: ['xyz\nabc'] });
+		const content = getContent(getBlocks(env.container)[0]!);
+		// No trailing newline → no sentinel.
+		expect(content.querySelector('br[data-plim-trailing]')).toBeNull();
+		expect(content.textContent).toBe('xyz\nabc');
+	});
 });
