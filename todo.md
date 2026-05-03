@@ -96,7 +96,7 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` done.
 - [x] Bold/italic/underline/strike/code shortcuts (Mod+B/I/U/Shift+S/E) — verified Mod+B
 - [x] Tab / Shift+Tab indents/outdents list items
 - [x] Block hover shows `+` and drag handle
-- [~] Notion-like visual styling (headings/bullets/quote/code rendered; needs polish vs real Notion)
+- [x] Notion-like visual styling (headings/bullets/quote/code/tables/image/embed/raw HTML, hover handles, drop indicator, slash menu — close to Notion)
 
 ## 12. Built-in blocks
 
@@ -133,3 +133,6 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` done.
 - [ ] When hovering over a block, the affordances (plus button, drag handle) should be visible and interactable
 - [ ] Ensure IME composition is fully supported and tested (currently untested)
 - [ ] Markdown parser should handle edge cases and be tested with a comprehensive suite of markdown inputs (currently only basic rules wired and tested)
+- [ ] Where possible, we should provide `<ActionPanel />` and `<HoverMenu />` components in `@plim/react` to simplify common UI patterns for actions; currently these are expected to be implemented by the user in response to async events. In the case of action panels, these should position themselves intelligently based on the block or selection that triggered them, while remaining within the bounds of the editor container.
+- [ ] Scrolling should re-align slash menu panel and hover menu if open; currently they are positioned at trigger time and do not adjust on scroll, which can lead to misalignment.
+
