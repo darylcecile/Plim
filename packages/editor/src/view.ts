@@ -488,6 +488,10 @@ function renderBlocks(parent: HTMLElement, nodes: BlockNode[], opts: ViewOptions
 
 	// Iterate desired order, reorder/create as needed
 	let cursorNode: ChildNode | null = parent.firstChild;
+	// Running counter for contiguous numbered_list_item siblings. Resets to 0
+	// whenever a non-numbered block breaks the run, so each fresh "list" starts
+	// at 1 and successive items enumerate 2, 3, … as expected.
+	let numberedRun = 0;
 	for (const id of order) {
 		const node = desired.get(id)!;
 		let el = Array.from(parent.children).find((c) => c instanceof HTMLElement && c.getAttribute(DATA_BLOCK_ID) === id) as HTMLElement | undefined;
@@ -507,7 +511,8 @@ function renderBlocks(parent: HTMLElement, nodes: BlockNode[], opts: ViewOptions
 			parent.insertBefore(el, cursorNode);
 		}
 		cursorNode = el.nextSibling;
-		updateBlockElement(el, node, opts, depth);
+		const listIndex = node.type === 'numbered_list_item' ? ++numberedRun : (numberedRun = 0);
+		updateBlockElement(el, node, opts, depth, listIndex);
 	}
 }
 
@@ -626,7 +631,7 @@ function ensureBlockHandles(el: HTMLElement, opts: ViewOptions) {
 	}
 }
 
-function updateBlockElement(el: HTMLElement, node: BlockNode, opts: ViewOptions, depth: number) {
+function updateBlockElement(el: HTMLElement, node: BlockNode, opts: ViewOptions, depth: number, listIndex = 0) {
 	const prevType = el.getAttribute(DATA_BLOCK_TYPE);
 	if (prevType && prevType !== node.type) {
 		// Type changed — strip type-specific affordances.
@@ -677,7 +682,7 @@ function updateBlockElement(el: HTMLElement, node: BlockNode, opts: ViewOptions,
 			return;
 		}
 		case 'numbered_list_item': {
-			renderListItem(el, node, opts, depth, 'number');
+			renderListItem(el, node, opts, depth, 'number', listIndex);
 			return;
 		}
 		case 'toggle': {
@@ -744,7 +749,7 @@ function renderChildBlocks(el: HTMLElement, node: BlockNode, opts: ViewOptions, 
 	renderBlocks(nest, node.children, opts, depth + 1);
 }
 
-function renderListItem(el: HTMLElement, node: BlockNode, opts: ViewOptions, depth: number, kind: 'bullet' | 'number') {
+function renderListItem(el: HTMLElement, node: BlockNode, opts: ViewOptions, depth: number, kind: 'bullet' | 'number', listIndex = 1) {
 	let bullet = el.querySelector(':scope > .plim-bullet') as HTMLElement | null;
 	if (!bullet) {
 		bullet = document.createElement('span');
@@ -752,7 +757,7 @@ function renderListItem(el: HTMLElement, node: BlockNode, opts: ViewOptions, dep
 		bullet.setAttribute('contenteditable', 'false');
 		el.insertBefore(bullet, el.firstChild);
 	}
-	bullet.textContent = kind === 'bullet' ? '•' : `${(node.attrs?.index as number | undefined) ?? 1}.`;
+	bullet.textContent = kind === 'bullet' ? '•' : `${listIndex}.`;
 	ensureContentChild(el, node);
 	renderChildBlocks(el, node, opts, depth);
 }
