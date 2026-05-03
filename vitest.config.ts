@@ -1,24 +1,15 @@
 import { defineConfig } from 'vitest/config';
-import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
-
-const rootDir = fileURLToPath(new URL('.', import.meta.url));
-const packageSource = (name: string): string => resolve(rootDir, 'packages', name, 'src', 'index.ts');
 
 export default defineConfig({
-  resolve: {
-    alias: {
-      '@plim/model': packageSource('model'),
-      '@plim/blocks': packageSource('blocks'),
-      '@plim/editor': packageSource('editor'),
-      '@plim/input': packageSource('input'),
-      '@plim/selection': packageSource('selection'),
-      '@plim/databases': packageSource('databases'),
-      '@plim/react': packageSource('react')
-    }
-  },
-  test: {
-    environment: 'node',
-    include: ['packages/**/*.test.ts']
-  }
+	test: {
+		environment: 'node',
+		include: ['packages/*/test/**/*.test.ts'],
+	},
+	resolve: {
+		alias: {
+			'@plim/core': new URL('./packages/core/src/index.ts', import.meta.url).pathname,
+			'@plim/editor': new URL('./packages/editor/src/index.ts', import.meta.url).pathname,
+			'@plim/markdown': new URL('./packages/markdown/src/index.ts', import.meta.url).pathname,
+		},
+	},
 });

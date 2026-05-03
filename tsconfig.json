@@ -1,12 +1,9 @@
 {
   "files": [],
   "references": [
-    { "path": "./packages/model" },
-    { "path": "./packages/blocks" },
+    { "path": "./packages/core" },
     { "path": "./packages/editor" },
-    { "path": "./packages/input" },
-    { "path": "./packages/selection" },
-    { "path": "./packages/databases" },
+    { "path": "./packages/markdown" },
     { "path": "./packages/react" }
   ]
 }
