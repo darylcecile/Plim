@@ -3,6 +3,7 @@ import {
 	PlimDriver,
 	bulletedListBlock,
 	headingBlock,
+	numberedListBlock,
 	paragraphBlock,
 	quoteBlock,
 	codeBlock as codeBlockFactory,
@@ -18,7 +19,7 @@ function setup(opts?: { initial?: string[] }): { editor: AgnosticEditor; contain
 	const container = document.createElement('div');
 	document.body.appendChild(container);
 	const plim = new PlimDriver({
-		registeredBlocks: [paragraphBlock, headingBlock, bulletedListBlock, quoteBlock, todoListBlock, codeBlockFactory],
+		registeredBlocks: [paragraphBlock, headingBlock, bulletedListBlock, numberedListBlock, quoteBlock, todoListBlock, codeBlockFactory],
 		registeredMarks: [boldMark, italicMark, codeMark],
 	});
 	const initialContent = opts?.initial
@@ -370,5 +371,44 @@ describe('editor view (real browser)', () => {
 		// No trailing newline → no sentinel.
 		expect(content.querySelector('br[data-plim-trailing]')).toBeNull();
 		expect(content.textContent).toBe('xyz\nabc');
+	});
+
+	it('numbers contiguous numbered_list_item siblings sequentially and resets after an interrupting block', () => {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({
+			registeredBlocks: [paragraphBlock, headingBlock, bulletedListBlock, numberedListBlock, quoteBlock, todoListBlock, codeBlockFactory],
+			registeredMarks: [boldMark, italicMark, codeMark],
+		});
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [
+					{ id: newId(), type: 'numbered_list_item', text: [{ text: 'one' }] },
+					{ id: newId(), type: 'numbered_list_item', text: [{ text: 'two' }] },
+					{ id: newId(), type: 'numbered_list_item', text: [{ text: 'three' }] },
+					{ id: newId(), type: 'paragraph', text: [{ text: 'break' }] },
+					{ id: newId(), type: 'numbered_list_item', text: [{ text: 'fresh' }] },
+					{ id: newId(), type: 'numbered_list_item', text: [{ text: 'restart' }] },
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		try {
+			const bullets = Array.from(container.querySelectorAll<HTMLElement>('[data-block-id] > .plim-bullet'));
+			expect(bullets.map((b) => b.textContent)).toEqual(['1.', '2.', '3.', '1.', '2.']);
+			// The 4th and 5th items are after the paragraph break — verify the
+			// counter actually reset (rather than just being 4,5 by coincidence).
+			const blocks = Array.from(container.querySelectorAll<HTMLElement>('[data-block-id]'));
+			const numbered = blocks.filter((b) => b.getAttribute('data-block-type') === 'numbered_list_item');
+			expect(numbered).toHaveLength(5);
+			expect(numbered[3]!.querySelector(':scope > .plim-bullet')!.textContent).toBe('1.');
+			expect(numbered[4]!.querySelector(':scope > .plim-bullet')!.textContent).toBe('2.');
+		} finally {
+			editor.destroy();
+			container.remove();
+		}
 	});
 });
