@@ -1,6 +1,15 @@
 {
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
-	"types": ["@types/bun"],
-
-  }
+    "types": ["@types/bun"]
+  },
+  "files": [],
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/editor" },
+    { "path": "./packages/markdown" },
+    { "path": "./packages/react" },
+    { "path": "./examples/basic-editor" },
+    { "path": "./examples/react-tailwind-editor" }
+  ]
 }

@@ -16,6 +16,14 @@
     "composite": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "isolatedModules": true
+    "isolatedModules": true,
+    "baseUrl": ".",
+    "ignoreDeprecations": "5.0",
+    "paths": {
+      "@plim/core": ["packages/core/src/index.ts"],
+      "@plim/editor": ["packages/editor/src/index.ts"],
+      "@plim/markdown": ["packages/markdown/src/index.ts"],
+      "@plim/react": ["packages/react/src/index.ts"]
+    }
   }
 }

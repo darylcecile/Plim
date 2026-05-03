@@ -1,0 +1,22 @@
+{
+  "name": "@plim/example-basic-editor",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --pretty false",
+    "test:browser": "node scripts/browser-regression.mjs"
+  },
+  "dependencies": {
+    "@plim/core": "workspace:*",
+    "@plim/editor": "workspace:*",
+    "@plim/markdown": "workspace:*",
+    "vite": "^5.4.21"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.1",
+    "typescript": "^5.7.3"
+  }
+}

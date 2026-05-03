@@ -1,0 +1,22 @@
+@import "../../basic-editor/src/styles.css";
+
+.react-toolbar {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+  margin: 0 0 28px;
+}
+
+.react-toolbar button {
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  padding: 5px 8px;
+  color: #787774;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.react-toolbar button:hover {
+  background: rgba(55, 53, 47, 0.06);
+}
