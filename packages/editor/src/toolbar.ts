@@ -29,6 +29,7 @@ import {
 	type ValidationRule,
 	builders,
 	evalRule,
+	flattenBlocks,
 	getBlockAt,
 	hasMark,
 	selectionIsEmpty,
@@ -455,6 +456,32 @@ export function mountToolbar(opts: ToolbarMountOptions): ToolbarMount {
 		// Mode resolution. Block-selection wins when present.
 		const mode: 'selection' | 'block' | null =
 			blockSel.size > 0 ? 'block' : selectionIsEmpty(sel) ? null : 'selection';
+
+		// Block-mode opt-out: hide if any selected block's descriptor opts
+		// out of the block-transform toolbar. Default rule: atomic blocks
+		// (`atomic: true`) opt out automatically — applying a "Heading 1"
+		// turn-into to an image/divider/counter would destroy its attrs and
+		// replace the block with an empty heading. Descriptors can override
+		// either way: `disableToolbar: true` always hides; `disableToolbar:
+		// false` keeps the toolbar even for atomic blocks (rare). "Any"
+		// (not "all") because a mixed selection containing an opt-out block
+		// also can't be safely transformed.
+		if (mode === 'block') {
+			const flat = flattenBlocks(ctx.state.doc);
+			const descByName = new Map(opts.blocks.map((b) => [b.name, b]));
+			for (const { block } of flat) {
+				if (!blockSel.has(block.id)) continue;
+				const desc = descByName.get(block.type);
+				const disabled = desc?.disableToolbar ?? desc?.atomic ?? false;
+				if (disabled) {
+					el.style.display = 'none';
+					linkActive = null;
+					linkRowEl = null;
+					el.replaceChildren();
+					return;
+				}
+			}
+		}
 
 		if (mode === null) {
 			el.style.display = 'none';

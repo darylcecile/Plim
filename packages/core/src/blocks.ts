@@ -146,6 +146,26 @@ export type BlockDescriptor = {
 	 * non-empty; supply your own `visibleWhen` to override.
 	 */
 	toolbar?: ToolbarItem | ToolbarItem[];
+	/**
+	 * Opt out of (or into) the floating block-transform toolbar when this
+	 * block type appears in the block-handle selection.
+	 *
+	 * - `undefined` (default): the toolbar hides automatically when the
+	 *   block is `atomic: true` (image, divider, counter, embed) — applying
+	 *   a "Heading 1" turn-into to an atom would destroy its attrs and
+	 *   replace it with an empty heading. Non-atomic blocks show the
+	 *   toolbar normally.
+	 * - `true`: always hide, even for non-atomic blocks (e.g. a custom
+	 *   text-bearing block whose attrs would be lost on type-change).
+	 * - `false`: always show, even for atomic blocks (rare; e.g. an atom
+	 *   that *does* want to participate in transforms).
+	 *
+	 * When *any* selected block opts out, the toolbar stays hidden in
+	 * block-mode regardless of mixed selection contents. Text-selection
+	 * mode is unaffected — bold/italic/etc. still apply to text inside
+	 * blocks that have decoration support.
+	 */
+	disableToolbar?: boolean;
 };
 
 /**

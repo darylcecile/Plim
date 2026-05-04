@@ -2937,6 +2937,40 @@ describe('Floating selection toolbar', () => {
 		expect(tb.querySelector('[data-toolbar-item="italic"]')).toBeNull();
 	});
 
+	it('stays HIDDEN when a block whose descriptor sets disableToolbar is block-selected (image)', () => {
+		// Local setup that registers imageBlock — the default `setup` doesn't.
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({
+			registeredBlocks: [paragraphBlock, headingBlock, quoteBlock, imageBlock],
+			registeredMarks: [boldMark, italicMark],
+		});
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [
+					{ id: newId(), type: 'image', attrs: { src: 'https://example.test/x.png' } },
+					{ id: newId(), type: 'paragraph', text: [{ text: 'after' }] },
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		try {
+			const imgBlock = container.querySelector('[data-block-type="image"]') as HTMLElement;
+			const handle = imgBlock.querySelector('.plim-block-drag') as HTMLElement;
+			handle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: 0, clientY: 0 }));
+			handle.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: 0, clientY: 0 }));
+			expect(imgBlock.getAttribute('data-plim-block-selected')).toBe('true');
+			const tb = getToolbar()!;
+			expect(tb.style.display).toBe('none');
+		} finally {
+			editor.destroy();
+			container.remove();
+		}
+	});
+
 	it('clicking "turn into heading 2" while a block is block-selected rewrites it', () => {
 		env = setup({ initial: ['hello world'] });
 		const blockEl = env.container.querySelector('[data-block-id]') as HTMLElement;
