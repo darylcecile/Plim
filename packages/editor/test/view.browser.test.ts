@@ -10,6 +10,7 @@ import {
 	quoteBlock,
 	codeBlock as codeBlockFactory,
 	horizontalRuleBlock,
+	imageBlock,
 	todoListBlock,
 	boldMark,
 	italicMark,
@@ -1103,6 +1104,213 @@ describe('Custom block lifecycle', () => {
 		expect(state.doc.children[1]!.type).toBe('card'); // unchanged default behavior
 		editor.destroy();
 		container.remove();
+	});
+});
+
+describe('Image block', () => {
+	function setupImage(initialAttrs: Record<string, unknown> = { src: 'https://example.test/foo.png' }) {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock, imageBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [
+					{ id: newId(), type: 'image', attrs: initialAttrs },
+					{ id: newId(), type: 'paragraph', text: [{ text: 'after' }] },
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		return {
+			editor,
+			container,
+			cleanup: () => {
+				editor.destroy();
+				container.remove();
+			},
+		};
+	}
+
+	it('caption is contenteditable and isolated; typing into it does not corrupt the doc', () => {
+		const { editor, container, cleanup } = setupImage();
+		const cap = container.querySelector('.plim-image-caption') as HTMLElement;
+		expect(cap).toBeTruthy();
+		expect(cap.getAttribute('contenteditable')).toBe('true');
+		expect(cap.getAttribute('data-plim-isolated')).toBe('true');
+		// Type into caption: dispatching beforeinput should not modify the
+		// image block's text/attrs, and should not preventDefault (browser
+		// owns the input).
+		cap.focus();
+		const range = document.createRange();
+		range.selectNodeContents(cap);
+		range.collapse(false);
+		const sel = document.getSelection()!;
+		sel.removeAllRanges();
+		sel.addRange(range);
+		const ev = new InputEvent('beforeinput', { inputType: 'insertText', data: 'h', bubbles: true, cancelable: true });
+		cap.dispatchEvent(ev);
+		expect(ev.defaultPrevented).toBe(false);
+		// Image block still has only `attrs` set, no spurious `text`.
+		const blk = editor.getState().doc.children[0]!;
+		expect(blk.type).toBe('image');
+		expect(blk.text).toBeUndefined();
+		cleanup();
+	});
+
+	it('blur on caption commits attrs.caption when changed', () => {
+		const { editor, container, cleanup } = setupImage();
+		const cap = container.querySelector('.plim-image-caption') as HTMLElement;
+		cap.focus();
+		cap.textContent = 'a new caption';
+		cap.dispatchEvent(new FocusEvent('blur'));
+		expect((editor.getState().doc.children[0]!.attrs as { caption?: string }).caption).toBe('a new caption');
+		cleanup();
+	});
+
+	it('Enter inside caption inserts a paragraph after the image instead of duplicating the block', () => {
+		const { editor, container, cleanup } = setupImage();
+		const cap = container.querySelector('.plim-image-caption') as HTMLElement;
+		cap.focus();
+		const range = document.createRange();
+		range.selectNodeContents(cap);
+		range.collapse(false);
+		const sel = document.getSelection()!;
+		sel.removeAllRanges();
+		sel.addRange(range);
+		const before = editor.getState().doc.children.length;
+		const ev = new InputEvent('beforeinput', { inputType: 'insertParagraph', bubbles: true, cancelable: true });
+		cap.dispatchEvent(ev);
+		expect(ev.defaultPrevented).toBe(true);
+		const state = editor.getState();
+		expect(state.doc.children.length).toBe(before + 1);
+		// New block is a paragraph at index 1 (right after the image at 0).
+		expect(state.doc.children[1]!.type).toBe('paragraph');
+		// No second image was created.
+		const images = state.doc.children.filter((b) => b.type === 'image');
+		expect(images.length).toBe(1);
+		// Selection moved into the new paragraph.
+		expect(state.selection.head.path).toEqual([1]);
+		cleanup();
+	});
+
+	it('resize handle is rendered and width attr is applied to the frame element', () => {
+		const { editor, container, cleanup } = setupImage({ src: 'https://example.test/x.png', width: '50%' });
+		const wrap = container.querySelector('.plim-image-wrap') as HTMLElement;
+		const frame = container.querySelector('.plim-image-frame') as HTMLElement;
+		const img = container.querySelector('img.plim-image') as HTMLImageElement;
+		expect(img).toBeTruthy();
+		expect(frame).toBeTruthy();
+		expect(frame.style.width).toBe('50%');
+		expect(wrap.style.width).toBe('');
+		expect(img.style.width).toBe('');
+		const handle = container.querySelector('.plim-image-resize') as HTMLElement;
+		expect(handle).toBeTruthy();
+		expect(handle.parentElement).toBe(frame);
+		expect(handle.getAttribute('data-plim-isolated')).toBe('true');
+		void editor;
+		cleanup();
+	});
+
+	it('caption survives an unrelated transaction (renders preserve in-progress edits)', () => {
+		const { editor, container, cleanup } = setupImage();
+		const cap = container.querySelector('.plim-image-caption') as HTMLElement;
+		cap.focus();
+		// Mutate caption DOM directly (simulating in-progress typing) without
+		// committing; the focused element must keep its text after a re-render.
+		cap.textContent = 'in progress';
+		// Trigger a transaction on a different block.
+		const tx = editor.createTransaction();
+		tx.insertText([1], 5, '!');
+		tx.commit();
+		const cap2 = container.querySelector('.plim-image-caption') as HTMLElement;
+		expect(cap2).toBe(cap); // same element preserved
+		expect(cap2.textContent).toBe('in progress');
+		cleanup();
+	});
+
+	it('clicking an atomic block selects it (data-plim-block-selected)', () => {
+		const { container, cleanup } = setupImage();
+		const blockEl = container.querySelector('[data-block-type="image"]') as HTMLElement;
+		const img = container.querySelector('img.plim-image') as HTMLImageElement;
+		// Use pointerdown directly (the production handler binds pointerdown).
+		const ev = new PointerEvent('pointerdown', { bubbles: true, cancelable: true });
+		img.dispatchEvent(ev);
+		expect(blockEl.getAttribute('data-plim-block-selected')).toBe('true');
+		// Click on a text block clears selection.
+		const para = container.querySelector('[data-block-type="paragraph"]') as HTMLElement;
+		const ev2 = new PointerEvent('pointerdown', { bubbles: true, cancelable: true });
+		para.dispatchEvent(ev2);
+		expect(blockEl.hasAttribute('data-plim-block-selected')).toBe(false);
+		cleanup();
+	});
+
+	it('Backspace removes the selected atomic block and moves caret to previous block', () => {
+		const { editor, container, cleanup } = setupImage();
+		const img = container.querySelector('img.plim-image') as HTMLImageElement;
+		// Document is [image, paragraph "after"]. Adding a leading
+		// paragraph so the deletion has a previous block to land in.
+		const tx0 = editor.createTransaction();
+		tx0.insertBlock([0], { id: newId(), type: 'paragraph', text: [{ text: 'before' }] });
+		tx0.commit();
+		expect(editor.getState().doc.children.map((b) => b.type)).toEqual(['paragraph', 'image', 'paragraph']);
+		// Select the image and Backspace.
+		const img2 = container.querySelector('img.plim-image') as HTMLImageElement;
+		img2.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+		expect(container.querySelector('[data-plim-block-selected="true"]')).toBeTruthy();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		root.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true }));
+		const state = editor.getState();
+		expect(state.doc.children.map((b) => b.type)).toEqual(['paragraph', 'paragraph']);
+		// Caret moved into the previous block at its end (offset 6 = 'before'.length).
+		expect(state.selection.head.path).toEqual([0]);
+		expect(state.selection.head.offset).toBe(6);
+		// Block-selection cleared.
+		expect(container.querySelector('[data-plim-block-selected="true"]')).toBeNull();
+		// img variable used to suppress unused warning.
+		void img;
+		cleanup();
+	});
+
+	it('Escape clears block selection without removing the block', () => {
+		const { editor, container, cleanup } = setupImage();
+		const img = container.querySelector('img.plim-image') as HTMLImageElement;
+		img.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+		expect(container.querySelector('[data-plim-block-selected="true"]')).toBeTruthy();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		root.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+		expect(container.querySelector('[data-plim-block-selected="true"]')).toBeNull();
+		expect(editor.getState().doc.children.length).toBe(2); // unchanged
+		cleanup();
+	});
+
+	it('ArrowUp at offset 0 of paragraph after image selects the image', () => {
+		const { editor, container, cleanup } = setupImage();
+		// Caret at offset 0 of paragraph[1].
+		const tx0 = editor.createTransaction();
+		tx0.setSelection({ anchor: { path: [1], offset: 0 }, head: { path: [1], offset: 0 } });
+		tx0.commit();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		root.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
+		const sel = container.querySelector('[data-plim-block-selected="true"]') as HTMLElement;
+		expect(sel).toBeTruthy();
+		expect(sel.getAttribute('data-block-type')).toBe('image');
+		cleanup();
+	});
+
+	it('ArrowDown while selected moves caret into next text block', () => {
+		const { editor, container, cleanup } = setupImage();
+		const img = container.querySelector('img.plim-image') as HTMLImageElement;
+		img.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		root.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+		const state = editor.getState();
+		expect(state.selection.head.path).toEqual([1]);
+		expect(state.selection.head.offset).toBe(0);
+		expect(container.querySelector('[data-plim-block-selected="true"]')).toBeNull();
+		cleanup();
 	});
 });
 

@@ -53,6 +53,22 @@ export type View = {
 const DATA_BLOCK_ID = 'data-block-id';
 const DATA_BLOCK_TYPE = 'data-block-type';
 const DATA_BLOCK_CONTENT = 'data-block-content';
+// Marks a subtree the editor should treat as opaque: native browser
+// `contenteditable` handling owns input, the doc's selection state is not
+// synced from caret moves inside it, and `beforeinput`/`keydown` handlers
+// bail before dispatching transactions. Used for image captions, embed URL
+// inputs, raw-HTML editors, and resize handles — anything that lives inside
+// a block's chrome but isn't part of the block's text spans.
+const DATA_PLIM_ISOLATED = 'data-plim-isolated';
+
+function isolatedAncestor(node: Node | null): HTMLElement | null {
+	let cur: Node | null = node;
+	while (cur) {
+		if (cur instanceof HTMLElement && cur.hasAttribute(DATA_PLIM_ISOLATED)) return cur;
+		cur = cur.parentNode;
+	}
+	return null;
+}
 
 // Find this block's editable text container. Built-in / `toDOM` blocks place
 // `[data-block-content]` as a direct child of the wrapper, so the fast path
@@ -87,11 +103,135 @@ export function mountView(opts: ViewOptions): View {
 	let composing = false;
 	let updating = false;
 
+	// ---- Block selection (atomic blocks like image/divider) ----
+	// When the user clicks an atomic block (no `text` field) or arrows
+	// into one from a neighbouring text block, we put the editor into
+	// "block-selected" mode: a CSS outline is drawn on the wrapper,
+	// the DOM caret is removed, and Backspace/Delete removes the block.
+	// This is purely view-layer state — never persisted into the doc's
+	// `selection` (which is a text-range selection model).
+	let selectedBlockId: string | null = null;
+	function blockElById(id: string): HTMLElement | null {
+		// Use attribute selector with quoted value so ids with special
+		// characters don't break the query.
+		return root.querySelector<HTMLElement>(`[${DATA_BLOCK_ID}="${cssAttrEscape(id)}"]`);
+	}
+	function setBlockSelected(id: string | null) {
+		if (selectedBlockId === id) return;
+		if (selectedBlockId) {
+			const prev = blockElById(selectedBlockId);
+			prev?.removeAttribute('data-plim-block-selected');
+		}
+		selectedBlockId = id;
+		if (id) {
+			const next = blockElById(id);
+			next?.setAttribute('data-plim-block-selected', 'true');
+			// Drop the DOM text caret so two selection visuals don't compete.
+			root.ownerDocument.getSelection()?.removeAllRanges();
+			// Move keyboard focus to the root so subsequent keydowns route
+			// here even if the user's last interaction was in an isolated
+			// caption (which would otherwise keep DOM focus).
+			root.focus({ preventScroll: true });
+		}
+	}
+	function reapplyBlockSelectedAfterRender() {
+		// Render may have wiped/recreated wrappers; re-stamp the attribute
+		// on whichever wrapper now hosts the selected id. If the id no
+		// longer exists in the doc (e.g. block was removed), clear.
+		for (const b of root.querySelectorAll('[data-plim-block-selected="true"]')) b.removeAttribute('data-plim-block-selected');
+		if (!selectedBlockId) return;
+		const el = blockElById(selectedBlockId);
+		if (el) el.setAttribute('data-plim-block-selected', 'true');
+		else selectedBlockId = null;
+	}
+
+	function deleteSelectedBlock() {
+		const id = selectedBlockId;
+		if (!id) return;
+		const state = opts.getState();
+		const path = pathOfBlockId(state.doc.children, id, []);
+		if (!path) {
+			selectedBlockId = null;
+			return;
+		}
+		// Pick a sensible caret target *before* the removal so we know
+		// where to land. Prefer the previous flat block; fall back to
+		// the next; if neither exists, leave the empty-doc invariant up
+		// to the editor (which will keep an empty paragraph).
+		const flat = flattenBlocks(state.doc);
+		const idx = flat.findIndex((e) => pathsEqual(e.path, path));
+		const prevEntry = idx > 0 ? flat[idx - 1] : undefined;
+		const nextEntry = idx >= 0 ? flat[idx + 1] : undefined;
+		const editor = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor;
+		const tx = editor.createTransaction();
+		tx.removeBlock(path);
+		// After removal, paths shift. The previous block's path is
+		// unchanged; the next block's path drops by 1 at the level we
+		// removed from. Compute the post-removal target lazily.
+		if (prevEntry) {
+			const target = prevEntry.path;
+			const tgtBlock = prevEntry.block;
+			const off = tgtBlock.text !== undefined ? blockTextLength(tgtBlock) : 0;
+			tx.setSelection({ anchor: { path: target, offset: off }, head: { path: target, offset: off } });
+		} else if (nextEntry) {
+			// Shift the next path down by one at the removed-from level.
+			const removedAtLevel = path.length - 1;
+			const next = nextEntry.path.slice();
+			if (next.length > removedAtLevel && next[removedAtLevel]! > path[removedAtLevel]!) {
+				next[removedAtLevel] = next[removedAtLevel]! - 1;
+			}
+			tx.setSelection({ anchor: { path: next, offset: 0 }, head: { path: next, offset: 0 } });
+		}
+		tx.commit();
+		// Selection state will reapply via render(); clear our view-side
+		// flag and let the caret in the doc selection take over.
+		selectedBlockId = null;
+	}
+
+	function moveCaretRelativeToSelected(direction: 'before' | 'after') {
+		const id = selectedBlockId;
+		if (!id) return;
+		const state = opts.getState();
+		const path = pathOfBlockId(state.doc.children, id, []);
+		if (!path) {
+			selectedBlockId = null;
+			return;
+		}
+		const flat = flattenBlocks(state.doc);
+		const idx = flat.findIndex((e) => pathsEqual(e.path, path));
+		const target = direction === 'before' ? (idx > 0 ? flat[idx - 1] : undefined) : (idx >= 0 ? flat[idx + 1] : undefined);
+		if (!target) {
+			// Edge of doc — just clear selection so user knows nothing happened.
+			setBlockSelected(null);
+			return;
+		}
+		// Atomic neighbour: move block-selection laterally.
+		if (target.block.text === undefined) {
+			setBlockSelected(target.block.id);
+			return;
+		}
+		// Text neighbour: place caret at end (going before) or start (going after).
+		const off = direction === 'before' ? blockTextLength(target.block) : 0;
+		const editor = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor;
+		const tx = editor.createTransaction();
+		tx.setSelection({ anchor: { path: target.path, offset: off }, head: { path: target.path, offset: off } });
+		tx.commit();
+		setBlockSelected(null);
+	}
+
+	function cssAttrEscape(s: string): string {
+		// Escape backslashes and double quotes so the value is safe inside
+		// `[attr="..."]` selectors. CSS.escape would also work but isn't
+		// universally available in older test environments.
+		return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+	}
+
 	function render(state: EditorState) {
 		updating = true;
 		try {
 			renderBlocks(root, state.doc.children, opts);
 			applySelection(root, state.selection);
+			reapplyBlockSelectedAfterRender();
 		} finally {
 			updating = false;
 		}
@@ -143,8 +283,19 @@ export function mountView(opts: ViewOptions): View {
 	}
 
 	// ---- Event wiring ----
+	function selectionInIsolated(): HTMLElement | null {
+		const sel = root.ownerDocument.getSelection();
+		if (!sel || sel.rangeCount === 0) return null;
+		return isolatedAncestor(sel.anchorNode);
+	}
+
 	const onSelectionChange = () => {
 		if (updating || composing) return;
+		// Skip selection sync when the caret lives inside an isolated subtree
+		// (e.g. an image caption). The doc's selection stays at whatever
+		// block was last focused; mapping the caret to a (path, offset) on
+		// the host block would corrupt subsequent typing.
+		if (selectionInIsolated()) return;
 		const sel = readSelectionFromDOM();
 		if (!sel) return;
 		const state = opts.getState();
@@ -163,9 +314,69 @@ export function mountView(opts: ViewOptions): View {
 
 	root.ownerDocument.addEventListener('selectionchange', onSelectionChange);
 
+	// Click-to-select for atomic blocks. Any non-isolated pointerdown on
+	// a block whose node has no `text` field puts the editor into
+	// block-selected mode for that block. Click anywhere else (including
+	// text blocks) clears the selection so the caret can land normally.
+	const onRootPointerDown = (ev: PointerEvent) => {
+		// Block-handle clicks already stopPropagation, so we won't see
+		// those here. Isolated subtrees (caption, resize handle) get
+		// native handling — clicking them must NOT change the selection
+		// state we may already have on a sibling block.
+		const targetNode = ev.target as Node | null;
+		if (isolatedAncestor(targetNode)) return;
+		const blockEl = (ev.target as HTMLElement | null)?.closest?.(`[${DATA_BLOCK_ID}]`) as HTMLElement | null;
+		if (!blockEl || !root.contains(blockEl)) {
+			setBlockSelected(null);
+			return;
+		}
+		const id = blockEl.getAttribute(DATA_BLOCK_ID);
+		if (!id) {
+			setBlockSelected(null);
+			return;
+		}
+		const state = opts.getState();
+		const path = pathOfBlockId(state.doc.children, id, []);
+		const block = path ? blockAt(state.doc.children, path) : null;
+		if (block && block.text === undefined) {
+			// Atomic block — prevent the browser from putting the caret
+			// into the (contenteditable=false) wrapper and select it.
+			ev.preventDefault();
+			setBlockSelected(id);
+		} else {
+			setBlockSelected(null);
+		}
+	};
+	root.addEventListener('pointerdown', onRootPointerDown);
+
 	const onBeforeInput = (ev: InputEvent) => {
 		if (composing) return;
 		const type = ev.inputType;
+		// Isolated subtree handling. The browser's native contenteditable
+		// owns the input — we only intercept structural keys (Enter:
+		// exit the region and create a paragraph after the host block;
+		// Shift+Enter / line break: swallow). Everything else (text,
+		// delete, replace) is left to the browser; the host of the
+		// isolated region (e.g. caption blur handler) syncs back to
+		// `attrs` when focus leaves.
+		const targetNode = (ev.target as Node | null) ?? null;
+		const iso = isolatedAncestor(targetNode) ?? (function () {
+			const sel = root.ownerDocument.getSelection();
+			return sel && sel.rangeCount > 0 ? isolatedAncestor(sel.anchorNode) : null;
+		})();
+		if (iso) {
+			if (type === 'insertParagraph') {
+				ev.preventDefault();
+				handleIsolatedExit(opts, iso);
+				return;
+			}
+			if (type === 'insertLineBreak') {
+				ev.preventDefault();
+				return;
+			}
+			// Let the browser handle text/delete natively inside the region.
+			return;
+		}
 		// Enter
 		if (type === 'insertParagraph') {
 			ev.preventDefault();
@@ -231,6 +442,84 @@ export function mountView(opts: ViewOptions): View {
 	root.addEventListener('beforeinput', onBeforeInput);
 
 	const onKeyDown = (ev: KeyboardEvent) => {
+		// Block-selected mode swallows almost everything: arrows move the
+		// caret out of the block, Backspace/Delete remove it, Escape
+		// clears the selection. Any other key clears block selection and
+		// (for a printable key) lets the action panel / shortcut layer
+		// run; users typically don't expect to start typing into nothing
+		// while a block is selected, so we don't auto-create a paragraph.
+		if (selectedBlockId !== null) {
+			if (ev.key === 'Escape') {
+				ev.preventDefault();
+				setBlockSelected(null);
+				return;
+			}
+			if (ev.key === 'Backspace' || ev.key === 'Delete') {
+				ev.preventDefault();
+				deleteSelectedBlock();
+				return;
+			}
+			if (ev.key === 'ArrowUp' || ev.key === 'ArrowLeft') {
+				ev.preventDefault();
+				moveCaretRelativeToSelected('before');
+				return;
+			}
+			if (ev.key === 'ArrowDown' || ev.key === 'ArrowRight') {
+				ev.preventDefault();
+				moveCaretRelativeToSelected('after');
+				return;
+			}
+			// Modifiers alone shouldn't drop the selection (user might be
+			// composing a shortcut).
+			if (ev.key === 'Shift' || ev.key === 'Control' || ev.key === 'Meta' || ev.key === 'Alt') return;
+			// Anything else: drop block selection and fall through to
+			// normal handling (no caret will be set; the action layer
+			// can still react to shortcuts).
+			setBlockSelected(null);
+		}
+		// Arrow into atomic neighbours from text. ArrowUp at offset 0
+		// when the previous sibling is atomic selects it. ArrowDown at
+		// the end of the block when the next sibling is atomic selects
+		// it. We deliberately key off offset/length rather than visual
+		// line position to keep this rule simple — multi-line wrapped
+		// paragraphs walk through their own offsets first before the
+		// rule fires.
+		if (!opts.readonly && (ev.key === 'ArrowUp' || ev.key === 'ArrowDown') && !ev.isComposing && !ev.shiftKey) {
+			const state = opts.getState();
+			const sel = state.selection;
+			if (pathsEqual(sel.head.path, sel.anchor.path)) {
+				const path = sel.head.path;
+				const block = blockAt(state.doc.children, path);
+				if (ev.key === 'ArrowUp' && sel.head.offset === 0) {
+					const last = path[path.length - 1] ?? 0;
+					if (last > 0) {
+						const prevPath = [...path.slice(0, -1), last - 1];
+						const prev = blockAt(state.doc.children, prevPath);
+						if (prev && prev.text === undefined) {
+							ev.preventDefault();
+							setBlockSelected(prev.id);
+							return;
+						}
+					}
+				}
+				if (ev.key === 'ArrowDown' && block && sel.head.offset >= blockTextLength(block)) {
+					const flat = flattenBlocks(state.doc);
+					const idx = flat.findIndex((e) => pathsEqual(e.path, path));
+					const next = idx >= 0 ? flat[idx + 1] : undefined;
+					if (next && next.block.text === undefined) {
+						ev.preventDefault();
+						setBlockSelected(next.block.id);
+						return;
+					}
+				}
+			}
+		}
+		// Isolated regions: let the browser handle keyboard input natively.
+		// Specifically, Backspace/Delete inside an image caption deletes
+		// caption text, not the host block. Shortcuts (Mod+B, etc.) are
+		// also dropped — captions intentionally don't participate in mark
+		// toggling for now.
+		if (selectionInIsolated()) return;
 		// Some modifier+Backspace/Delete combos don't reliably fire `beforeinput`
 		// in Chrome (e.g. Option+Shift+Backspace on macOS isn't a standard text-
 		// editing binding), so intercept them at the keydown layer. We mirror
@@ -444,6 +733,7 @@ export function mountView(opts: ViewOptions): View {
 		},
 		destroy() {
 			root.ownerDocument.removeEventListener('selectionchange', onSelectionChange);
+			root.removeEventListener('pointerdown', onRootPointerDown);
 			root.removeEventListener('beforeinput', onBeforeInput);
 			root.removeEventListener('keydown', onKeyDown);
 			root.removeEventListener('compositionstart', onCompositionStart);
@@ -1028,13 +1318,22 @@ function dispatchAttrs(el: HTMLElement, opts: ViewOptions, attrs: Record<string,
 
 function renderImage(el: HTMLElement, node: BlockNode, opts: ViewOptions) {
 	el.setAttribute('contenteditable', 'false');
-	clearPayload(el);
-	const wrap = document.createElement('div');
-	wrap.className = 'plim-image-wrap';
-	wrap.setAttribute(DATA_BLOCK_CONTENT, 'true');
+	const stash = el as unknown as { __plimImageCaption?: HTMLElement; __plimImageWrap?: HTMLElement };
 	const src = (node.attrs?.src as string | undefined) ?? '';
 	const alt = (node.attrs?.alt as string | undefined) ?? '';
+	const caption = (node.attrs?.caption as string | undefined) ?? '';
+	// Width is stored as a CSS length string (e.g. '60%' or '480px'). The
+	// resize handle commits the new value via `setBlockAttrs` on
+	// pointerup; until then we mutate `img.style.width` directly so the
+	// drag is responsive without round-tripping through transactions.
+	const width = (node.attrs?.width as string | undefined) ?? '';
+
 	if (!src) {
+		// Placeholder state: no image yet. Build from scratch each render
+		// since there's nothing user-mutable to preserve.
+		clearPayload(el);
+		const wrap = document.createElement('div');
+		wrap.className = 'plim-image-wrap';
 		const placeholder = document.createElement('button');
 		placeholder.type = 'button';
 		placeholder.className = 'plim-image-placeholder';
@@ -1046,26 +1345,136 @@ function renderImage(el: HTMLElement, node: BlockNode, opts: ViewOptions) {
 			dispatchAttrs(el, opts, { src: url });
 		});
 		wrap.appendChild(placeholder);
-	} else {
-		const img = document.createElement('img');
-		img.src = src;
-		img.alt = alt;
-		img.draggable = false;
-		img.className = 'plim-image';
-		wrap.appendChild(img);
-		const caption = (node.attrs?.caption as string | undefined) ?? '';
-		const cap = document.createElement('div');
-		cap.className = 'plim-image-caption';
-		cap.contentEditable = opts.readonly ? 'false' : 'true';
-		cap.textContent = caption;
-		cap.dataset.placeholder = 'Write a caption…';
-		cap.addEventListener('blur', () => {
-			const next = cap.textContent ?? '';
-			if (next !== caption) dispatchAttrs(el, opts, { caption: next });
-		});
-		wrap.appendChild(cap);
+		el.appendChild(wrap);
+		stash.__plimImageWrap = undefined as unknown as HTMLElement;
+		stash.__plimImageCaption = undefined as unknown as HTMLElement;
+		return;
 	}
-	el.appendChild(wrap);
+
+	// Reuse the wrap + caption across renders so in-progress edits to the
+	// caption (typed text not yet flushed to attrs) survive other
+	// transactions. We keep the caption element stable; only attribute /
+	// child mutations happen on re-render.
+	let wrap = stash.__plimImageWrap;
+	let caps = stash.__plimImageCaption;
+	if (!wrap || !el.contains(wrap)) {
+		clearPayload(el);
+		wrap = document.createElement('div');
+		wrap.className = 'plim-image-wrap';
+		el.appendChild(wrap);
+		stash.__plimImageWrap = wrap;
+		caps = undefined;
+	}
+
+	// Image element. Re-create only if we haven't yet. The frame wraps
+	// just the <img> + resize handle so the handle's vertical extent
+	// matches the image (not the image + caption). The wrap shrinks to
+	// the frame's width so the handle's `right: 0` lands on the image's
+	// right edge regardless of the editor container's width.
+	let frame = wrap.querySelector('.plim-image-frame') as HTMLElement | null;
+	if (!frame) {
+		frame = document.createElement('div');
+		frame.className = 'plim-image-frame';
+		// Insert frame before any existing caption so DOM order is
+		// frame → caption regardless of insertion order.
+		wrap.insertBefore(frame, wrap.firstChild);
+	}
+	let img = frame.querySelector('img.plim-image') as HTMLImageElement | null;
+	if (!img) {
+		img = document.createElement('img');
+		img.className = 'plim-image';
+		img.draggable = false;
+		frame.appendChild(img);
+	}
+	if (img.getAttribute('src') !== src) img.src = src;
+	if (img.getAttribute('alt') !== alt) img.alt = alt;
+	// Width lives on the FRAME (not the wrap or the img). The frame is
+	// `display: inline-block` inside a block-level wrap, so its width
+	// resolves against the wrap (a definite-width block context). The
+	// img inside the frame fills the frame at `width: 100%`. This keeps
+	// percentages well-defined (no shrink-to-fit circularity) and makes
+	// the handle's `right: 0` land on the img's right edge for any
+	// width value.
+	frame.style.width = width || '';
+	img.style.width = '';
+	wrap.style.width = '';
+
+	// Resize handle. Pointer-drag updates `img.style.width` live; on
+	// pointerup, the final width (in px) is committed to `attrs.width`.
+	// The handle is `data-plim-isolated` so the editor's input pipeline
+	// doesn't try to interpret pointer/keyboard events inside it as text.
+	let handle = frame.querySelector('.plim-image-resize') as HTMLElement | null;
+	if (!handle && !opts.readonly) {
+		handle = document.createElement('div');
+		handle.className = 'plim-image-resize';
+		handle.setAttribute('contenteditable', 'false');
+		handle.setAttribute(DATA_PLIM_ISOLATED, 'true');
+		// Visible grip child — full-height invisible hit area, small pill
+		// rendered via ::before in CSS for hover affordance.
+		handle.addEventListener('pointerdown', (ev) => {
+			ev.preventDefault();
+			ev.stopPropagation();
+			const startX = ev.clientX;
+			const startWidth = frame!.getBoundingClientRect().width;
+			// The block content area (wrap is full-width inside the block).
+			const parentWidth = wrap!.getBoundingClientRect().width;
+			handle!.setPointerCapture(ev.pointerId);
+			handle!.classList.add('plim-image-resize-active');
+			const onMove = (mv: PointerEvent) => {
+				const dx = mv.clientX - startX;
+				const next = Math.max(60, Math.min(parentWidth, startWidth + dx));
+				frame!.style.width = `${Math.round(next)}px`;
+			};
+			const onUp = (up: PointerEvent) => {
+				handle!.removeEventListener('pointermove', onMove);
+				handle!.removeEventListener('pointerup', onUp);
+				handle!.removeEventListener('pointercancel', onUp);
+				handle!.releasePointerCapture(up.pointerId);
+				handle!.classList.remove('plim-image-resize-active');
+				const finalPx = frame!.getBoundingClientRect().width;
+				const pct = parentWidth > 0 ? Math.round((finalPx / parentWidth) * 100) : 100;
+				dispatchAttrs(el, opts, { width: `${pct}%` });
+			};
+			handle!.addEventListener('pointermove', onMove);
+			handle!.addEventListener('pointerup', onUp);
+			handle!.addEventListener('pointercancel', onUp);
+		});
+		frame.appendChild(handle);
+	}
+
+	// Caption. The element is `data-plim-isolated` so:
+	//  - typing into it is handled natively (the editor's beforeinput
+	//    pipeline bails before dispatching transactions).
+	//  - moving the caret inside doesn't update the doc's selection state.
+	//  - Enter exits to a fresh paragraph after the image (handled in
+	//    `onBeforeInput` via `handleIsolatedExit`).
+	if (!caps || !wrap.contains(caps)) {
+		caps = document.createElement('div');
+		caps.className = 'plim-image-caption';
+		caps.setAttribute(DATA_PLIM_ISOLATED, 'true');
+		caps.dataset.placeholder = 'Write a caption…';
+		caps.contentEditable = opts.readonly ? 'false' : 'true';
+		caps.textContent = caption;
+		caps.addEventListener('blur', () => {
+			const next = caps!.textContent ?? '';
+			// Compare against the latest state (not the closure's snapshot,
+			// which goes stale after the next render) so we only commit a
+			// transaction when the caption actually changed.
+			const cur = opts.getState();
+			const p = pathForBlockId(cur.doc.children, node.id);
+			const stored = (p ? blockAt(cur.doc.children, p)?.attrs?.caption : '') as string | undefined;
+			if (next !== (stored ?? '')) dispatchAttrs(el, opts, { caption: next });
+		});
+		wrap.appendChild(caps);
+		stash.__plimImageCaption = caps;
+	} else {
+		// Sync from attrs only if the user isn't currently editing — i.e.
+		// the caption isn't focused. Avoids clobbering in-progress edits
+		// when an unrelated transaction fires.
+		const focused = el.ownerDocument.activeElement === caps;
+		if (!focused && caps.textContent !== caption) caps.textContent = caption;
+		caps.contentEditable = opts.readonly ? 'false' : 'true';
+	}
 }
 
 function renderEmbed(el: HTMLElement, node: BlockNode, opts: ViewOptions) {
@@ -1525,6 +1934,50 @@ function sumTextBefore(content: HTMLElement, target: Node, targetOffset: number)
 }
 
 // ---- Built-in input handlers ----
+
+// Enter inside an isolated subtree (image caption, embed URL field, etc.)
+// should *exit* the region rather than splitting it. We walk up to the
+// host block, find its path in the doc, and insert a fresh paragraph
+// after it; selection is moved into the new paragraph so the caret lands
+// where the user expects. The isolated region's contents are left intact;
+// captions sync via their own blur handler so any in-progress edits land
+// when focus moves to the new paragraph.
+function handleIsolatedExit(opts: ViewOptions, iso: HTMLElement) {
+	const blockEl = iso.closest(`[${DATA_BLOCK_ID}]`) as HTMLElement | null;
+	if (!blockEl) return;
+	const blockId = blockEl.getAttribute(DATA_BLOCK_ID);
+	if (!blockId) return;
+	const state = opts.getState();
+	const path = pathForBlockId(state.doc.children, blockId);
+	if (!path) return;
+	// Sibling path = parent.path + (lastIdx + 1). insertBlock inserts at the
+	// given path, shifting later siblings; passing parentPath + (idx+1) puts
+	// the new paragraph immediately after the host.
+	const insertPath = [...path.slice(0, -1), path[path.length - 1]! + 1];
+	const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
+	tx.insertBlock(insertPath, { id: newId(), type: 'paragraph', text: [] });
+	tx.setSelection({
+		anchor: { path: insertPath, offset: 0 },
+		head: { path: insertPath, offset: 0 },
+	});
+	tx.commit();
+	// Focus the editor root so the new selection takes effect; the next
+	// render loop will place the DOM caret in the new paragraph.
+	(opts.container.querySelector(`[${DATA_BLOCK_ID}]`) ? opts.container : null);
+}
+
+function pathForBlockId(blocks: BlockNode[], id: string, parent: number[] = []): number[] | null {
+	for (let i = 0; i < blocks.length; i++) {
+		const b = blocks[i];
+		if (!b) continue;
+		if (b.id === id) return [...parent, i];
+		if (b.children) {
+			const found = pathForBlockId(b.children, id, [...parent, i]);
+			if (found) return found;
+		}
+	}
+	return null;
+}
 
 function handleInsertParagraph(opts: ViewOptions) {
 	const state = opts.getState();
