@@ -346,7 +346,13 @@ describe('editor view (real browser)', () => {
 		tx.setBlockType([0], 'code');
 		tx.commit();
 		const block = getBlocks(env.container)[0]!;
-		expect(block.tagName).toBe('PRE');
+		// Wrapper is a <div> so the absolutely-positioned drag handles
+		// in the gutter aren't clipped by the inner <pre>'s
+		// `overflow-x: auto`. The inner <pre><code> still hosts the
+		// code-look styling and `[data-block-content]`.
+		expect(block.tagName).toBe('DIV');
+		expect(block.classList.contains('plim-block-code')).toBe(true);
+		expect(block.querySelector(':scope > pre > code[data-block-content="true"]')).not.toBeNull();
 		expect(block.querySelector(':scope > .plim-block-handles')).not.toBeNull();
 		expect(block.querySelector(':scope > .plim-block-handles > .plim-block-drag')).not.toBeNull();
 	});
@@ -1394,3 +1400,189 @@ describe('Image block', () => {
 	});
 });
 
+describe('Multi-block selection', () => {
+	function setupMulti(texts: string[] = ['one', 'two', 'three', 'four']) {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: texts.map((t) => ({ id: newId(), type: 'paragraph' as const, text: [{ text: t }] })),
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		return {
+			editor,
+			container,
+			cleanup: () => {
+				editor.destroy();
+				container.remove();
+			},
+		};
+	}
+	function selectViaHandle(blockEl: HTMLElement, mods: { shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean } = {}) {
+		const handle = blockEl.querySelector('.plim-block-drag') as HTMLElement;
+		handle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: 0, clientY: 0 }));
+		// PointerEvent doesn't honour shiftKey/metaKey via constructor consistently
+		// across DOM implementations, so dispatch a custom pointerup with the mods
+		// inline; finishSession reads them from the event itself.
+		const up = new PointerEvent('pointerup', {
+			bubbles: true,
+			cancelable: true,
+			button: 0,
+			pointerId: 1,
+			clientX: 0,
+			clientY: 0,
+			shiftKey: mods.shiftKey ?? false,
+			metaKey: mods.metaKey ?? false,
+			ctrlKey: mods.ctrlKey ?? false,
+		});
+		handle.dispatchEvent(up);
+	}
+	function selectedIds(container: HTMLElement) {
+		return Array.from(container.querySelectorAll('[data-plim-block-selected="true"]')).map((el) => el.getAttribute('data-block-id'));
+	}
+
+	it('shift+click on a second block selects the inclusive range', () => {
+		const { container, cleanup } = setupMulti();
+		const blocks = Array.from(container.querySelectorAll('[data-block-id]')) as HTMLElement[];
+		selectViaHandle(blocks[0]!);
+		selectViaHandle(blocks[2]!, { shiftKey: true });
+		const ids = selectedIds(container);
+		// Should select indices 0, 1, 2 (inclusive).
+		expect(ids).toHaveLength(3);
+		expect(ids).toContain(blocks[0]!.getAttribute('data-block-id'));
+		expect(ids).toContain(blocks[1]!.getAttribute('data-block-id'));
+		expect(ids).toContain(blocks[2]!.getAttribute('data-block-id'));
+		cleanup();
+	});
+
+	it('cmd/meta+click toggles a block in/out of the selection', () => {
+		const { container, cleanup } = setupMulti();
+		const blocks = Array.from(container.querySelectorAll('[data-block-id]')) as HTMLElement[];
+		selectViaHandle(blocks[0]!);
+		selectViaHandle(blocks[2]!, { metaKey: true });
+		expect(selectedIds(container)).toHaveLength(2);
+		// Toggle off block 2.
+		selectViaHandle(blocks[2]!, { metaKey: true });
+		expect(selectedIds(container)).toEqual([blocks[0]!.getAttribute('data-block-id')]);
+		cleanup();
+	});
+
+	it('plain click on another block replaces the selection', () => {
+		const { container, cleanup } = setupMulti();
+		const blocks = Array.from(container.querySelectorAll('[data-block-id]')) as HTMLElement[];
+		selectViaHandle(blocks[0]!);
+		selectViaHandle(blocks[2]!, { shiftKey: true });
+		expect(selectedIds(container)).toHaveLength(3);
+		selectViaHandle(blocks[1]!);
+		expect(selectedIds(container)).toEqual([blocks[1]!.getAttribute('data-block-id')]);
+		cleanup();
+	});
+
+	it('Backspace with multi-selection removes all selected blocks', () => {
+		const { editor, container, cleanup } = setupMulti(['a', 'b', 'c', 'd']);
+		const blocks = Array.from(container.querySelectorAll('[data-block-id]')) as HTMLElement[];
+		selectViaHandle(blocks[1]!);
+		selectViaHandle(blocks[2]!, { shiftKey: true });
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		root.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true }));
+		const remaining = editor.getState().doc.children.map((b) => (b.text?.[0] as { text?: string } | undefined)?.text);
+		expect(remaining).toEqual(['a', 'd']);
+		expect(selectedIds(container)).toHaveLength(0);
+		cleanup();
+	});
+
+	it('Escape with multi-selection clears all without modifying the doc', () => {
+		const { editor, container, cleanup } = setupMulti();
+		const blocks = Array.from(container.querySelectorAll('[data-block-id]')) as HTMLElement[];
+		selectViaHandle(blocks[0]!);
+		selectViaHandle(blocks[2]!, { shiftKey: true });
+		const before = editor.getState().doc.children.length;
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		root.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+		expect(selectedIds(container)).toHaveLength(0);
+		expect(editor.getState().doc.children.length).toBe(before);
+		cleanup();
+	});
+
+	it('Shift+ArrowDown extends the selection downward from the active end', () => {
+		const { container, cleanup } = setupMulti();
+		const blocks = Array.from(container.querySelectorAll('[data-block-id]')) as HTMLElement[];
+		selectViaHandle(blocks[0]!);
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		root.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', shiftKey: true, bubbles: true, cancelable: true }));
+		root.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', shiftKey: true, bubbles: true, cancelable: true }));
+		const ids = selectedIds(container);
+		expect(ids).toHaveLength(3);
+		expect(ids).toContain(blocks[0]!.getAttribute('data-block-id'));
+		expect(ids).toContain(blocks[1]!.getAttribute('data-block-id'));
+		expect(ids).toContain(blocks[2]!.getAttribute('data-block-id'));
+		cleanup();
+	});
+
+	it('Shift+ArrowUp shrinks the selection back toward the anchor', () => {
+		const { container, cleanup } = setupMulti();
+		const blocks = Array.from(container.querySelectorAll('[data-block-id]')) as HTMLElement[];
+		selectViaHandle(blocks[0]!);
+		selectViaHandle(blocks[2]!, { shiftKey: true });
+		expect(selectedIds(container)).toHaveLength(3);
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		// Active end is blocks[2]; ArrowUp pulls it back to blocks[1].
+		root.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', shiftKey: true, bubbles: true, cancelable: true }));
+		expect(selectedIds(container)).toHaveLength(2);
+		cleanup();
+	});
+
+	it('multi-block drag commit moves the whole group preserving doc order', () => {
+		const { editor, container, cleanup } = setupMulti(['a', 'b', 'c', 'd']);
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		const blocks = Array.from(container.querySelectorAll('[data-block-id]')) as HTMLElement[];
+		// Select blocks a + b (indices 0,1).
+		selectViaHandle(blocks[0]!);
+		selectViaHandle(blocks[1]!, { shiftKey: true });
+		expect(selectedIds(container)).toHaveLength(2);
+		// Simulate drag start on block 0, drop after block 3 ('d').
+		const id0 = blocks[0]!.getAttribute('data-block-id')!;
+		root.dispatchEvent(new CustomEvent('plim:dragstart', { bubbles: true, detail: { id: id0 } }));
+		// Move drop indicator to block 3.
+		const targetEl = blocks[3]!;
+		const r = targetEl.getBoundingClientRect();
+		root.dispatchEvent(new CustomEvent('plim:custom-drag-move', { bubbles: true, detail: { clientX: r.left + 10, clientY: r.bottom - 1 } }));
+		root.dispatchEvent(new CustomEvent('plim:custom-drag-end', { bubbles: true, detail: { cancelled: false } }));
+		const order = editor.getState().doc.children.map((b) => (b.text?.[0] as { text?: string } | undefined)?.text);
+		// 'a' and 'b' moved to after 'd'.
+		expect(order).toEqual(['c', 'd', 'a', 'b']);
+		cleanup();
+	});
+
+	it('marquee drag in empty space selects intersecting blocks', () => {
+		const { container, cleanup } = setupMulti();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		// Make root tall + give blocks predictable layout
+		root.style.minHeight = '600px';
+		const blocks = Array.from(container.querySelectorAll('[data-block-id]')) as HTMLElement[];
+		const r0 = blocks[0]!.getBoundingClientRect();
+		const r2 = blocks[2]!.getBoundingClientRect();
+		// Pointerdown on root background at x=2 (left gutter), y above first block top.
+		const startX = r0.left + 2;
+		const startY = r0.top + 2;
+		const endX = r2.right - 2;
+		const endY = r2.bottom - 2;
+		root.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerId: 99, clientX: startX, clientY: startY }));
+		// Dispatch a move that exceeds the threshold (so marquee starts).
+		root.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, cancelable: true, pointerId: 99, clientX: endX, clientY: endY }));
+		root.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, button: 0, pointerId: 99, clientX: endX, clientY: endY }));
+		const ids = selectedIds(container);
+		// Should select at least blocks 0..2; block 3 may or may not depending on rect.
+		expect(ids.length).toBeGreaterThanOrEqual(3);
+		expect(ids).toContain(blocks[0]!.getAttribute('data-block-id'));
+		expect(ids).toContain(blocks[1]!.getAttribute('data-block-id'));
+		expect(ids).toContain(blocks[2]!.getAttribute('data-block-id'));
+		cleanup();
+	});
+
+});

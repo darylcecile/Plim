@@ -194,7 +194,7 @@ h3.plim-block-heading[data-empty="true"][data-caret-active="true"] [data-block-c
 .plim-block-quote[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
 	content: "Empty quote";
 }
-pre.plim-block-code[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
+.plim-block-code[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
 	content: "Type code…";
 }
 
@@ -293,8 +293,10 @@ h3.plim-block-heading { font-size: 1.25em; }
 	margin-bottom: 6px;
 }
 
-/* Code block */
-pre.plim-block-code {
+/* Code block — wrapper is a <div> (so drag handles in the negative-margin
+   gutter aren't clipped); the inner <pre> owns the scrollable code-look
+   styling. */
+.plim-block-code > pre {
 	background: var(--code-bg);
 	border-radius: 4px;
 	padding: 16px;
@@ -303,8 +305,9 @@ pre.plim-block-code {
 	line-height: 1.4;
 	overflow-x: auto;
 	white-space: pre-wrap;
+	margin: 0;
 }
-pre.plim-block-code [data-block-content] {
+.plim-block-code pre [data-block-content] {
 	display: block;
 }
 

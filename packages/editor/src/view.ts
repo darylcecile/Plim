@@ -103,120 +103,210 @@ export function mountView(opts: ViewOptions): View {
 	let composing = false;
 	let updating = false;
 
-	// ---- Block selection (atomic blocks like image/divider) ----
-	// When the user clicks an atomic block (no `text` field) or arrows
-	// into one from a neighbouring text block, we put the editor into
-	// "block-selected" mode: a CSS outline is drawn on the wrapper,
-	// the DOM caret is removed, and Backspace/Delete removes the block.
-	// This is purely view-layer state — never persisted into the doc's
-	// `selection` (which is a text-range selection model).
-	let selectedBlockId: string | null = null;
+	// ---- Block selection (multi-block) ----
+	// View-layer selection state: a Set of currently-selected block ids,
+	// plus a separate anchor (pivot for shift+click range / shift+arrow
+	// extension) and active id (cursor end for arrow extension). Never
+	// persisted into the doc's `selection` (which is a text-range model).
+	// Visualised via `data-plim-block-selected="true"` on each wrapper.
+	const selection: { ids: Set<string>; anchorId: string | null; activeId: string | null } = {
+		ids: new Set<string>(),
+		anchorId: null,
+		activeId: null,
+	};
 	function blockElById(id: string): HTMLElement | null {
-		// Use attribute selector with quoted value so ids with special
-		// characters don't break the query.
 		return root.querySelector<HTMLElement>(`[${DATA_BLOCK_ID}="${cssAttrEscape(id)}"]`);
 	}
-	function setBlockSelected(id: string | null) {
-		if (selectedBlockId === id) return;
-		if (selectedBlockId) {
-			const prev = blockElById(selectedBlockId);
-			prev?.removeAttribute('data-plim-block-selected');
+	function applySelectionAttrs() {
+		// Re-stamp `data-plim-block-selected` on every wrapper from the
+		// current `selection.ids` set. Strips the attribute from any
+		// wrappers no longer in the set. Cheap because there are
+		// typically very few selected blocks.
+		for (const b of root.querySelectorAll('[data-plim-block-selected="true"]')) {
+			const id = b.getAttribute(DATA_BLOCK_ID);
+			if (!id || !selection.ids.has(id)) b.removeAttribute('data-plim-block-selected');
 		}
-		selectedBlockId = id;
-		if (id) {
-			const next = blockElById(id);
-			next?.setAttribute('data-plim-block-selected', 'true');
-			// Drop the DOM text caret so two selection visuals don't compete.
+		for (const id of selection.ids) {
+			const el = blockElById(id);
+			if (el && el.getAttribute('data-plim-block-selected') !== 'true') {
+				el.setAttribute('data-plim-block-selected', 'true');
+			}
+		}
+	}
+	function selectionSet(ids: Iterable<string>, anchorId: string | null = null, activeId: string | null = null) {
+		selection.ids = new Set(ids);
+		selection.anchorId = anchorId;
+		selection.activeId = activeId;
+		if (selection.ids.size > 0) {
+			// Drop the DOM caret + steal focus when the selection is
+			// non-empty so subsequent keydowns route to root.
 			root.ownerDocument.getSelection()?.removeAllRanges();
-			// Move keyboard focus to the root so subsequent keydowns route
-			// here even if the user's last interaction was in an isolated
-			// caption (which would otherwise keep DOM focus).
 			root.focus({ preventScroll: true });
 		}
+		applySelectionAttrs();
+	}
+	function selectionClear() {
+		if (selection.ids.size === 0 && !selection.anchorId && !selection.activeId) return;
+		selectionSet([]);
+	}
+	function selectionAdd(id: string) {
+		if (selection.ids.has(id)) return;
+		selection.ids.add(id);
+		if (selection.anchorId === null) selection.anchorId = id;
+		selection.activeId = id;
+		applySelectionAttrs();
+		root.ownerDocument.getSelection()?.removeAllRanges();
+		root.focus({ preventScroll: true });
+	}
+	function selectionToggle(id: string) {
+		if (selection.ids.has(id)) {
+			selection.ids.delete(id);
+			if (selection.anchorId === id) selection.anchorId = selection.ids.values().next().value ?? null;
+			if (selection.activeId === id) selection.activeId = selection.anchorId;
+		} else {
+			selection.ids.add(id);
+			if (selection.anchorId === null) selection.anchorId = id;
+			selection.activeId = id;
+		}
+		applySelectionAttrs();
+		root.ownerDocument.getSelection()?.removeAllRanges();
+		root.focus({ preventScroll: true });
+	}
+	function selectionReplaceWith(id: string) {
+		selectionSet([id], id, id);
+	}
+	function selectionRange(targetId: string) {
+		// Shift+click / shift+arrow target: select every block from the
+		// anchor through `targetId` (inclusive) in flat-document order.
+		// If there's no anchor, behave like a plain click.
+		if (!selection.anchorId) return selectionReplaceWith(targetId);
+		const flat = flattenBlocks(opts.getState().doc);
+		const aIdx = flat.findIndex((e) => e.block.id === selection.anchorId);
+		const tIdx = flat.findIndex((e) => e.block.id === targetId);
+		if (aIdx < 0 || tIdx < 0) return selectionReplaceWith(targetId);
+		const [lo, hi] = aIdx <= tIdx ? [aIdx, tIdx] : [tIdx, aIdx];
+		const ids: string[] = [];
+		for (let i = lo; i <= hi; i++) ids.push(flat[i]!.block.id);
+		// Preserve the existing anchor; active becomes the click target.
+		selectionSet(ids, selection.anchorId, targetId);
 	}
 	function reapplyBlockSelectedAfterRender() {
-		// Render may have wiped/recreated wrappers; re-stamp the attribute
-		// on whichever wrapper now hosts the selected id. If the id no
-		// longer exists in the doc (e.g. block was removed), clear.
-		for (const b of root.querySelectorAll('[data-plim-block-selected="true"]')) b.removeAttribute('data-plim-block-selected');
-		if (!selectedBlockId) return;
-		const el = blockElById(selectedBlockId);
-		if (el) el.setAttribute('data-plim-block-selected', 'true');
-		else selectedBlockId = null;
+		// After a render that may have wiped/recreated wrappers, re-stamp
+		// the attribute on whichever wrapper now hosts each selected id,
+		// and prune ids that no longer exist in the doc (e.g. blocks
+		// removed by the transaction we just rendered).
+		const liveIds = new Set<string>();
+		const stateNow = opts.getState();
+		for (const e of flattenBlocks(stateNow.doc)) liveIds.add(e.block.id);
+		const next: string[] = [];
+		for (const id of selection.ids) if (liveIds.has(id)) next.push(id);
+		selection.ids = new Set(next);
+		if (selection.anchorId && !liveIds.has(selection.anchorId)) selection.anchorId = next[0] ?? null;
+		if (selection.activeId && !liveIds.has(selection.activeId)) selection.activeId = selection.anchorId;
+		applySelectionAttrs();
 	}
 
-	function deleteSelectedBlock() {
-		const id = selectedBlockId;
-		if (!id) return;
+	function deleteSelectedBlocks() {
+		if (selection.ids.size === 0) return;
 		const state = opts.getState();
-		const path = pathOfBlockId(state.doc.children, id, []);
-		if (!path) {
-			selectedBlockId = null;
+		// Find paths for every selected id, then remove in reverse-path
+		// order so earlier paths stay valid as later ones are spliced
+		// out. Caret lands at the end of the previous flat block of the
+		// FIRST removed (top-most), or start of the next.
+		const flat = flattenBlocks(state.doc);
+		const targets = flat.filter((e) => selection.ids.has(e.block.id));
+		if (targets.length === 0) {
+			selectionClear();
 			return;
 		}
-		// Pick a sensible caret target *before* the removal so we know
-		// where to land. Prefer the previous flat block; fall back to
-		// the next; if neither exists, leave the empty-doc invariant up
-		// to the editor (which will keep an empty paragraph).
-		const flat = flattenBlocks(state.doc);
-		const idx = flat.findIndex((e) => pathsEqual(e.path, path));
-		const prevEntry = idx > 0 ? flat[idx - 1] : undefined;
-		const nextEntry = idx >= 0 ? flat[idx + 1] : undefined;
+		const firstFlatIdx = flat.findIndex((e) => e.block.id === targets[0]!.block.id);
+		const prevEntry = firstFlatIdx > 0 ? flat[firstFlatIdx - 1] : undefined;
+		const lastFlatIdx = flat.findIndex((e) => e.block.id === targets[targets.length - 1]!.block.id);
+		const nextEntry = lastFlatIdx >= 0 && lastFlatIdx + 1 < flat.length ? flat[lastFlatIdx + 1] : undefined;
+		// Only consider next-entry as a fallback if it's NOT itself selected.
+		const nextEntrySafe = nextEntry && !selection.ids.has(nextEntry.block.id) ? nextEntry : undefined;
 		const editor = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor;
 		const tx = editor.createTransaction();
-		tx.removeBlock(path);
-		// After removal, paths shift. The previous block's path is
-		// unchanged; the next block's path drops by 1 at the level we
-		// removed from. Compute the post-removal target lazily.
-		if (prevEntry) {
-			const target = prevEntry.path;
-			const tgtBlock = prevEntry.block;
-			const off = tgtBlock.text !== undefined ? blockTextLength(tgtBlock) : 0;
-			tx.setSelection({ anchor: { path: target, offset: off }, head: { path: target, offset: off } });
-		} else if (nextEntry) {
-			// Shift the next path down by one at the removed-from level.
-			const removedAtLevel = path.length - 1;
-			const next = nextEntry.path.slice();
-			if (next.length > removedAtLevel && next[removedAtLevel]! > path[removedAtLevel]!) {
-				next[removedAtLevel] = next[removedAtLevel]! - 1;
-			}
-			tx.setSelection({ anchor: { path: next, offset: 0 }, head: { path: next, offset: 0 } });
+		// Sort targets by path descending (deepest/last first) for safe removal.
+		const removeOrder = [...targets].sort((a, b) => comparePaths(b.path, a.path));
+		for (const t of removeOrder) tx.removeBlock(t.path);
+		if (prevEntry && !selection.ids.has(prevEntry.block.id)) {
+			const off = prevEntry.block.text !== undefined ? blockTextLength(prevEntry.block) : 0;
+			tx.setSelection({ anchor: { path: prevEntry.path, offset: off }, head: { path: prevEntry.path, offset: off } });
+		} else if (nextEntrySafe) {
+			// Approximate post-removal path: count how many selected blocks
+			// share each ancestor segment of nextEntry.path and shift down.
+			const adjusted = adjustPathAfterRemovals(nextEntrySafe.path, targets.map((t) => t.path));
+			tx.setSelection({ anchor: { path: adjusted, offset: 0 }, head: { path: adjusted, offset: 0 } });
 		}
 		tx.commit();
-		// Selection state will reapply via render(); clear our view-side
-		// flag and let the caret in the doc selection take over.
-		selectedBlockId = null;
+		selectionClear();
 	}
 
-	function moveCaretRelativeToSelected(direction: 'before' | 'after') {
-		const id = selectedBlockId;
-		if (!id) return;
+	function comparePaths(a: readonly number[], b: readonly number[]): number {
+		const min = Math.min(a.length, b.length);
+		for (let i = 0; i < min; i++) {
+			if (a[i]! !== b[i]!) return a[i]! - b[i]!;
+		}
+		return a.length - b.length;
+	}
+	function adjustPathAfterRemovals(target: readonly number[], removed: readonly (readonly number[])[]): number[] {
+		// For each removed path, if it shares the same parent as `target`
+		// at the same depth, and its index is less than target's at that
+		// depth, the target's index drops by one.
+		const result = target.slice();
+		for (const r of removed) {
+			if (r.length > result.length) continue;
+			const parentDepth = r.length - 1;
+			const sameParent = r.slice(0, parentDepth).every((seg, i) => seg === result[i]);
+			if (!sameParent) continue;
+			if (r[parentDepth]! < result[parentDepth]!) result[parentDepth] = result[parentDepth]! - 1;
+		}
+		return result;
+	}
+
+	function moveCaretFromBlockSelection(direction: 'before' | 'after') {
+		if (selection.ids.size === 0) return;
 		const state = opts.getState();
-		const path = pathOfBlockId(state.doc.children, id, []);
-		if (!path) {
-			selectedBlockId = null;
-			return;
-		}
 		const flat = flattenBlocks(state.doc);
-		const idx = flat.findIndex((e) => pathsEqual(e.path, path));
+		// Use first/last selected (in flat order) as the boundary, depending on direction.
+		const selFlat = flat.filter((e) => selection.ids.has(e.block.id));
+		if (selFlat.length === 0) {
+			selectionClear();
+			return;
+		}
+		const boundary = direction === 'before' ? selFlat[0]! : selFlat[selFlat.length - 1]!;
+		const idx = flat.findIndex((e) => e.block.id === boundary.block.id);
 		const target = direction === 'before' ? (idx > 0 ? flat[idx - 1] : undefined) : (idx >= 0 ? flat[idx + 1] : undefined);
-		if (!target) {
-			// Edge of doc — just clear selection so user knows nothing happened.
-			setBlockSelected(null);
-			return;
-		}
-		// Atomic neighbour: move block-selection laterally.
+		if (!target) return selectionClear();
+		// Atomic neighbour: collapse selection to it.
 		if (target.block.text === undefined) {
-			setBlockSelected(target.block.id);
+			selectionReplaceWith(target.block.id);
 			return;
 		}
-		// Text neighbour: place caret at end (going before) or start (going after).
 		const off = direction === 'before' ? blockTextLength(target.block) : 0;
 		const editor = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor;
 		const tx = editor.createTransaction();
 		tx.setSelection({ anchor: { path: target.path, offset: off }, head: { path: target.path, offset: off } });
 		tx.commit();
-		setBlockSelected(null);
+		selectionClear();
+	}
+
+	function selectionExtend(direction: 'before' | 'after') {
+		if (selection.ids.size === 0 || !selection.anchorId) return;
+		const state = opts.getState();
+		const flat = flattenBlocks(state.doc);
+		const activeIdx = flat.findIndex((e) => e.block.id === (selection.activeId ?? selection.anchorId));
+		if (activeIdx < 0) return;
+		const nextIdx = direction === 'before' ? Math.max(0, activeIdx - 1) : Math.min(flat.length - 1, activeIdx + 1);
+		if (nextIdx === activeIdx) return; // edge of doc
+		const newActiveId = flat[nextIdx]!.block.id;
+		// Recompute the inclusive range from anchor → new active.
+		const aIdx = flat.findIndex((e) => e.block.id === selection.anchorId);
+		const [lo, hi] = aIdx <= nextIdx ? [aIdx, nextIdx] : [nextIdx, aIdx];
+		const ids: string[] = [];
+		for (let i = lo; i <= hi; i++) ids.push(flat[i]!.block.id);
+		selectionSet(ids, selection.anchorId, newActiveId);
 	}
 
 	function cssAttrEscape(s: string): string {
@@ -321,15 +411,121 @@ export function mountView(opts: ViewOptions): View {
 	// text blocks, no-op on atomic ones). Isolated subtrees (caption,
 	// resize handle, toolbar) get native handling and must NOT clear
 	// selection on a sibling.
+	// Marquee (rubber-band) selection. Pointerdown in the editor's
+	// "empty" area — root background, between/below blocks, or in the
+	// left gutter — starts a drag that builds a multi-block selection
+	// by hit-testing each block's bounding box against the marquee
+	// rect. Suppresses the native caret placement so the user gets a
+	// clean rubber-band gesture matching Notion.
+	let marquee:
+		| {
+				pointerId: number;
+				startX: number;
+				startY: number;
+				overlay: HTMLDivElement;
+				baseSet: Set<string>; // selection at marquee-start, for additive shift+drag
+				additive: boolean;
+		  }
+		| null = null;
 	const onRootPointerDown = (ev: PointerEvent) => {
 		const targetNode = ev.target as Node | null;
 		if (isolatedAncestor(targetNode)) return;
 		// The drag handle's own pointerdown handler stopPropagation's
 		// before this listener sees it (so a handle click won't clear
 		// the selection it just established).
-		setBlockSelected(null);
+		const targetEl = targetNode instanceof Element ? targetNode : null;
+		const inBlock = targetEl?.closest?.(`[${DATA_BLOCK_ID}]`);
+		const inHandle = targetEl?.closest?.('.plim-block-handles');
+		if (!opts.readonly && !inBlock && !inHandle && ev.button === 0) {
+			// Empty-space click. Start a marquee. Don't preventDefault
+			// yet — we only do that on the first pointermove that
+			// crosses the threshold so an idle click still clears
+			// selection like before.
+			const overlay = document.createElement('div');
+			overlay.className = 'plim-marquee';
+			overlay.setAttribute('contenteditable', 'false');
+			overlay.style.position = 'absolute';
+			overlay.style.pointerEvents = 'none';
+			overlay.style.zIndex = '5';
+			overlay.style.background = 'rgba(35,131,226,0.10)';
+			overlay.style.border = '1px solid rgba(35,131,226,0.35)';
+			overlay.style.borderRadius = '2px';
+			overlay.style.display = 'none';
+			root.appendChild(overlay);
+			marquee = {
+				pointerId: ev.pointerId,
+				startX: ev.clientX,
+				startY: ev.clientY,
+				overlay,
+				baseSet: ev.shiftKey || ev.metaKey || ev.ctrlKey ? new Set(selection.ids) : new Set(),
+				additive: ev.shiftKey || ev.metaKey || ev.ctrlKey,
+			};
+			try {
+				root.setPointerCapture(ev.pointerId);
+			} catch {
+				/* ignored in some test environments */
+			}
+		}
+		if (!marquee) selectionClear();
+	};
+	const onRootPointerMove = (ev: PointerEvent) => {
+		if (!marquee || ev.pointerId !== marquee.pointerId) return;
+		const dx = ev.clientX - marquee.startX;
+		const dy = ev.clientY - marquee.startY;
+		// Don't clear caret/selection until we've moved past the threshold —
+		// idle pointerdowns shouldn't visually start a marquee.
+		const threshold = 16;
+		const movedEnough = dx * dx + dy * dy > threshold;
+		if (!movedEnough) return;
+		// First crossing of the threshold: prevent the default text
+		// selection / caret placement and clear any prior selection so
+		// we have a clean canvas (unless additive).
+		if (marquee.overlay.style.display === 'none') {
+			marquee.overlay.style.display = 'block';
+			ev.preventDefault();
+			if (!marquee.additive) selectionClear();
+			root.ownerDocument.getSelection()?.removeAllRanges();
+		}
+		const rootRect = root.getBoundingClientRect();
+		const x1 = Math.min(marquee.startX, ev.clientX);
+		const x2 = Math.max(marquee.startX, ev.clientX);
+		const y1 = Math.min(marquee.startY, ev.clientY);
+		const y2 = Math.max(marquee.startY, ev.clientY);
+		marquee.overlay.style.left = `${x1 - rootRect.left}px`;
+		marquee.overlay.style.top = `${y1 - rootRect.top}px`;
+		marquee.overlay.style.width = `${x2 - x1}px`;
+		marquee.overlay.style.height = `${y2 - y1}px`;
+		// Hit-test top-level blocks only — selecting nested blocks via
+		// marquee tends to feel unpredictable to users (and parent
+		// selection visually covers descendants anyway).
+		const ids = new Set<string>(marquee.baseSet);
+		for (const el of root.querySelectorAll<HTMLElement>(`:scope > [${DATA_BLOCK_ID}]`)) {
+			const r = el.getBoundingClientRect();
+			const intersects = r.right >= x1 && r.left <= x2 && r.bottom >= y1 && r.top <= y2;
+			if (intersects) {
+				const id = el.getAttribute(DATA_BLOCK_ID);
+				if (id) ids.add(id);
+			}
+		}
+		// Anchor = first block to enter the marquee, active = last;
+		// arbitrary but consistent for shift+arrow extension afterwards.
+		const arr = Array.from(ids);
+		selectionSet(arr, arr[0] ?? null, arr[arr.length - 1] ?? null);
+	};
+	const onRootPointerUp = (ev: PointerEvent) => {
+		if (!marquee || ev.pointerId !== marquee.pointerId) return;
+		try {
+			root.releasePointerCapture(marquee.pointerId);
+		} catch {
+			/* noop */
+		}
+		marquee.overlay.remove();
+		marquee = null;
 	};
 	root.addEventListener('pointerdown', onRootPointerDown);
+	root.addEventListener('pointermove', onRootPointerMove);
+	root.addEventListener('pointerup', onRootPointerUp);
+	root.addEventListener('pointercancel', onRootPointerUp);
 
 	const onBeforeInput = (ev: InputEvent) => {
 		if (composing) return;
@@ -430,34 +626,50 @@ export function mountView(opts: ViewOptions): View {
 		// (for a printable key) lets the action panel / shortcut layer
 		// run; users typically don't expect to start typing into nothing
 		// while a block is selected, so we don't auto-create a paragraph.
-		if (selectedBlockId !== null) {
+		if (selection.ids.size > 0) {
 			if (ev.key === 'Escape') {
 				ev.preventDefault();
-				setBlockSelected(null);
+				selectionClear();
 				return;
 			}
 			if (ev.key === 'Backspace' || ev.key === 'Delete') {
 				ev.preventDefault();
-				deleteSelectedBlock();
+				deleteSelectedBlocks();
+				return;
+			}
+			// Shift+ArrowUp/Down extends the selection from the anchor.
+			if (ev.shiftKey && (ev.key === 'ArrowUp' || ev.key === 'ArrowDown')) {
+				ev.preventDefault();
+				selectionExtend(ev.key === 'ArrowUp' ? 'before' : 'after');
 				return;
 			}
 			if (ev.key === 'ArrowUp' || ev.key === 'ArrowLeft') {
 				ev.preventDefault();
-				moveCaretRelativeToSelected('before');
+				moveCaretFromBlockSelection('before');
 				return;
 			}
 			if (ev.key === 'ArrowDown' || ev.key === 'ArrowRight') {
 				ev.preventDefault();
-				moveCaretRelativeToSelected('after');
+				moveCaretFromBlockSelection('after');
 				return;
 			}
 			// Modifiers alone shouldn't drop the selection (user might be
 			// composing a shortcut).
 			if (ev.key === 'Shift' || ev.key === 'Control' || ev.key === 'Meta' || ev.key === 'Alt') return;
+			// Cmd/Ctrl+A while in block-selection mode: select all blocks.
+			if ((ev.metaKey || ev.ctrlKey) && (ev.key === 'a' || ev.key === 'A')) {
+				ev.preventDefault();
+				const flat = flattenBlocks(opts.getState().doc);
+				if (flat.length > 0) {
+					const ids = flat.map((e) => e.block.id);
+					selectionSet(ids, ids[0]!, ids[ids.length - 1]!);
+				}
+				return;
+			}
 			// Anything else: drop block selection and fall through to
 			// normal handling (no caret will be set; the action layer
 			// can still react to shortcuts).
-			setBlockSelected(null);
+			selectionClear();
 		}
 		// Arrow into atomic neighbours from text. ArrowUp at offset 0
 		// when the previous sibling is atomic selects it. ArrowDown at
@@ -479,7 +691,7 @@ export function mountView(opts: ViewOptions): View {
 						const prev = blockAt(state.doc.children, prevPath);
 						if (prev && prev.text === undefined) {
 							ev.preventDefault();
-							setBlockSelected(prev.id);
+							selectionReplaceWith(prev.id);
 							return;
 						}
 					}
@@ -490,7 +702,7 @@ export function mountView(opts: ViewOptions): View {
 					const next = idx >= 0 ? flat[idx + 1] : undefined;
 					if (next && next.block.text === undefined) {
 						ev.preventDefault();
-						setBlockSelected(next.block.id);
+						selectionReplaceWith(next.block.id);
 						return;
 					}
 				}
@@ -581,6 +793,11 @@ export function mountView(opts: ViewOptions): View {
 	// scoped flag is reliable and doesn't preclude the type check below for
 	// cross-tab/cross-document drops.
 	let activeDragSourceId: string | null = null;
+	// When the dragged block is part of a multi-block selection, this
+	// holds the snapshot of selected ids at drag-start so the commit
+	// moves the whole group as a unit. Cleared on drag end alongside
+	// `activeDragSourceId`.
+	let activeDragSourceIds: string[] | null = null;
 	function clearDropIndicator() {
 		if (dropIndicator) {
 			dropIndicator.remove();
@@ -607,26 +824,79 @@ export function mountView(opts: ViewOptions): View {
 		dropTarget = { el: targetEl, before };
 	}
 
-	function commitMove(sourceId: string, targetEl: HTMLElement, before: boolean): boolean {
+	function commitMove(sourceIdsInput: string | string[], targetEl: HTMLElement, before: boolean): boolean {
+		// Multi-block drag commit. `sourceIdsInput` may be a single id
+		// (legacy callers) or an array; we normalise and de-duplicate.
+		// The result places every source block at the drop point in
+		// their original document order, regardless of whether the user
+		// dragged a top-of-selection or middle-of-selection block.
 		const targetId = targetEl.getAttribute(DATA_BLOCK_ID);
-		if (!targetId || sourceId === targetId) return false;
+		if (!targetId) return false;
+		const initial = Array.isArray(sourceIdsInput) ? sourceIdsInput : [sourceIdsInput];
+		const sourceIds = Array.from(new Set(initial)).filter((id) => id !== targetId);
+		if (sourceIds.length === 0) return false;
 		const state = opts.getState();
-		const fromPath = pathOfBlockId(state.doc.children, sourceId, []);
-		const targetPath = pathOfBlockId(state.doc.children, targetId, []);
-		if (!fromPath || !targetPath) return false;
-		// Disallow dropping into self/descendant
-		if (targetPath.length >= fromPath.length && fromPath.every((seg, i) => targetPath[i] === seg)) return false;
-		const sameParent = fromPath.length === targetPath.length && fromPath.slice(0, -1).every((seg, i) => targetPath[i] === seg);
-		const targetLast = targetPath[targetPath.length - 1]!;
-		let insertIdx = before ? targetLast : targetLast + 1;
-		if (sameParent) {
-			const fromLast = fromPath[fromPath.length - 1]!;
-			if (fromLast < targetLast) insertIdx -= 1;
-			if (insertIdx === fromLast) return false; // no-op
+		// Resolve every source's current path and sort by document order
+		// so we insert at the destination in a sensible sequence.
+		type Resolved = { id: string; path: number[]; block: BlockNode };
+		const resolved: Resolved[] = [];
+		for (const id of sourceIds) {
+			const p = pathOfBlockId(state.doc.children, id, []);
+			if (!p) continue;
+			const b = blockAt(state.doc.children, p);
+			if (!b) continue;
+			resolved.push({ id, path: p, block: b });
 		}
-		const toPath = [...targetPath.slice(0, -1), insertIdx];
+		if (resolved.length === 0) return false;
+		const targetPath = pathOfBlockId(state.doc.children, targetId, []);
+		if (!targetPath) return false;
+		// Disallow dropping into any source's own subtree.
+		for (const s of resolved) {
+			if (targetPath.length >= s.path.length && s.path.every((seg, i) => targetPath[i] === seg)) return false;
+		}
+		// Sort sources by document order for both removal-order
+		// computation and the insert sequence at destination.
+		resolved.sort((a, b) => comparePaths(a.path, b.path));
+		// Compute destination parent path + insert index, accounting for
+		// removals that will shift the target.
+		const targetParent = targetPath.slice(0, -1);
+		const targetLast = targetPath[targetPath.length - 1]!;
+		const removedPaths = resolved.map((r) => r.path);
+		// Adjust target's last index by how many sibling-removals precede it
+		// at the target's parent level.
+		let adjustedTargetLast = targetLast;
+		for (const rp of removedPaths) {
+			if (rp.length !== targetPath.length) continue;
+			const sameParent = rp.slice(0, -1).every((seg, i) => targetParent[i] === seg);
+			if (!sameParent) continue;
+			if (rp[rp.length - 1]! < adjustedTargetLast) adjustedTargetLast--;
+		}
+		// Adjust the parent path itself for any removals at shallower
+		// levels that are ancestors of/before the target.
+		const adjustedParent = adjustPathAfterRemovals(targetParent, removedPaths);
+		const insertBaseIdx = before ? adjustedTargetLast : adjustedTargetLast + 1;
+		// Detect single-block no-op: same parent and dropping in current location.
+		if (resolved.length === 1) {
+			const r = resolved[0]!;
+			const sameParent = r.path.length === targetPath.length && r.path.slice(0, -1).every((seg, i) => targetPath[i] === seg);
+			if (sameParent) {
+				const fromLast = r.path[r.path.length - 1]!;
+				let insertIdx = before ? targetLast : targetLast + 1;
+				if (fromLast < targetLast) insertIdx -= 1;
+				if (insertIdx === fromLast) return false;
+			}
+		}
 		const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
-		tx.moveBlock(fromPath, toPath);
+		// Remove in reverse document order so earlier paths stay valid.
+		const removeOrder = [...resolved].sort((a, b) => comparePaths(b.path, a.path));
+		for (const r of removeOrder) tx.removeBlock(r.path);
+		// Insert each source at the destination in document order.
+		// Snapshot block content before transaction is committed so we
+		// don't risk reading mutated references later.
+		for (let i = 0; i < resolved.length; i++) {
+			const insertPath = [...adjustedParent, insertBaseIdx + i];
+			tx.insertBlock(insertPath, resolved[i]!.block);
+		}
 		tx.commit();
 		return true;
 	}
@@ -649,14 +919,16 @@ export function mountView(opts: ViewOptions): View {
 		const sourceId = activeDragSourceId ?? ev.dataTransfer?.getData('application/x-plim-block');
 		if (!sourceId || !dropTarget) {
 			activeDragSourceId = null;
+			activeDragSourceIds = null;
 			return clearDropIndicator();
 		}
 		ev.preventDefault();
 		const target = dropTarget.el;
 		const before = dropTarget.before;
 		clearDropIndicator();
-		commitMove(sourceId, target, before);
+		commitMove(activeDragSourceIds ?? [sourceId], target, before);
 		activeDragSourceId = null;
+		activeDragSourceIds = null;
 	};
 	const onDragLeave = (ev: DragEvent) => {
 		if (ev.target === root || (ev.relatedTarget && !root.contains(ev.relatedTarget as Node))) {
@@ -669,10 +941,22 @@ export function mountView(opts: ViewOptions): View {
 	root.addEventListener('dragend', clearDropIndicator);
 	const onPlimDragStart = (ev: Event) => {
 		const detail = (ev as CustomEvent<{ id: string }>).detail;
-		if (detail?.id) activeDragSourceId = detail.id;
+		if (!detail?.id) return;
+		activeDragSourceId = detail.id;
+		// If the dragged block is part of the current multi-selection,
+		// drag the whole group; otherwise treat this as a single-block
+		// drag and replace the selection so the visual selection
+		// matches the drag set (Notion's behaviour).
+		if (selection.ids.has(detail.id) && selection.ids.size > 1) {
+			activeDragSourceIds = Array.from(selection.ids);
+		} else {
+			activeDragSourceIds = [detail.id];
+			if (!selection.ids.has(detail.id)) selectionReplaceWith(detail.id);
+		}
 	};
 	const onPlimDragEnd = () => {
 		activeDragSourceId = null;
+		activeDragSourceIds = null;
 		clearDropIndicator();
 	};
 	root.addEventListener('plim:dragstart', onPlimDragStart);
@@ -696,9 +980,10 @@ export function mountView(opts: ViewOptions): View {
 	const onPlimCustomDragCommit = (ev: Event) => {
 		const cancelled = (ev as CustomEvent<{ cancelled?: boolean }>).detail?.cancelled;
 		if (!cancelled && activeDragSourceId && dropTarget) {
-			commitMove(activeDragSourceId, dropTarget.el, dropTarget.before);
+			commitMove(activeDragSourceIds ?? [activeDragSourceId], dropTarget.el, dropTarget.before);
 		}
 		activeDragSourceId = null;
+		activeDragSourceIds = null;
 		clearDropIndicator();
 	};
 	root.addEventListener('plim:custom-drag-move', onPlimCustomDragMove);
@@ -709,10 +994,21 @@ export function mountView(opts: ViewOptions): View {
 	// `[data-plim-block-selected="true"]`). Subsequent text-block click
 	// or Escape clears it.
 	const onHandleClick = (e: Event) => {
-		const detail = (e as CustomEvent<{ id?: string }>).detail;
+		const detail = (e as CustomEvent<{ id?: string; shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean }>).detail;
 		const id = detail?.id ?? null;
 		if (!id) return;
-		setBlockSelected(id);
+		// Shift = inclusive range from anchor (or just-clicked id if no anchor).
+		// Meta/Ctrl = toggle this id in/out of the set.
+		// Plain = replace selection with this single id (matches Notion).
+		if (detail?.shiftKey && selection.ids.size > 0) {
+			selectionRange(id);
+			return;
+		}
+		if (detail?.metaKey || detail?.ctrlKey) {
+			selectionToggle(id);
+			return;
+		}
+		selectionReplaceWith(id);
 	};
 	root.addEventListener('plim:handle-click', onHandleClick);
 	root.style.position = 'relative';
@@ -728,6 +1024,9 @@ export function mountView(opts: ViewOptions): View {
 		destroy() {
 			root.ownerDocument.removeEventListener('selectionchange', onSelectionChange);
 			root.removeEventListener('pointerdown', onRootPointerDown);
+			root.removeEventListener('pointermove', onRootPointerMove);
+			root.removeEventListener('pointerup', onRootPointerUp);
+			root.removeEventListener('pointercancel', onRootPointerUp);
 			root.removeEventListener('beforeinput', onBeforeInput);
 			root.removeEventListener('keydown', onKeyDown);
 			root.removeEventListener('compositionstart', onCompositionStart);
@@ -788,7 +1087,11 @@ function tagFor(type: string, attrs: Record<string, unknown> | undefined): strin
 		case 'quote':
 			return 'div';
 		case 'code':
-			return 'pre';
+			// Wrapper is a `<div>`; the inner `<pre><code>` is built in
+			// the render switch. Using a `<div>` lets the absolutely-
+			// positioned drag handles escape `<pre>`'s `overflow-x: auto`
+			// clipping, which would otherwise hide them in the gutter.
+			return 'div';
 		case 'divider':
 			return 'div';
 		default:
@@ -928,7 +1231,7 @@ function ensureBlockHandles(el: HTMLElement, opts: ViewOptions) {
 				})
 			);
 		};
-		const finishSession = (cancelled: boolean) => {
+		const finishSession = (cancelled: boolean, mods?: { shiftKey: boolean; metaKey: boolean; ctrlKey: boolean }) => {
 			if (!session) return;
 			const wasActive = session.started;
 			const sessionId = session.id;
@@ -943,15 +1246,25 @@ function ensureBlockHandles(el: HTMLElement, opts: ViewOptions) {
 				el.dispatchEvent(new CustomEvent('plim:custom-drag-end', { bubbles: true, detail: { cancelled } }));
 			} else if (!cancelled) {
 				// Pointerup without crossing the drag threshold = a click
-				// on the handle. Notify the view so it can put the editor
-				// into block-selected mode for this block (works for both
-				// text and atomic blocks).
-				el.dispatchEvent(new CustomEvent('plim:handle-click', { bubbles: true, detail: { id: sessionId } }));
+				// on the handle. Notify the view so it can update block
+				// selection — modifier flags drive shift+click range and
+				// meta/ctrl+click toggle, matching Notion's UX.
+				el.dispatchEvent(
+					new CustomEvent('plim:handle-click', {
+						bubbles: true,
+						detail: {
+							id: sessionId,
+							shiftKey: mods?.shiftKey ?? false,
+							metaKey: mods?.metaKey ?? false,
+							ctrlKey: mods?.ctrlKey ?? false,
+						},
+					})
+				);
 			}
 		};
 		const onPointerUp = (e: PointerEvent) => {
 			if (!session || e.pointerId !== session.pointerId) return;
-			finishSession(false);
+			finishSession(false, { shiftKey: e.shiftKey, metaKey: e.metaKey, ctrlKey: e.ctrlKey });
 		};
 		const onPointerCancel = () => finishSession(true);
 		const onKey = (e: KeyboardEvent) => {
@@ -1026,15 +1339,22 @@ function updateBlockElement(el: HTMLElement, node: BlockNode, opts: ViewOptions,
 			return;
 		}
 		case 'code': {
-			// Wipe non-handle children, then mount a single <code> as content.
+			// Wipe non-handle children, then mount a `<pre><code>` pair
+			// as content. The `<pre>` carries the scrollable code-look
+			// styles (`white-space: pre-wrap; overflow-x: auto`) while
+			// the wrapper `<div>` keeps `overflow: visible` so the drag
+			// handles in `.plim-block-handles` (positioned at
+			// `left: -3rem`) aren't clipped.
 			for (const child of Array.from(el.childNodes)) {
 				if (child instanceof HTMLElement && child.classList.contains('plim-block-handles')) continue;
 				child.remove();
 			}
+			const pre = document.createElement('pre');
 			const code = document.createElement('code');
 			code.setAttribute(DATA_BLOCK_CONTENT, 'true');
 			renderTextSpans(code, node.text ?? [], opts.marks);
-			el.appendChild(code);
+			pre.appendChild(code);
+			el.appendChild(pre);
 			return;
 		}
 		case 'to_do': {
