@@ -1,5 +1,31 @@
-import { type BlockDescriptor, type MarkDescriptor, defineBlock, defineMark } from './blocks.js';
+import { type BlockDescriptor, type MarkDescriptor, type ToolbarItem, defineBlock, defineMark } from './blocks.js';
 import type { EditorHandle } from './editor-handle.js';
+import { getBlockAt } from './selection.js';
+
+// Toolbar helpers ----------------------------------------------------------
+//
+// All built-in mark toggles share the same `perform`: emit a `toggleMark`
+// op spanning the current selection. `tx.toggleMark` already handles the
+// "is on / is off" decision based on whether every span in the range
+// already carries the mark, so we don't have to recompute that here.
+function toggleMarkItem(name: string, label: string, icon?: string, shortcut?: string): ToolbarItem {
+	const item: ToolbarItem = {
+		name,
+		label,
+		group: 'mark',
+		perform: ({ state, editor }) => {
+			const tx = editor.createTransaction();
+			tx.toggleMark(name, {
+				from: { path: state.selection.anchor.path, offset: state.selection.anchor.offset },
+				to: { path: state.selection.head.path, offset: state.selection.head.offset },
+			});
+			tx.commit();
+		},
+	};
+	if (icon) item.icon = icon;
+	if (shortcut) item.shortcut = shortcut;
+	return item;
+}
 
 // Marks ---------------------------------------------------------------------
 //
@@ -12,21 +38,25 @@ import type { EditorHandle } from './editor-handle.js';
 export const boldMark = defineMark({
 	name: 'bold',
 	toDOM: () => document.createElement('strong'),
+	toolbar: toggleMarkItem('bold', 'Bold', '<b>B</b>', '⌘B'),
 });
 
 export const italicMark = defineMark({
 	name: 'italic',
 	toDOM: () => document.createElement('em'),
+	toolbar: toggleMarkItem('italic', 'Italic', '<i>I</i>', '⌘I'),
 });
 
 export const underlineMark = defineMark({
 	name: 'underline',
 	toDOM: () => document.createElement('u'),
+	toolbar: toggleMarkItem('underline', 'Underline', '<u>U</u>', '⌘U'),
 });
 
 export const strikethroughMark = defineMark({
 	name: 'strikethrough',
 	toDOM: () => document.createElement('s'),
+	toolbar: toggleMarkItem('strikethrough', 'Strikethrough', '<s>S</s>', '⌘⇧S'),
 });
 
 export const codeMark = defineMark({
@@ -36,6 +66,7 @@ export const codeMark = defineMark({
 		el.className = 'plim-inline-code';
 		return el;
 	},
+	toolbar: toggleMarkItem('code', 'Code', '<span style="font-family:monospace">&lt;&gt;</span>', '⌘E'),
 });
 
 export const linkMark = defineMark({
@@ -47,6 +78,21 @@ export const linkMark = defineMark({
 		el.setAttribute('rel', 'noreferrer');
 		el.setAttribute('target', '_blank');
 		return el;
+	},
+	// The link toolbar item swaps the toolbar for an inline URL input
+	// rather than just toggling the mark. The view-side toolbar treats
+	// items whose `name === 'link'` specially (renders the popover); the
+	// `perform` is still here as a no-op fallback in case some embedder
+	// wires up a non-toolbar invocation path.
+	toolbar: {
+		name: 'link',
+		label: 'Link',
+		icon: '🔗',
+		shortcut: '⌘K',
+		group: 'mark',
+		perform: () => {
+			/* handled by toolbar popover */
+		},
 	},
 });
 
@@ -82,12 +128,51 @@ export const paragraphBlock = defineBlock({
 	name: 'paragraph',
 	type: 'standalone',
 	supportsDecoration: true,
+	toolbar: {
+		name: 'turn-into-paragraph',
+		label: 'Text',
+		icon: '¶',
+		group: 'block',
+		priority: 0,
+		visibleWhen: (b) => b.and(['selectionNotEmpty', 'inTextBlock']),
+		activeWhen: (b) => b.blockTypeIs('paragraph'),
+		perform: ({ state, editor }) => {
+			const tx = editor.createTransaction();
+			tx.setBlockType(state.selection.head.path, 'paragraph');
+			tx.commit();
+		},
+	},
 });
+
+function headingTransform(level: 1 | 2 | 3): ToolbarItem {
+	return {
+		name: `turn-into-heading-${level}`,
+		label: `Heading ${level}`,
+		icon: `H${level}`,
+		group: 'block',
+		priority: level,
+		visibleWhen: (b) => b.and(['selectionNotEmpty', 'inTextBlock']),
+		activeWhen: (b) =>
+			b.and([
+				b.blockTypeIs('heading'),
+				b.predicate((ctx) => {
+					const blk = getBlockAt(ctx.state.doc, ctx.state.selection.head.path);
+					return !!blk && blk.type === 'heading' && (blk.attrs?.level as number | undefined) === level;
+				}, `headingLevel${level}`),
+			]),
+		perform: ({ state, editor }) => {
+			const tx = editor.createTransaction();
+			tx.setBlockType(state.selection.head.path, 'heading', { level });
+			tx.commit();
+		},
+	};
+}
 
 export const headingBlock = defineBlock({
 	name: 'heading',
 	type: 'standalone',
 	supportsDecoration: true,
+	toolbar: [headingTransform(1), headingTransform(2), headingTransform(3)],
 });
 
 export const bulletedListBlock = defineBlock({
@@ -123,6 +208,20 @@ export const quoteBlock = defineBlock({
 	type: 'standalone',
 	nestable: true,
 	supportsDecoration: true,
+	toolbar: {
+		name: 'turn-into-quote',
+		label: 'Quote',
+		icon: '❝',
+		group: 'block',
+		priority: 10,
+		visibleWhen: (b) => b.and(['selectionNotEmpty', 'inTextBlock']),
+		activeWhen: (b) => b.blockTypeIs('quote'),
+		perform: ({ state, editor }) => {
+			const tx = editor.createTransaction();
+			tx.setBlockType(state.selection.head.path, 'quote');
+			tx.commit();
+		},
+	},
 });
 
 export const codeBlock = defineBlock({

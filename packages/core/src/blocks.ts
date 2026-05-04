@@ -2,6 +2,45 @@
 
 import type { BlockNode, TextSpan } from './document.js';
 import type { EditorHandle } from './editor-handle.js';
+import type { EditorState, Transaction } from './transaction.js';
+import type { ValidationBuilders, ValidationRule } from './validation.js';
+
+/**
+ * Contributed by blocks/marks (and one day extensions) to the floating
+ * selection toolbar. Items are evaluated against the current state on
+ * every selection change; `visibleWhen` controls whether the button is
+ * shown at all, `activeWhen` toggles the highlighted "on" appearance,
+ * `disabledWhen` greys the button out without hiding it.
+ *
+ * `perform` receives a thin context: the live state, an `editor` with
+ * `createTransaction`/`dispatch`, and an `anchor` element so popover-
+ * shaped items (link URL input) can position themselves relative to
+ * their button. `close()` dismisses any open popover the toolbar owns.
+ */
+export type ToolbarItemContext = {
+	state: EditorState;
+	editor: { createTransaction(): Transaction; dispatch(tx: Transaction): void };
+	anchor: HTMLElement;
+	close(): void;
+};
+
+export type ToolbarItem = {
+	name: string;
+	/** Short visible label / tooltip. */
+	label: string;
+	/** Optional inner HTML for the button (e.g. `<b>B</b>`). Defaults to `label`. */
+	icon?: string;
+	/** Optional shortcut hint shown in the tooltip ("⌘B"). No runtime effect. */
+	shortcut?: string;
+	/** Logical group; the toolbar renders separators between groups. */
+	group?: 'mark' | 'block' | 'action' | string;
+	/** Sort within group; lower priority renders first. */
+	priority?: number;
+	visibleWhen?: (b: ValidationBuilders) => ValidationRule;
+	activeWhen?: (b: ValidationBuilders) => ValidationRule;
+	disabledWhen?: (b: ValidationBuilders) => ValidationRule;
+	perform: (ctx: ToolbarItemContext) => void | Promise<void>;
+};
 
 export type BlockPayload = {
 	id: string;
@@ -80,6 +119,14 @@ export type BlockDescriptor = {
 	 * roundtrip is lossless even across plain markdown channels.
 	 */
 	fromMarkdown?: (ctx: BlockMarkdownParseContext) => BlockMarkdownParseResult | null;
+	/**
+	 * Items this block contributes to the floating selection toolbar — most
+	 * commonly "turn into" transforms (e.g. heading levels, paragraph,
+	 * quote). Each item's `visibleWhen` decides whether it shows up. By
+	 * default the toolbar renders block items only when the selection is
+	 * non-empty; supply your own `visibleWhen` to override.
+	 */
+	toolbar?: ToolbarItem | ToolbarItem[];
 };
 
 /**
@@ -127,6 +174,17 @@ export type MarkDescriptor = {
 	name: string;
 	toDOM?: (payload: MarkPayload) => HTMLElement;
 	toComponent?: (payload: MarkPayload) => unknown;
+	/**
+	 * Items this mark contributes to the floating selection toolbar. If
+	 * omitted, the mark has no toolbar presence. The common case is a
+	 * single toggle item; multiple items are supported for marks with
+	 * variants (e.g. a future "color" mark with swatch buttons).
+	 *
+	 * Defaults applied when an item omits the corresponding rule:
+	 *   - `visibleWhen`: `and([selectionNotEmpty, blockSupportsDecoration])`
+	 *   - `activeWhen`:  `markActiveInSelection(mark.name)`
+	 */
+	toolbar?: ToolbarItem | ToolbarItem[];
 };
 
 export function defineMark(

@@ -16,6 +16,7 @@ import {
 	newId,
 } from '@plim/core';
 import { sliceFromBlockSelection, sliceFromTextRange, writeClipboardMarkdown } from './clipboard.js';
+import { mountToolbar, type ToolbarMount } from './toolbar.js';
 
 export type ViewOptions = {
 	container: HTMLElement;
@@ -24,7 +25,7 @@ export type ViewOptions = {
 	marks: MarkDescriptor[];
 	getState: () => EditorState;
 	dispatch: (tx: Transaction) => void;
-	editor: { triggerAsyncEvent: (n: string, p?: unknown) => Promise<unknown>; createTransaction(): Transaction };
+	editor: { triggerAsyncEvent: (n: string, p?: unknown) => Promise<unknown>; createTransaction(): Transaction; supportsDecoration?: (blockType: string) => boolean };
 	onKeyboardEvent: (ev: KeyboardEvent) => void;
 	onClipboardEvent: (action: 'cut' | 'copy' | 'paste', ev: ClipboardEvent) => void;
 	onBeforeInput: (text: string) => void;
@@ -398,6 +399,7 @@ export function mountView(opts: ViewOptions): View {
 		} finally {
 			updating = false;
 		}
+		toolbar?.update();
 	}
 
 	function applySelection(rootEl: HTMLElement, sel: PSelection) {
@@ -460,7 +462,11 @@ export function mountView(opts: ViewOptions): View {
 		// the host block would corrupt subsequent typing.
 		if (selectionInIsolated()) return;
 		const sel = readSelectionFromDOM();
-		if (!sel) return;
+		if (!sel) {
+			// Caret left the editor entirely — let the toolbar hide itself.
+			toolbar?.update();
+			return;
+		}
 		const state = opts.getState();
 		const cur = state.selection;
 		// avoid feedback loop
@@ -469,8 +475,13 @@ export function mountView(opts: ViewOptions): View {
 			cur.head.offset === sel.head.offset &&
 			pathsEqual(cur.anchor.path, sel.anchor.path) &&
 			pathsEqual(cur.head.path, sel.head.path)
-		)
+		) {
+			// Selection was unchanged at the doc level — but the user may
+			// still have just dragged a range that maps to the same model
+			// positions. Update the toolbar so positioning follows.
+			toolbar?.update();
 			return;
+		}
 		const t = createSelTx(opts, sel);
 		opts.dispatch(t);
 	};
@@ -1427,6 +1438,20 @@ export function mountView(opts: ViewOptions): View {
 	root.addEventListener('plim:handle-click', onHandleClick);
 	root.style.position = 'relative';
 
+	// Mount the floating selection toolbar. It lives on `document.body`,
+	// not inside the editor root, so clicking a button doesn't collapse
+	// the contenteditable selection. Items are discovered from the
+	// registered marks/blocks via their `toolbar` contributions.
+	const toolbar: ToolbarMount = mountToolbar({
+		root,
+		getState: opts.getState,
+		createTransaction: opts.editor.createTransaction.bind(opts.editor),
+		dispatch: opts.dispatch,
+		supportsDecoration: opts.editor.supportsDecoration ?? (() => true),
+		blocks: opts.blocks,
+		marks: opts.marks,
+	});
+
 	return {
 		root,
 		update(state) {
@@ -1457,6 +1482,7 @@ export function mountView(opts: ViewOptions): View {
 			root.removeEventListener('plim:custom-drag-move', onPlimCustomDragMove);
 			root.removeEventListener('plim:custom-drag-end', onPlimCustomDragCommit);
 			root.removeEventListener('plim:handle-click', onHandleClick);
+			toolbar.destroy();
 			clearDropIndicator();
 			root.remove();
 		},
@@ -1804,7 +1830,8 @@ function updateBlockElement(el: HTMLElement, node: BlockNode, opts: ViewOptions,
 		case 'divider': {
 			el.innerHTML = '';
 			el.setAttribute('contenteditable', 'false');
-			const hr = document.createElement('hr');
+			const hr = document.createElement('div');
+			hr.className = 'plim-divider';
 			el.appendChild(hr);
 			return;
 		}

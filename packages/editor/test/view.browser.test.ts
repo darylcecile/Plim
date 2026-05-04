@@ -2691,3 +2691,208 @@ describe('Backspace at start of empty paragraph with atomic prev', () => {
 		}
 	});
 });
+
+describe('Floating selection toolbar', () => {
+	let env: ReturnType<typeof setup> | null = null;
+	afterEach(() => {
+		env?.cleanup();
+		env = null;
+		// Defensive: tear down any lingering toolbars from prior tests.
+		for (const t of Array.from(document.querySelectorAll('.plim-toolbar'))) t.remove();
+	});
+
+	function getToolbar(): HTMLElement | null {
+		return document.querySelector('.plim-toolbar');
+	}
+
+	function focusEditor(root: HTMLElement) {
+		root.focus();
+	}
+
+	it('mounts a hidden toolbar element on document.body when the editor mounts', () => {
+		env = setup({ initial: ['hello world'] });
+		const tb = getToolbar();
+		expect(tb).not.toBeNull();
+		expect(tb!.style.display).toBe('none');
+		expect(tb!.parentElement).toBe(document.body);
+		expect(tb!.getAttribute('data-plim-isolated')).toBe('true');
+		expect(tb!.getAttribute('role')).toBe('toolbar');
+	});
+
+	it('shows the toolbar with mark buttons when a non-collapsed selection exists in a text block', () => {
+		env = setup({ initial: ['hello world'] });
+		const root = getRoot(env.container);
+		focusEditor(root);
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		const tb = getToolbar()!;
+		expect(tb.style.display).toBe('flex');
+		// Built-in marks (bold/italic/underline/strikethrough/code/link)
+		// all contribute toolbar items.
+		expect(tb.querySelector('[data-toolbar-item="bold"]')).not.toBeNull();
+		expect(tb.querySelector('[data-toolbar-item="italic"]')).not.toBeNull();
+		expect(tb.querySelector('[data-toolbar-item="underline"]')).not.toBeNull();
+		expect(tb.querySelector('[data-toolbar-item="strikethrough"]')).not.toBeNull();
+		expect(tb.querySelector('[data-toolbar-item="code"]')).not.toBeNull();
+		expect(tb.querySelector('[data-toolbar-item="link"]')).not.toBeNull();
+	});
+
+	it('hides the toolbar when the selection collapses', () => {
+		env = setup({ initial: ['hello world'] });
+		const root = getRoot(env.container);
+		focusEditor(root);
+		let tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		expect(getToolbar()!.style.display).toBe('flex');
+		tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 3 }, head: { path: [0], offset: 3 } });
+		tx.commit();
+		expect(getToolbar()!.style.display).toBe('none');
+	});
+
+	it('clicking the bold button applies the bold mark to the selected range', () => {
+		env = setup({ initial: ['hello world'] });
+		const root = getRoot(env.container);
+		focusEditor(root);
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		const btn = getToolbar()!.querySelector<HTMLButtonElement>('[data-toolbar-item="bold"]')!;
+		btn.click();
+		const block = env.editor.getState().doc.children[0]!;
+		expect(block.text![0]!.text).toBe('hello');
+		expect(block.text![0]!.marks?.some((m) => m.type === 'bold')).toBe(true);
+		// Trailing " world" is unchanged.
+		expect(block.text![1]!.text).toBe(' world');
+		expect(block.text![1]!.marks?.some((m) => m.type === 'bold') ?? false).toBe(false);
+	});
+
+	it("highlights the bold button as active when the selection's range is fully bold", () => {
+		env = setup({ initial: ['hello world'] });
+		const root = getRoot(env.container);
+		focusEditor(root);
+		// Apply bold first.
+		let tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
+		tx.toggleMark('bold', { path: [0], from: 0, to: 5 });
+		tx.commit();
+		// Re-set selection so the toolbar re-renders against the updated doc.
+		tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		const btn = getToolbar()!.querySelector<HTMLButtonElement>('[data-toolbar-item="bold"]')!;
+		expect(btn.getAttribute('data-active')).toBe('true');
+		expect(btn.getAttribute('aria-pressed')).toBe('true');
+		// Italic is not active.
+		const italic = getToolbar()!.querySelector<HTMLButtonElement>('[data-toolbar-item="italic"]')!;
+		expect(italic.getAttribute('data-active')).toBe(null);
+		expect(italic.getAttribute('aria-pressed')).toBe('false');
+	});
+
+	it('shows block-transform items (heading, quote, paragraph) alongside mark items', () => {
+		env = setup({ initial: ['hello world'] });
+		const root = getRoot(env.container);
+		focusEditor(root);
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		const tb = getToolbar()!;
+		expect(tb.querySelector('[data-toolbar-item="turn-into-paragraph"]')).not.toBeNull();
+		expect(tb.querySelector('[data-toolbar-item="turn-into-heading-1"]')).not.toBeNull();
+		expect(tb.querySelector('[data-toolbar-item="turn-into-heading-2"]')).not.toBeNull();
+		expect(tb.querySelector('[data-toolbar-item="turn-into-heading-3"]')).not.toBeNull();
+		expect(tb.querySelector('[data-toolbar-item="turn-into-quote"]')).not.toBeNull();
+	});
+
+	it('clicking "turn into heading 2" rewrites the head block to heading level 2', () => {
+		env = setup({ initial: ['hello world'] });
+		const root = getRoot(env.container);
+		focusEditor(root);
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		const btn = getToolbar()!.querySelector<HTMLButtonElement>('[data-toolbar-item="turn-into-heading-2"]')!;
+		btn.click();
+		const block = env.editor.getState().doc.children[0]!;
+		expect(block.type).toBe('heading');
+		expect(block.attrs?.level).toBe(2);
+	});
+
+	it('marks the current heading-level button as active', () => {
+		env = setup();
+		const root = getRoot(env.container);
+		focusEditor(root);
+		// Make the first block a heading-1 with text.
+		let tx = env.editor.createTransaction();
+		tx.setBlockType([0], 'heading', { level: 1 });
+		tx.insertText([0], 0, 'Title');
+		tx.commit();
+		tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		const h1 = getToolbar()!.querySelector<HTMLButtonElement>('[data-toolbar-item="turn-into-heading-1"]')!;
+		const h2 = getToolbar()!.querySelector<HTMLButtonElement>('[data-toolbar-item="turn-into-heading-2"]')!;
+		expect(h1.getAttribute('data-active')).toBe('true');
+		expect(h2.getAttribute('data-active')).toBe(null);
+	});
+
+	it('clicking the link button swaps the row for a URL input', () => {
+		env = setup({ initial: ['hello world'] });
+		const root = getRoot(env.container);
+		focusEditor(root);
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		const btn = getToolbar()!.querySelector<HTMLButtonElement>('[data-toolbar-item="link"]')!;
+		btn.click();
+		const tb = getToolbar()!;
+		const input = tb.querySelector<HTMLInputElement>('.plim-toolbar-link-input');
+		expect(input).not.toBeNull();
+		// Bold button is no longer rendered while in popover mode.
+		expect(tb.querySelector('[data-toolbar-item="bold"]')).toBeNull();
+	});
+
+	it('submitting the link input applies a link mark with the entered href', () => {
+		env = setup({ initial: ['hello world'] });
+		const root = getRoot(env.container);
+		focusEditor(root);
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		const btn = getToolbar()!.querySelector<HTMLButtonElement>('[data-toolbar-item="link"]')!;
+		btn.click();
+		const input = getToolbar()!.querySelector<HTMLInputElement>('.plim-toolbar-link-input')!;
+		input.value = 'https://example.com';
+		input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+		const block = env.editor.getState().doc.children[0]!;
+		const linkSpan = block.text!.find((s) => s.marks?.some((m) => m.type === 'link'));
+		expect(linkSpan).toBeTruthy();
+		expect(linkSpan!.text).toBe('hello');
+		const linkMarkInst = linkSpan!.marks!.find((m) => m.type === 'link')!;
+		expect(linkMarkInst.attrs?.href).toBe('https://example.com');
+	});
+
+	it('Escape inside the link input closes the popover and shows buttons again', () => {
+		env = setup({ initial: ['hello world'] });
+		const root = getRoot(env.container);
+		focusEditor(root);
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		getToolbar()!.querySelector<HTMLButtonElement>('[data-toolbar-item="link"]')!.click();
+		const input = getToolbar()!.querySelector<HTMLInputElement>('.plim-toolbar-link-input')!;
+		input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+		expect(getToolbar()!.querySelector('.plim-toolbar-link-input')).toBeNull();
+		expect(getToolbar()!.querySelector('[data-toolbar-item="bold"]')).not.toBeNull();
+	});
+
+	it('destroys cleanly: removes the toolbar from the DOM', () => {
+		env = setup({ initial: ['hello world'] });
+		expect(getToolbar()).not.toBeNull();
+		env.cleanup();
+		env = null;
+		expect(getToolbar()).toBeNull();
+	});
+});
