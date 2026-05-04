@@ -3,6 +3,7 @@ import {
 	defineAction,
 	defineExtension,
 	defineMark,
+	hasMark,
 	marksAtOffset,
 	triggers,
 	type ActionContext,
@@ -230,16 +231,48 @@ export function statusBadgeExtension() {
 			// ── Auto-replace pass ─────────────────────────────────────────
 			// Look at the substring ending at the caret; if it matches our
 			// `[[!status]]` pattern, rewrite that range as a pill in a
-			// follow-up transaction. Skip the rewrite when the caret sits
-			// inside an inline-code run — backticks are the user's escape
-			// hatch for literal `[[!ready]]` text (docs, examples, …).
+			// follow-up transaction. Three opt-outs to avoid stomping
+			// legitimate code-fenced literals (the user's escape hatch):
+			//   1. The matched range itself carries the `code` mark.
+			//      Covers the case where the user typed `` `[[!ready]]` ``
+			//      and the inline-code input rule has already converted
+			//      the backticks into a `code`-marked run; the caret now
+			//      sits at the trailing edge (so `marksAtOffset` returns
+			//      [] under the boundary-intersection rule), but the
+			//      *range* `[start, end)` is fully code-marked.
+			//   2. Caret already sits strictly inside an applied `code`
+			//      mark — handles the "edit existing inline code" case.
+			//   3. Caret sits inside an *unclosed* inline-code fence (an
+			//      odd number of literal backticks precede it on this
+			//      line). The markdown input rule fires on the *closing*
+			//      backtick, so during left-to-right typing of
+			//      `` `[[!ready]]` `` the second `]` lands before the
+			//      closing backtick arrives. Without this guard the
+			//      auto-replace would fire on the still-literal text.
 			const m = STATUS_AUTOREPLACE_RE.exec(flat.slice(0, offset));
 			if (!m) {
 				prevSel = { path: sel.head.path, offset };
 				return;
 			}
+			const matchStart = offset - m[0].length;
+			const matchEnd = offset;
+			if (hasMark(block.text, matchStart, matchEnd, 'code')) {
+				prevSel = { path: sel.head.path, offset };
+				return;
+			}
 			const inheritedMarks = marksAtOffset(block.text, offset);
 			if (inheritedMarks.some((mk) => mk.type === 'code')) {
+				prevSel = { path: sel.head.path, offset };
+				return;
+			}
+			// Count backticks before caret on the current line. Use the last
+			// newline as the line boundary (paragraphs allow soft breaks via
+			// Shift+Enter, and the inline-code rule is line-scoped).
+			const lineStart = flat.lastIndexOf('\n', offset - 1) + 1;
+			const lineSoFar = flat.slice(lineStart, offset);
+			let backtickCount = 0;
+			for (let i = 0; i < lineSoFar.length; i++) if (lineSoFar.charCodeAt(i) === 0x60) backtickCount++;
+			if (backtickCount % 2 === 1) {
 				prevSel = { path: sel.head.path, offset };
 				return;
 			}
