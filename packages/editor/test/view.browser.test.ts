@@ -770,6 +770,112 @@ function firePaste(root: HTMLElement, payload: { text?: string; html?: string })
 	root.dispatchEvent(ev);
 }
 
+describe('paste pipeline — auto-link URL on selection', () => {
+	let env: ReturnType<typeof setup> | null = null;
+	afterEach(() => {
+		env?.cleanup();
+		env = null;
+	});
+
+	it('applies a link mark over the selection instead of replacing it', () => {
+		env = setup({ initial: ['Visit our docs page'] });
+		const tx = env.editor.createTransaction();
+		// Select "docs"
+		tx.setSelection({ anchor: { path: [0], offset: 10 }, head: { path: [0], offset: 14 } });
+		tx.commit();
+		firePaste(getRoot(env.container), { text: 'https://example.com/docs' });
+		const doc = env.editor.getState().doc;
+		// Block text untouched.
+		const flat = doc.children[0]!.text!.map((s) => s.text).join('');
+		expect(flat).toBe('Visit our docs page');
+		// "docs" span carries link mark with the pasted href.
+		const linked = doc.children[0]!.text!.find((s) => s.text === 'docs');
+		expect(linked).toBeTruthy();
+		expect(linked!.marks?.some((m) => m.type === 'link' && m.attrs?.href === 'https://example.com/docs')).toBe(true);
+		// Surrounding text is NOT linked.
+		const before = doc.children[0]!.text!.find((s) => s.text.includes('Visit'));
+		expect(before!.marks?.some((m) => m.type === 'link')).not.toBe(true);
+	});
+
+	it('trims surrounding whitespace from the URL before applying', () => {
+		env = setup({ initial: ['hello world'] });
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		firePaste(getRoot(env.container), { text: '  https://example.com/foo\n' });
+		const linked = env.editor.getState().doc.children[0]!.text!.find((s) => s.text === 'hello');
+		expect(linked!.marks?.find((m) => m.type === 'link')?.attrs?.href).toBe('https://example.com/foo');
+	});
+
+	it('replaces an existing link href on overlapping selection (overwrite, not stack)', () => {
+		env = setup();
+		// Seed with text and an existing link on "docs".
+		const seedTx = env.editor.createTransaction();
+		seedTx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 0 } });
+		seedTx.replaceRange([0], 0, 0, [{ text: 'see docs here', marks: [] }]);
+		seedTx.toggleMark('link', { from: { path: [0], offset: 4 }, to: { path: [0], offset: 8 } }, { href: 'https://old.example.com' });
+		seedTx.commit();
+		// Select the "docs" range and paste a new URL.
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 4 }, head: { path: [0], offset: 8 } });
+		tx.commit();
+		firePaste(getRoot(env.container), { text: 'https://new.example.com/page' });
+		const linked = env.editor.getState().doc.children[0]!.text!.find((s) => s.text === 'docs');
+		expect(linked).toBeTruthy();
+		const linkMarks = linked!.marks!.filter((m) => m.type === 'link');
+		expect(linkMarks).toHaveLength(1);
+		expect(linkMarks[0]!.attrs?.href).toBe('https://new.example.com/page');
+	});
+
+	it('falls through to plain-text paste when selection is collapsed', () => {
+		env = setup({ initial: ['hello'] });
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 5 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		firePaste(getRoot(env.container), { text: 'https://example.com' });
+		const doc = env.editor.getState().doc;
+		// URL got inserted as literal text, not auto-linked over nothing.
+		expect(doc.children[0]!.text!.map((s) => s.text).join('')).toBe('hellohttps://example.com');
+		// And no link mark anywhere on the block.
+		expect(doc.children[0]!.text!.some((s) => s.marks?.some((m) => m.type === 'link'))).toBe(false);
+	});
+
+	it('falls through when payload is not a URL (multi-word, no protocol)', () => {
+		env = setup({ initial: ['hello world'] });
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		firePaste(getRoot(env.container), { text: 'just some text' });
+		const doc = env.editor.getState().doc;
+		// Plain-text paste replaced "hello" with "just some text".
+		expect(doc.children[0]!.text!.map((s) => s.text).join('')).toBe('just some text world');
+		// No link mark.
+		expect(doc.children[0]!.text!.some((s) => s.marks?.some((m) => m.type === 'link'))).toBe(false);
+	});
+
+	it('falls through for bare-domain payloads (conservative — no protocol = no auto-link)', () => {
+		env = setup({ initial: ['hello world'] });
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		firePaste(getRoot(env.container), { text: 'example.com' });
+		const doc = env.editor.getState().doc;
+		// Replaced as plain text.
+		expect(doc.children[0]!.text!.map((s) => s.text).join('')).toBe('example.com world');
+		expect(doc.children[0]!.text!.some((s) => s.marks?.some((m) => m.type === 'link'))).toBe(false);
+	});
+
+	it('falls through when payload contains whitespace (treated as prose, not URL)', () => {
+		env = setup({ initial: ['hello world'] });
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		firePaste(getRoot(env.container), { text: 'https://example.com extra' });
+		const doc = env.editor.getState().doc;
+		expect(doc.children[0]!.text!.some((s) => s.marks?.some((m) => m.type === 'link'))).toBe(false);
+	});
+});
+
 describe('paste pipeline — plain text', () => {
 	let env: ReturnType<typeof setup> | null = null;
 	afterEach(() => {
@@ -2914,6 +3020,30 @@ describe('Floating selection toolbar', () => {
 		expect(getToolbar()!.querySelector('[data-toolbar-item="bold"]')).not.toBeNull();
 	});
 
+	it('typing/pasting into the link input does NOT tear it down on selectionchange', () => {
+		env = setup({ initial: ['hello world'] });
+		const root = getRoot(env.container);
+		focusEditor(root);
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		getToolbar()!.querySelector<HTMLButtonElement>('[data-toolbar-item="link"]')!.click();
+		const input = getToolbar()!.querySelector<HTMLInputElement>('.plim-toolbar-link-input')!;
+		expect(input).not.toBeNull();
+		// Type into the input, then dispatch a selectionchange (paste / focus
+		// shifts trigger this) and verify the same input element survives
+		// — its value and identity must persist across re-renders.
+		input.value = 'https://exa';
+		root.ownerDocument.dispatchEvent(new Event('selectionchange'));
+		const inputAfter = getToolbar()!.querySelector<HTMLInputElement>('.plim-toolbar-link-input')!;
+		expect(inputAfter).toBe(input);
+		expect(inputAfter.value).toBe('https://exa');
+		// A second selectionchange should also be a no-op.
+		root.ownerDocument.dispatchEvent(new Event('selectionchange'));
+		expect(getToolbar()!.querySelector<HTMLInputElement>('.plim-toolbar-link-input')).toBe(input);
+		expect(input.value).toBe('https://exa');
+	});
+
 	it('destroys cleanly: removes the toolbar from the DOM', () => {
 		env = setup({ initial: ['hello world'] });
 		expect(getToolbar()).not.toBeNull();
@@ -2937,8 +3067,8 @@ describe('markdown shortcut — checkbox', () => {
 		}
 	}
 
-	function placeCaret(env: NonNullable<typeof env>, path: number[], offset: number): void {
-		const tx = env.editor.createTransaction();
+	function placeCaret(environment: NonNullable<typeof env>, path: number[], offset: number): void {
+		const tx = environment.editor.createTransaction();
 		tx.setSelection({ anchor: { path, offset }, head: { path, offset } });
 		tx.commit();
 	}

@@ -119,6 +119,11 @@ export function mountToolbar(opts: ToolbarMountOptions): ToolbarMount {
 	// State for the link popover. When `linkActive` is non-null the
 	// toolbar shows the URL input instead of the button row.
 	let linkActive: { initialHref: string } | null = null;
+	// The currently-mounted link-row DOM (if any). We keep it across
+	// renders so paste/typing/selectionchange events that fire while
+	// the user is filling in the URL don't tear down the input and
+	// blow away its focus + value.
+	let linkRowEl: HTMLElement | null = null;
 	// Track whether the toolbar is "open" — i.e. should be shown for the
 	// current selection — so a click inside it doesn't trigger our
 	// blur-driven hide path. Pointerdown on `el` sets a one-tick guard.
@@ -155,6 +160,8 @@ export function mountToolbar(opts: ToolbarMountOptions): ToolbarMount {
 	function hide() {
 		el.style.display = 'none';
 		linkActive = null;
+		linkRowEl = null;
+		el.replaceChildren();
 	}
 
 	function existingLinkHrefAtSelection(): string {
@@ -334,10 +341,16 @@ export function mountToolbar(opts: ToolbarMountOptions): ToolbarMount {
 		input.addEventListener('keydown', (ev) => {
 			if (ev.key === 'Enter') {
 				ev.preventDefault();
+				ev.stopPropagation();
 				applyLink(input.value);
 			} else if (ev.key === 'Escape') {
 				ev.preventDefault();
+				// Stop propagation so the document-level Escape handler
+				// doesn't also fire `hide()`, which would tear down the
+				// freshly-rebuilt button row.
+				ev.stopPropagation();
 				linkActive = null;
+				linkRowEl = null;
 				render();
 			}
 		});
@@ -368,6 +381,7 @@ export function mountToolbar(opts: ToolbarMountOptions): ToolbarMount {
 			wrap.appendChild(remove);
 		}
 		el.appendChild(wrap);
+		linkRowEl = wrap;
 		// Defer focus to next tick so display:flex layout settles.
 		queueMicrotask(() => {
 			input.focus();
@@ -437,8 +451,6 @@ export function mountToolbar(opts: ToolbarMountOptions): ToolbarMount {
 		const ctx = valCtx();
 		const sel = ctx.state.selection;
 		const blockSel = opts.getBlockSelection();
-		// Clear children before re-evaluating.
-		el.replaceChildren();
 
 		// Mode resolution. Block-selection wins when present.
 		const mode: 'selection' | 'block' | null =
@@ -447,32 +459,48 @@ export function mountToolbar(opts: ToolbarMountOptions): ToolbarMount {
 		if (mode === null) {
 			el.style.display = 'none';
 			linkActive = null;
+			linkRowEl = null;
+			el.replaceChildren();
 			return;
 		}
 
 		// Don't show if focus has left the editor entirely AND the
 		// pointer isn't currently on the toolbar (clicking a button).
 		// Block-mode is exempt: drag-handle clicks intentionally move
-		// focus around and we still want the toolbar visible.
-		if (mode === 'selection') {
+		// focus around and we still want the toolbar visible. The link
+		// popover is also exempt — its <input> owns focus on purpose.
+		if (mode === 'selection' && !linkActive) {
 			const active = doc.activeElement;
 			const insideEditor = active && opts.root.contains(active);
 			const insideToolbar = active && el.contains(active);
 			if (!insideEditor && !insideToolbar && !pointerInside) {
 				el.style.display = 'none';
 				linkActive = null;
+				linkRowEl = null;
+				el.replaceChildren();
 				return;
 			}
 		}
 
 		// Link popover only makes sense in selection mode.
 		if (mode === 'selection' && linkActive) {
+			// If the link row is already mounted, just reposition. Tearing
+			// it down on every selectionchange / paste would lose focus
+			// and the partially-typed URL.
+			if (linkRowEl && linkRowEl.isConnected) {
+				position(selectionRect());
+				return;
+			}
+			el.replaceChildren();
 			buildLinkRow();
 			position(selectionRect());
 			return;
 		}
 		if (mode === 'block') linkActive = null;
 
+		// Rebuild the button row.
+		linkRowEl = null;
+		el.replaceChildren();
 		const visible = items.filter((r) => r.appliesTo === mode && isVisible(r, ctx));
 		if (visible.length === 0) {
 			el.style.display = 'none';

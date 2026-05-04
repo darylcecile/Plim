@@ -39,6 +39,102 @@ export type PasteData = {
 };
 
 /**
+ * URL detection for the auto-link-on-selection paste shortcut.
+ *
+ * Conservative on purpose: we only treat `http://…` / `https://…` as URLs.
+ * Bare-domain ("notion.so", "www.foo.com") payloads aren't auto-linked
+ * because plenty of legitimate non-URL text matches that shape ("v1.0",
+ * "e.g.", "co.uk") and the cost of a false positive here is high — the
+ * user's selection silently mutates instead of the URL being pasted as
+ * literal text. The trailing-`\S+` keeps the rule strict: any whitespace
+ * inside disqualifies the payload (use the link popover for that).
+ */
+const URL_RE = /^https?:\/\/\S+$/i;
+
+export function looksLikeUrl(text: string): boolean {
+	return URL_RE.test(text.trim());
+}
+
+/**
+ * Auto-link phase — when the user has a non-collapsed selection and pastes
+ * a single URL, apply a `link` mark over the selection (preserving the
+ * selected text verbatim) instead of replacing the selection with the URL
+ * string. Mirrors Notion / Google Docs / Slack / most modern editors.
+ *
+ * Bails (returns `false`) so the caller falls through to the normal paste
+ * pipeline when:
+ * - the selection is collapsed (no text to link → fall through to insert),
+ * - the `link` mark isn't registered (consumer disabled it),
+ * - the payload isn't a single URL (multiline, contains spaces, non-http(s)).
+ *
+ * Multi-block selections are supported — `tx.toggleMark` already handles
+ * head-partial / middle-full / tail-partial spanning ranges, so dragging
+ * across blocks and pasting a URL still works as expected.
+ *
+ * If a `link` mark already covers (some of) the range with a different
+ * href, we sequence remove-then-add to overwrite — `tx.toggleMark` has no
+ * "update attrs" op, same shape as the toolbar's URL-input applier.
+ */
+export function pasteUrlOnSelection(
+	text: string,
+	ctx: ActionContext,
+	marks: { name: string }[],
+): boolean {
+	if (!marks.some((m) => m.name === 'link')) return false;
+	const url = text.trim();
+	if (!URL_RE.test(url)) return false;
+	const sel = ctx.state.selection;
+	if (!sel) return false;
+	if (
+		pathsEqual(sel.anchor.path, sel.head.path) &&
+		sel.anchor.offset === sel.head.offset
+	) {
+		// Collapsed — nothing to link.
+		return false;
+	}
+	const tx = ctx.createTransaction();
+	const range = {
+		from: { path: sel.anchor.path, offset: sel.anchor.offset },
+		to: { path: sel.head.path, offset: sel.head.offset },
+	};
+	// If a link is already present we toggle off first so the new href
+	// wins; otherwise just apply.
+	if (selectionHasLink(ctx, sel)) {
+		tx.toggleMark('link', range);
+	}
+	tx.toggleMark('link', range, { href: url });
+	tx.commit();
+	return true;
+}
+
+function selectionHasLink(
+	ctx: ActionContext,
+	sel: { anchor: { path: BlockPath; offset: number }; head: { path: BlockPath; offset: number } },
+): boolean {
+	// Single-block fast path. For multi-block ranges we conservatively
+	// say "no" — `toggleMark` will still produce a valid result because
+	// it walks each affected block and toggles per-span; pre-existing
+	// links on intermediate blocks survive the second toggle (they get
+	// flipped twice). Worst-case we leave a stale href on a sub-range;
+	// that's better than the alternative of pre-walking the whole range.
+	if (!pathsEqual(sel.anchor.path, sel.head.path)) return false;
+	const block = getBlockAt(ctx.state.doc, sel.head.path);
+	if (!block?.text) return false;
+	const from = Math.min(sel.anchor.offset, sel.head.offset);
+	const to = Math.max(sel.anchor.offset, sel.head.offset);
+	let pos = 0;
+	for (const span of block.text) {
+		const start = pos;
+		const end = pos + span.text.length;
+		if (!(end <= from || start >= to)) {
+			if (span.marks?.some((m) => m.type === 'link')) return true;
+		}
+		pos = end;
+	}
+	return false;
+}
+
+/**
  * Phase 1 — plain-text paste with Notion-style block splitting.
  *
  * Steps (within one transaction so undo restores the pre-paste state in a

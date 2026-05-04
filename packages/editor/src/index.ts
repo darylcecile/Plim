@@ -23,7 +23,7 @@ import {
 } from '@plim/core';
 import { mountView, type View, type ViewOptions } from './view.js';
 import { runBuiltInBeforeAction, runBuiltInKey } from './builtin-actions.js';
-import { pastePlainText, pasteMarkdown, pasteHtml, pastePlimNative, looksLikeMarkdown, type PasteData } from './paste.js';
+import { pastePlainText, pasteMarkdown, pasteHtml, pastePlimNative, pasteUrlOnSelection, looksLikeMarkdown, type PasteData } from './paste.js';
 
 export type ContainerAdapter = {
 	resolve(): HTMLElement | null;
@@ -389,6 +389,13 @@ export function deriveEditor(plim: PlimDriver, options: DeriveEditorOptions): Ag
 		// nesting that would degrade through markdown (e.g. callouts → quote
 		// without `fromMarkdown` registered, image attrs, code language).
 		if (data.plim && pastePlimNative(data.plim, ctx)) return true;
+		// Phase 0.5 — auto-link a URL onto a non-collapsed selection.
+		// Runs before HTML/markdown so a user pasting a bare URL onto
+		// selected text always gets a link, not a replacement. Bails
+		// (returns false) when payload isn't a URL, selection is
+		// collapsed, or `link` mark isn't registered — caller falls
+		// through to the rest of the pipeline.
+		if (data.text && pasteUrlOnSelection(data.text, ctx, marks)) return true;
 		// Phase 3 — HTML clipboard.
 		if (data.html && pasteHtml(data.html, ctx)) return true;
 		// Phase 2 — markdown auto-detect on plain text. Threading `blocks`
