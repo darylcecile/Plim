@@ -1231,34 +1231,51 @@ describe('Image block', () => {
 		cleanup();
 	});
 
-	it('clicking an atomic block selects it (data-plim-block-selected)', () => {
+	function selectViaHandle(blockEl: HTMLElement) {
+		// Reproduce the production gesture: pointerdown on the drag
+		// handle, then pointerup without movement (no drag started). The
+		// handle dispatches `plim:handle-click` from finishSession when
+		// `wasActive === false && !cancelled`.
+		const handle = blockEl.querySelector('.plim-block-drag') as HTMLElement;
+		expect(handle).toBeTruthy();
+		const down = new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: 0, clientY: 0 });
+		handle.dispatchEvent(down);
+		const up = new PointerEvent('pointerup', { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: 0, clientY: 0 });
+		handle.dispatchEvent(up);
+	}
+
+	it('clicking the drag handle selects the block (data-plim-block-selected)', () => {
 		const { container, cleanup } = setupImage();
 		const blockEl = container.querySelector('[data-block-type="image"]') as HTMLElement;
-		const img = container.querySelector('img.plim-image') as HTMLImageElement;
-		// Use pointerdown directly (the production handler binds pointerdown).
-		const ev = new PointerEvent('pointerdown', { bubbles: true, cancelable: true });
-		img.dispatchEvent(ev);
+		selectViaHandle(blockEl);
 		expect(blockEl.getAttribute('data-plim-block-selected')).toBe('true');
-		// Click on a text block clears selection.
-		const para = container.querySelector('[data-block-type="paragraph"]') as HTMLElement;
-		const ev2 = new PointerEvent('pointerdown', { bubbles: true, cancelable: true });
-		para.dispatchEvent(ev2);
+		// Pointerdown on the image body itself does NOT auto-select; it
+		// clears any prior selection and falls through to native handling.
+		const img = container.querySelector('img.plim-image') as HTMLImageElement;
+		img.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
 		expect(blockEl.hasAttribute('data-plim-block-selected')).toBe(false);
+		cleanup();
+	});
+
+	it('drag handle click also selects text blocks', () => {
+		const { container, cleanup } = setupImage();
+		const para = container.querySelector('[data-block-type="paragraph"]') as HTMLElement;
+		selectViaHandle(para);
+		expect(para.getAttribute('data-plim-block-selected')).toBe('true');
 		cleanup();
 	});
 
 	it('Backspace removes the selected atomic block and moves caret to previous block', () => {
 		const { editor, container, cleanup } = setupImage();
-		const img = container.querySelector('img.plim-image') as HTMLImageElement;
 		// Document is [image, paragraph "after"]. Adding a leading
 		// paragraph so the deletion has a previous block to land in.
 		const tx0 = editor.createTransaction();
 		tx0.insertBlock([0], { id: newId(), type: 'paragraph', text: [{ text: 'before' }] });
 		tx0.commit();
 		expect(editor.getState().doc.children.map((b) => b.type)).toEqual(['paragraph', 'image', 'paragraph']);
-		// Select the image and Backspace.
-		const img2 = container.querySelector('img.plim-image') as HTMLImageElement;
-		img2.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+		// Select the image via its drag handle and Backspace.
+		const imgBlock = container.querySelector('[data-block-type="image"]') as HTMLElement;
+		selectViaHandle(imgBlock);
 		expect(container.querySelector('[data-plim-block-selected="true"]')).toBeTruthy();
 		const root = container.querySelector('.plim-editor') as HTMLElement;
 		root.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true }));
@@ -1269,15 +1286,13 @@ describe('Image block', () => {
 		expect(state.selection.head.offset).toBe(6);
 		// Block-selection cleared.
 		expect(container.querySelector('[data-plim-block-selected="true"]')).toBeNull();
-		// img variable used to suppress unused warning.
-		void img;
 		cleanup();
 	});
 
 	it('Escape clears block selection without removing the block', () => {
 		const { editor, container, cleanup } = setupImage();
-		const img = container.querySelector('img.plim-image') as HTMLImageElement;
-		img.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+		const imgBlock = container.querySelector('[data-block-type="image"]') as HTMLElement;
+		selectViaHandle(imgBlock);
 		expect(container.querySelector('[data-plim-block-selected="true"]')).toBeTruthy();
 		const root = container.querySelector('.plim-editor') as HTMLElement;
 		root.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
@@ -1302,14 +1317,79 @@ describe('Image block', () => {
 
 	it('ArrowDown while selected moves caret into next text block', () => {
 		const { editor, container, cleanup } = setupImage();
-		const img = container.querySelector('img.plim-image') as HTMLImageElement;
-		img.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+		const imgBlock = container.querySelector('[data-block-type="image"]') as HTMLElement;
+		selectViaHandle(imgBlock);
 		const root = container.querySelector('.plim-editor') as HTMLElement;
 		root.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
 		const state = editor.getState();
 		expect(state.selection.head.path).toEqual([1]);
 		expect(state.selection.head.offset).toBe(0);
 		expect(container.querySelector('[data-plim-block-selected="true"]')).toBeNull();
+		cleanup();
+	});
+
+	it('toolbar renders inside the frame with Replace/Align/Caption/Delete buttons', () => {
+		const { container, cleanup } = setupImage();
+		const frame = container.querySelector('.plim-image-frame') as HTMLElement;
+		const toolbar = frame.querySelector('.plim-image-toolbar') as HTMLElement;
+		expect(toolbar).toBeTruthy();
+		expect(toolbar.getAttribute('data-plim-isolated')).toBe('true');
+		const btns = Array.from(toolbar.querySelectorAll('.plim-image-toolbar-btn')) as HTMLButtonElement[];
+		const labels = btns.map((b) => b.getAttribute('aria-label'));
+		expect(labels).toEqual(['Replace image', 'Align image', 'Toggle caption', 'Delete image']);
+		cleanup();
+	});
+
+	it('Align button cycles align attr left → center → right → left', () => {
+		const { editor, container, cleanup } = setupImage();
+		const alignBtn = container.querySelector('.plim-image-toolbar-align') as HTMLButtonElement;
+		const wrap = container.querySelector('.plim-image-wrap') as HTMLElement;
+		expect(wrap.getAttribute('data-align')).toBe('left');
+		alignBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+		expect((editor.getState().doc.children[0]!.attrs as { align?: string }).align).toBe('center');
+		// After re-render the same button (re-found) advances to right.
+		const alignBtn2 = container.querySelector('.plim-image-toolbar-align') as HTMLButtonElement;
+		alignBtn2.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+		expect((editor.getState().doc.children[0]!.attrs as { align?: string }).align).toBe('right');
+		const alignBtn3 = container.querySelector('.plim-image-toolbar-align') as HTMLButtonElement;
+		alignBtn3.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+		expect((editor.getState().doc.children[0]!.attrs as { align?: string }).align).toBe('left');
+		cleanup();
+	});
+
+	it('Caption toggle button reveals an empty caption row by setting captionVisible', () => {
+		const { editor, container, cleanup } = setupImage();
+		const wrap = container.querySelector('.plim-image-wrap') as HTMLElement;
+		// Empty caption: hidden by default.
+		expect(wrap.getAttribute('data-caption-visible')).toBe('false');
+		// Click caption toolbar btn (third button).
+		const btns = container.querySelectorAll('.plim-image-toolbar-btn');
+		const captionBtn = btns[2] as HTMLButtonElement;
+		captionBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+		expect((editor.getState().doc.children[0]!.attrs as { captionVisible?: boolean }).captionVisible).toBe(true);
+		const wrap2 = container.querySelector('.plim-image-wrap') as HTMLElement;
+		expect(wrap2.getAttribute('data-caption-visible')).toBe('true');
+		cleanup();
+	});
+
+	it('Delete toolbar button removes the image block', () => {
+		const { editor, container, cleanup } = setupImage();
+		expect(editor.getState().doc.children.length).toBe(2);
+		const btns = container.querySelectorAll('.plim-image-toolbar-btn');
+		const deleteBtn = btns[3] as HTMLButtonElement;
+		deleteBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+		const state = editor.getState();
+		expect(state.doc.children.length).toBe(1);
+		expect(state.doc.children[0]!.type).toBe('paragraph');
+		cleanup();
+	});
+
+	it('caption row is hidden when caption is empty and visible when populated', () => {
+		const { container, cleanup } = setupImage({ src: 'https://example.test/x.png', caption: 'hello' });
+		const wrap = container.querySelector('.plim-image-wrap') as HTMLElement;
+		expect(wrap.getAttribute('data-caption-visible')).toBe('true');
+		const cap = container.querySelector('.plim-image-caption') as HTMLElement;
+		expect(cap.textContent).toBe('hello');
 		cleanup();
 	});
 });

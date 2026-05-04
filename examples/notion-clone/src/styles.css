@@ -494,24 +494,52 @@ a[data-mark-type="link"] {
 	color: rgb(35, 131, 226);
 }
 
-/* Block-selected outline (atomic blocks like image, divider, custom). */
+/* Block-selected highlight. Matches Notion's pattern: a soft blue
+   tinted fill spanning the block's content width, no border outline.
+   Reads cleanly against both white page background and image content
+   (the tint is subtle enough to not wash out colors). The ::after
+   layer is `pointer-events: none` so clicks still hit the underlying
+   block content. `inset: 0 -4px` extends the fill 4px past the
+   block's text column so it visually breaks free of the line — same
+   as Notion. */
 [data-block-id][data-plim-block-selected="true"] {
 	position: relative;
 }
 [data-block-id][data-plim-block-selected="true"]::after {
 	content: '';
 	position: absolute;
-	inset: -2px 4px -2px 4px;
-	border: 2px solid rgba(35, 131, 226, 0.55);
-	border-radius: 4px;
+	inset: -2px -3px;
+	background: rgba(35, 131, 226, 0.14);
+	border-radius: 10px;
 	pointer-events: none;
-	box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4) inset;
+	z-index: 0;
+}
+/* Keep block content above the highlight layer so text/images render
+   normally. Without this, the ::after's z-index: 0 would still sit
+   above static-positioned siblings. Excludes `.plim-block-handles`
+   because it relies on its own `position: absolute` to live in the
+   gutter; forcing `position: relative` here would re-flow it into
+   the block's normal layout (visible as a phantom top padding when
+   the block is selected). */
+[data-block-id][data-plim-block-selected="true"] > *:not(.plim-block-handles) {
+	position: relative;
+	z-index: 1;
 }
 
 /* Image block */
 .plim-block-image .plim-image-wrap {
 	display: block;
 	margin: 4px 0;
+}
+/* Alignment of the inline-block frame inside the wrap. */
+.plim-image-wrap[data-align='left'] {
+	text-align: left;
+}
+.plim-image-wrap[data-align='center'] {
+	text-align: center;
+}
+.plim-image-wrap[data-align='right'] {
+	text-align: right;
 }
 .plim-image-frame {
 	position: relative;
@@ -525,6 +553,59 @@ a[data-mark-type="link"] {
 	width: 100%;
 	max-width: 100%;
 	border-radius: 4px;
+}
+
+/* Floating toolbar over the top-right of the image. Visible on hover
+   or when the block is selected. The toolbar lives inside .plim-image-frame
+   so it tracks the image's bounds rather than the wrap. */
+.plim-image-toolbar {
+	position: absolute;
+	top: 8px;
+	right: 8px;
+	display: flex;
+	gap: 2px;
+	padding: 3px;
+	background: rgba(15, 15, 15, 0.85);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 6px;
+	box-shadow: 0 4px 12px rgba(15, 15, 15, 0.3);
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 120ms ease;
+	line-height: 1; /* override frame's line-height: 0 */
+	z-index: 2;
+}
+.plim-block-image:hover .plim-image-toolbar,
+.plim-block-image[data-plim-block-selected='true'] .plim-image-toolbar,
+.plim-image-toolbar:focus-within {
+	opacity: 1;
+	pointer-events: auto;
+}
+.plim-image-toolbar-btn {
+	all: unset;
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 4px 8px;
+	font-size: 12px;
+	color: rgba(255, 255, 255, 0.92);
+	border-radius: 4px;
+	cursor: pointer;
+	transition: background 80ms ease;
+	user-select: none;
+}
+.plim-image-toolbar-btn:hover,
+.plim-image-toolbar-btn:focus-visible {
+	background: rgba(255, 255, 255, 0.12);
+}
+.plim-image-toolbar-align {
+	font-size: 14px;
+	font-family: 'Apple Color Emoji', 'Segoe UI Emoji', system-ui, sans-serif;
+	min-width: 24px;
+	justify-content: center;
+}
+.plim-image-toolbar-delete:hover {
+	background: rgba(235, 87, 87, 0.4);
 }
 .plim-image-resize {
 	position: absolute;
@@ -589,6 +670,13 @@ a[data-mark-type="link"] {
 .plim-image-caption:empty::before {
 	content: attr(data-placeholder);
 	color: var(--text-faint);
+}
+/* Hide the caption row entirely when not requested. The element stays
+   in the DOM (so its stash reference + listeners survive), but takes
+   up no space. When the user clicks the Caption toolbar button we set
+   data-caption-visible=true and focus it. */
+.plim-image-wrap[data-caption-visible='false'] .plim-image-caption {
+	display: none;
 }
 
 /* Embed block */

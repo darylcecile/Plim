@@ -314,38 +314,20 @@ export function mountView(opts: ViewOptions): View {
 
 	root.ownerDocument.addEventListener('selectionchange', onSelectionChange);
 
-	// Click-to-select for atomic blocks. Any non-isolated pointerdown on
-	// a block whose node has no `text` field puts the editor into
-	// block-selected mode for that block. Click anywhere else (including
-	// text blocks) clears the selection so the caret can land normally.
+	// Click-anywhere clears any prior block-selection. Selection itself
+	// is now driven exclusively by the drag-handle click (see
+	// `ensureBlockHandles`); clicking the block body — even on atomic
+	// blocks — falls through to native behavior (caret placement on
+	// text blocks, no-op on atomic ones). Isolated subtrees (caption,
+	// resize handle, toolbar) get native handling and must NOT clear
+	// selection on a sibling.
 	const onRootPointerDown = (ev: PointerEvent) => {
-		// Block-handle clicks already stopPropagation, so we won't see
-		// those here. Isolated subtrees (caption, resize handle) get
-		// native handling — clicking them must NOT change the selection
-		// state we may already have on a sibling block.
 		const targetNode = ev.target as Node | null;
 		if (isolatedAncestor(targetNode)) return;
-		const blockEl = (ev.target as HTMLElement | null)?.closest?.(`[${DATA_BLOCK_ID}]`) as HTMLElement | null;
-		if (!blockEl || !root.contains(blockEl)) {
-			setBlockSelected(null);
-			return;
-		}
-		const id = blockEl.getAttribute(DATA_BLOCK_ID);
-		if (!id) {
-			setBlockSelected(null);
-			return;
-		}
-		const state = opts.getState();
-		const path = pathOfBlockId(state.doc.children, id, []);
-		const block = path ? blockAt(state.doc.children, path) : null;
-		if (block && block.text === undefined) {
-			// Atomic block — prevent the browser from putting the caret
-			// into the (contenteditable=false) wrapper and select it.
-			ev.preventDefault();
-			setBlockSelected(id);
-		} else {
-			setBlockSelected(null);
-		}
+		// The drag handle's own pointerdown handler stopPropagation's
+		// before this listener sees it (so a handle click won't clear
+		// the selection it just established).
+		setBlockSelected(null);
 	};
 	root.addEventListener('pointerdown', onRootPointerDown);
 
@@ -721,6 +703,18 @@ export function mountView(opts: ViewOptions): View {
 	};
 	root.addEventListener('plim:custom-drag-move', onPlimCustomDragMove);
 	root.addEventListener('plim:custom-drag-end', onPlimCustomDragCommit);
+	// Click-on-handle (pointerdown→pointerup without crossing drag
+	// threshold) selects the block. Works for both text and atomic
+	// blocks; the visual outline is identical (CSS rules off
+	// `[data-plim-block-selected="true"]`). Subsequent text-block click
+	// or Escape clears it.
+	const onHandleClick = (e: Event) => {
+		const detail = (e as CustomEvent<{ id?: string }>).detail;
+		const id = detail?.id ?? null;
+		if (!id) return;
+		setBlockSelected(id);
+	};
+	root.addEventListener('plim:handle-click', onHandleClick);
 	root.style.position = 'relative';
 
 	return {
@@ -749,6 +743,7 @@ export function mountView(opts: ViewOptions): View {
 			root.removeEventListener('plim:dragend', onPlimDragEnd);
 			root.removeEventListener('plim:custom-drag-move', onPlimCustomDragMove);
 			root.removeEventListener('plim:custom-drag-end', onPlimCustomDragCommit);
+			root.removeEventListener('plim:handle-click', onHandleClick);
 			clearDropIndicator();
 			root.remove();
 		},
@@ -936,6 +931,7 @@ function ensureBlockHandles(el: HTMLElement, opts: ViewOptions) {
 		const finishSession = (cancelled: boolean) => {
 			if (!session) return;
 			const wasActive = session.started;
+			const sessionId = session.id;
 			try {
 				drag.releasePointerCapture(session.pointerId);
 			} catch {
@@ -945,6 +941,12 @@ function ensureBlockHandles(el: HTMLElement, opts: ViewOptions) {
 			if (wasActive) {
 				el.classList.remove('plim-block--dragging');
 				el.dispatchEvent(new CustomEvent('plim:custom-drag-end', { bubbles: true, detail: { cancelled } }));
+			} else if (!cancelled) {
+				// Pointerup without crossing the drag threshold = a click
+				// on the handle. Notify the view so it can put the editor
+				// into block-selected mode for this block (works for both
+				// text and atomic blocks).
+				el.dispatchEvent(new CustomEvent('plim:handle-click', { bubbles: true, detail: { id: sessionId } }));
 			}
 		};
 		const onPointerUp = (e: PointerEvent) => {
@@ -1318,14 +1320,23 @@ function dispatchAttrs(el: HTMLElement, opts: ViewOptions, attrs: Record<string,
 
 function renderImage(el: HTMLElement, node: BlockNode, opts: ViewOptions) {
 	el.setAttribute('contenteditable', 'false');
-	const stash = el as unknown as { __plimImageCaption?: HTMLElement; __plimImageWrap?: HTMLElement };
+	const stash = el as unknown as {
+		__plimImageCaption?: HTMLElement;
+		__plimImageWrap?: HTMLElement;
+		__plimImageToolbar?: HTMLElement;
+	};
 	const src = (node.attrs?.src as string | undefined) ?? '';
 	const alt = (node.attrs?.alt as string | undefined) ?? '';
 	const caption = (node.attrs?.caption as string | undefined) ?? '';
-	// Width is stored as a CSS length string (e.g. '60%' or '480px'). The
-	// resize handle commits the new value via `setBlockAttrs` on
-	// pointerup; until then we mutate `img.style.width` directly so the
-	// drag is responsive without round-tripping through transactions.
+	const align = (node.attrs?.align as 'left' | 'center' | 'right' | undefined) ?? 'left';
+	// `captionVisible` separates "caption row should be in the layout"
+	// from "caption text". An empty caption doesn't render the row at
+	// all (Notion-style) unless the user explicitly asked for one via
+	// the toolbar's Caption toggle, in which case we set the flag and
+	// focus the (still-empty) input. The flag is reset on blur if the
+	// text remained empty.
+	const captionVisible = !!node.attrs?.captionVisible || caption.length > 0;
+	// Width is stored as a CSS length string (e.g. '60%' or '480px').
 	const width = (node.attrs?.width as string | undefined) ?? '';
 
 	if (!src) {
@@ -1348,13 +1359,13 @@ function renderImage(el: HTMLElement, node: BlockNode, opts: ViewOptions) {
 		el.appendChild(wrap);
 		stash.__plimImageWrap = undefined as unknown as HTMLElement;
 		stash.__plimImageCaption = undefined as unknown as HTMLElement;
+		stash.__plimImageToolbar = undefined as unknown as HTMLElement;
 		return;
 	}
 
-	// Reuse the wrap + caption across renders so in-progress edits to the
-	// caption (typed text not yet flushed to attrs) survive other
-	// transactions. We keep the caption element stable; only attribute /
-	// child mutations happen on re-render.
+	// Reuse the wrap + caption + toolbar across renders so in-progress
+	// edits to the caption (typed text not yet flushed to attrs) and
+	// hover/visibility states survive other transactions.
 	let wrap = stash.__plimImageWrap;
 	let caps = stash.__plimImageCaption;
 	if (!wrap || !el.contains(wrap)) {
@@ -1364,7 +1375,13 @@ function renderImage(el: HTMLElement, node: BlockNode, opts: ViewOptions) {
 		el.appendChild(wrap);
 		stash.__plimImageWrap = wrap;
 		caps = undefined;
+		stash.__plimImageToolbar = undefined as unknown as HTMLElement;
 	}
+
+	// Alignment lives on the wrap so it applies to the inline-block
+	// frame. We use a data attribute (CSS hooks via attribute selectors)
+	// rather than inline `text-align` so consumers can theme freely.
+	wrap.setAttribute('data-align', align);
 
 	// Image element. Re-create only if we haven't yet. The frame wraps
 	// just the <img> + resize handle so the handle's vertical extent
@@ -1375,8 +1392,6 @@ function renderImage(el: HTMLElement, node: BlockNode, opts: ViewOptions) {
 	if (!frame) {
 		frame = document.createElement('div');
 		frame.className = 'plim-image-frame';
-		// Insert frame before any existing caption so DOM order is
-		// frame → caption regardless of insertion order.
 		wrap.insertBefore(frame, wrap.firstChild);
 	}
 	let img = frame.querySelector('img.plim-image') as HTMLImageElement | null;
@@ -1388,35 +1403,24 @@ function renderImage(el: HTMLElement, node: BlockNode, opts: ViewOptions) {
 	}
 	if (img.getAttribute('src') !== src) img.src = src;
 	if (img.getAttribute('alt') !== alt) img.alt = alt;
-	// Width lives on the FRAME (not the wrap or the img). The frame is
-	// `display: inline-block` inside a block-level wrap, so its width
-	// resolves against the wrap (a definite-width block context). The
-	// img inside the frame fills the frame at `width: 100%`. This keeps
-	// percentages well-defined (no shrink-to-fit circularity) and makes
-	// the handle's `right: 0` land on the img's right edge for any
-	// width value.
 	frame.style.width = width || '';
 	img.style.width = '';
 	wrap.style.width = '';
 
-	// Resize handle. Pointer-drag updates `img.style.width` live; on
-	// pointerup, the final width (in px) is committed to `attrs.width`.
-	// The handle is `data-plim-isolated` so the editor's input pipeline
-	// doesn't try to interpret pointer/keyboard events inside it as text.
+	// Resize handle. Pointer-drag updates frame width live; on
+	// pointerup, the final width (in px) is committed to `attrs.width`
+	// as a percentage of the wrap so the image re-flows responsively.
 	let handle = frame.querySelector('.plim-image-resize') as HTMLElement | null;
 	if (!handle && !opts.readonly) {
 		handle = document.createElement('div');
 		handle.className = 'plim-image-resize';
 		handle.setAttribute('contenteditable', 'false');
 		handle.setAttribute(DATA_PLIM_ISOLATED, 'true');
-		// Visible grip child — full-height invisible hit area, small pill
-		// rendered via ::before in CSS for hover affordance.
 		handle.addEventListener('pointerdown', (ev) => {
 			ev.preventDefault();
 			ev.stopPropagation();
 			const startX = ev.clientX;
 			const startWidth = frame!.getBoundingClientRect().width;
-			// The block content area (wrap is full-width inside the block).
 			const parentWidth = wrap!.getBoundingClientRect().width;
 			handle!.setPointerCapture(ev.pointerId);
 			handle!.classList.add('plim-image-resize-active');
@@ -1442,6 +1446,90 @@ function renderImage(el: HTMLElement, node: BlockNode, opts: ViewOptions) {
 		frame.appendChild(handle);
 	}
 
+	// Toolbar. Floats over the top-right of the image; visible on
+	// hover or when the block is selected (CSS-driven). Buttons:
+	// Replace, Align (cycles L→C→R), Caption (toggle visibility +
+	// focus), Delete. Toolbar is `data-plim-isolated` so clicks inside
+	// don't trigger block-selection / caret moves.
+	let toolbar = stash.__plimImageToolbar;
+	if ((!toolbar || !frame.contains(toolbar)) && !opts.readonly) {
+		toolbar = document.createElement('div');
+		toolbar.className = 'plim-image-toolbar';
+		toolbar.setAttribute('contenteditable', 'false');
+		toolbar.setAttribute(DATA_PLIM_ISOLATED, 'true');
+		const mkBtn = (label: string, title: string, onClick: () => void): HTMLButtonElement => {
+			const b = document.createElement('button');
+			b.type = 'button';
+			b.className = 'plim-image-toolbar-btn';
+			b.title = title;
+			b.setAttribute('aria-label', title);
+			b.textContent = label;
+			// Block the editor's pointerdown handler from treating a
+			// toolbar click as a block-selection event.
+			b.addEventListener('mousedown', (e) => e.preventDefault());
+			b.addEventListener('click', (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				onClick();
+			});
+			return b;
+		};
+		const replaceBtn = mkBtn('Replace', 'Replace image', () => {
+			const url = window.prompt('Image URL', src);
+			if (!url) return;
+			dispatchAttrs(el, opts, { src: url });
+		});
+		// Align button rotates through left → center → right. The label
+		// shows the *current* alignment so the user always sees the
+		// active state; clicking advances.
+		const alignBtn = mkBtn(alignLabel(align), 'Align image', () => {
+			// Read the latest align from state in case it changed between
+			// renders (the closure captures the value at render time).
+			const stateNow = opts.getState();
+			const p = pathForBlockId(stateNow.doc.children, node.id);
+			const cur = ((p ? blockAt(stateNow.doc.children, p)?.attrs?.align : align) as 'left' | 'center' | 'right' | undefined) ?? 'left';
+			const next: 'left' | 'center' | 'right' = cur === 'left' ? 'center' : cur === 'center' ? 'right' : 'left';
+			dispatchAttrs(el, opts, { align: next });
+		});
+		alignBtn.classList.add('plim-image-toolbar-align');
+		const captionBtn = mkBtn('Caption', 'Toggle caption', () => {
+			// If hidden, request visibility + focus the empty input.
+			// If visible and empty, hide. If visible and non-empty,
+			// focus to allow editing.
+			const stateNow = opts.getState();
+			const p = pathForBlockId(stateNow.doc.children, node.id);
+			const blk = p ? blockAt(stateNow.doc.children, p) : null;
+			const curCap = (blk?.attrs?.caption as string | undefined) ?? '';
+			const curVis = !!blk?.attrs?.captionVisible || curCap.length > 0;
+			if (!curVis) {
+				dispatchAttrs(el, opts, { captionVisible: true });
+				// Focus after the next render flushes.
+				queueMicrotask(() => stash.__plimImageCaption?.focus());
+			} else if (curCap.length === 0) {
+				dispatchAttrs(el, opts, { captionVisible: false });
+			} else {
+				stash.__plimImageCaption?.focus();
+			}
+		});
+		const deleteBtn = mkBtn('Delete', 'Delete image', () => {
+			const stateNow = opts.getState();
+			const p = pathForBlockId(stateNow.doc.children, node.id);
+			if (!p) return;
+			const tx = opts.editor.createTransaction();
+			tx.removeBlock(p);
+			tx.commit();
+		});
+		deleteBtn.classList.add('plim-image-toolbar-delete');
+		toolbar.append(replaceBtn, alignBtn, captionBtn, deleteBtn);
+		frame.appendChild(toolbar);
+		stash.__plimImageToolbar = toolbar;
+	} else if (toolbar) {
+		// Re-sync the alignment label on the existing button (the only
+		// piece of the toolbar that depends on attrs).
+		const alignBtn = toolbar.querySelector('.plim-image-toolbar-align') as HTMLButtonElement | null;
+		if (alignBtn) alignBtn.textContent = alignLabel(align);
+	}
+
 	// Caption. The element is `data-plim-isolated` so:
 	//  - typing into it is handled natively (the editor's beforeinput
 	//    pipeline bails before dispatching transactions).
@@ -1457,24 +1545,33 @@ function renderImage(el: HTMLElement, node: BlockNode, opts: ViewOptions) {
 		caps.textContent = caption;
 		caps.addEventListener('blur', () => {
 			const next = caps!.textContent ?? '';
-			// Compare against the latest state (not the closure's snapshot,
-			// which goes stale after the next render) so we only commit a
-			// transaction when the caption actually changed.
 			const cur = opts.getState();
 			const p = pathForBlockId(cur.doc.children, node.id);
 			const stored = (p ? blockAt(cur.doc.children, p)?.attrs?.caption : '') as string | undefined;
-			if (next !== (stored ?? '')) dispatchAttrs(el, opts, { caption: next });
+			const patch: Record<string, unknown> = {};
+			if (next !== (stored ?? '')) patch.caption = next;
+			// If we asked the caption to be visible (empty + toolbar
+			// click) and the user typed nothing, clear the request so
+			// the row hides again.
+			if (next.length === 0) patch.captionVisible = false;
+			if (Object.keys(patch).length > 0) dispatchAttrs(el, opts, patch);
 		});
 		wrap.appendChild(caps);
 		stash.__plimImageCaption = caps;
 	} else {
-		// Sync from attrs only if the user isn't currently editing — i.e.
-		// the caption isn't focused. Avoids clobbering in-progress edits
-		// when an unrelated transaction fires.
 		const focused = el.ownerDocument.activeElement === caps;
 		if (!focused && caps.textContent !== caption) caps.textContent = caption;
 		caps.contentEditable = opts.readonly ? 'false' : 'true';
 	}
+	// Toggle the caption row's presence in the layout. Done as an
+	// attribute on the wrap so CSS can hide/show without remounting
+	// the DOM (preserves caret/IME state).
+	wrap.setAttribute('data-caption-visible', captionVisible ? 'true' : 'false');
+}
+
+function alignLabel(a: 'left' | 'center' | 'right'): string {
+	// Compact labels — the title attribute carries the verbose name.
+	return a === 'left' ? '←' : a === 'center' ? '↔' : '→';
 }
 
 function renderEmbed(el: HTMLElement, node: BlockNode, opts: ViewOptions) {
