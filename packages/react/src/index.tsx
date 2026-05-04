@@ -309,3 +309,21 @@ export function HoverMenu(props: HoverMenuProps): React.ReactElement | null {
 }
 
 export { type AgnosticEditor, type Snapshot };
+
+export {
+	slashCommandExtension,
+	SlashCommandMenu,
+	DEFAULT_SLASH_ITEMS,
+	type SlashCommandItem,
+	type SlashCommandMenuProps,
+	type SlashCommandExtensionOptions,
+	type SlashCommandApplyContext,
+} from './extensions/slash-command.js';
+export {
+	mentionExtension,
+	MentionMenu,
+	DEFAULT_MENTION_USERS,
+	type MentionUser,
+	type MentionMenuProps,
+	type MentionExtensionOptions,
+} from './extensions/mention.js';
