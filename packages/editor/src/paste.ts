@@ -13,9 +13,9 @@
  * responsible for `preventDefault`-ing the native event and routing the
  * clipboard data here.
  */
-import type { ActionContext, BlockNode, BlockPath, MarkInstance, TextSpan } from '@plim/core';
+import type { ActionContext, BlockDescriptor, BlockNode, BlockPath, MarkInstance, TextSpan } from '@plim/core';
 import { blockTextLength, getBlockAt, newId, normalizeText } from '@plim/core';
-import { contentFromMarkdown } from '@plim/markdown';
+import { contentFromMarkdown, parseMarkdown } from '@plim/markdown';
 import { sanitize, Sanitizer } from '@darylcecile/sanitizer';
 
 /**
@@ -26,6 +26,16 @@ export type PasteData = {
 	text: string;
 	html: string;
 	files: File[];
+	/**
+	 * JSON payload from the `application/x-plim` clipboard MIME, written by
+	 * `clipboard.ts:writeClipboardMarkdown` whenever the editor copies a
+	 * slice. When present, the paste pipeline treats this as authoritative
+	 * over markdown/HTML — it's a lossless plim↔plim channel that preserves
+	 * block types, attrs (image src, code language, callout tone), and full
+	 * nesting that markdown couldn't round-trip without descriptor
+	 * `fromMarkdown` hooks. Undefined when the source isn't a plim editor.
+	 */
+	plim?: string;
 };
 
 /**
@@ -170,7 +180,7 @@ export function looksLikeMarkdown(text: string): boolean {
  * In both paths the caret lands at the end of the *last* parsed block, so a
  * follow-up keystroke continues at the natural place for the document.
  */
-export function pasteMarkdown(text: string, ctx: ActionContext): boolean {
+export function pasteMarkdown(text: string, ctx: ActionContext, blocks?: BlockDescriptor[]): boolean {
 	const sel = ctx.state.selection;
 	if (!sel) return false;
 	if (!pathsEqual(sel.anchor.path, sel.head.path)) return false;
@@ -180,7 +190,11 @@ export function pasteMarkdown(text: string, ctx: ActionContext): boolean {
 	if (!block) return false;
 
 	const normalised = text.replace(/\r\n?/g, '\n');
-	const doc = contentFromMarkdown(...normalised.split('\n'));
+	// Use `parseMarkdown` directly so registered descriptors' `fromMarkdown`
+	// hooks get a peek at every line. This is what restores callouts, custom
+	// admonitions, etc. on round-trip — without it, `> [!INFO] …` parses as
+	// a built-in `quote`, dropping the descriptor type.
+	const doc = parseMarkdown(normalised.split('\n'), blocks ? { blocks } : undefined);
 	// `contentFromMarkdown` emits an empty paragraph for every blank source
 	// line — that's deliberate (round-trips for the rest of the pipeline)
 	// but for paste purposes blank lines are just separators between blocks
@@ -242,6 +256,89 @@ export function pasteMarkdown(text: string, ctx: ActionContext): boolean {
 		anchor: { path: lastPath, offset: lastLen },
 		head: { path: lastPath, offset: lastLen },
 	});
+	tx.commit();
+	return true;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 0 — Plim-native (lossless plim↔plim via the `application/x-plim` MIME).
+//
+// When the source clipboard came from another plim editor, `clipboard.ts`
+// wrote a JSON envelope to the OS clipboard. This path treats it as
+// authoritative: types, attrs (image src, code language, callout tone),
+// and full nesting are preserved exactly. Compared to the markdown path
+// it sidesteps the lossy serializer altogether — useful for blocks like
+// raw HTML, embeds, images, tables, or any descriptor without a
+// `fromMarkdown` hook.
+
+const PLIM_CLIPBOARD_VERSION = 1;
+
+/** Recursively assign fresh ids so the pasted slice can't collide with existing blocks. */
+function reassignIds(blocks: BlockNode[]): BlockNode[] {
+	return blocks.map((b) => {
+		const out: BlockNode = { ...b, id: newId() };
+		if (b.children) out.children = reassignIds(b.children);
+		return out;
+	});
+}
+
+function isValidBlockNode(x: unknown): x is BlockNode {
+	if (!x || typeof x !== 'object') return false;
+	const o = x as Record<string, unknown>;
+	if (typeof o.type !== 'string') return false;
+	// id may be missing/empty in alien payloads; we re-id anyway.
+	return true;
+}
+
+/**
+ * Phase 0 paste: lossless plim-native blocks via the custom MIME envelope.
+ * Returns true on success. Insertion logic mirrors `pasteMarkdown` so the
+ * caret behaviour and undo grouping are consistent across phases.
+ */
+export function pastePlimNative(payload: string, ctx: ActionContext): boolean {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(payload);
+	} catch {
+		return false;
+	}
+	if (!parsed || typeof parsed !== 'object') return false;
+	const env = parsed as { version?: unknown; blocks?: unknown };
+	if (typeof env.version !== 'number' || env.version > PLIM_CLIPBOARD_VERSION) return false;
+	if (!Array.isArray(env.blocks)) return false;
+	const incoming = env.blocks.filter(isValidBlockNode) as BlockNode[];
+	if (incoming.length === 0) return false;
+	const fresh = reassignIds(incoming);
+
+	const sel = ctx.state.selection;
+	if (!sel) return false;
+	if (!pathsEqual(sel.anchor.path, sel.head.path)) return false;
+	const path = sel.head.path;
+	const block = getBlockAt(ctx.state.doc, path);
+	if (!block) return false;
+
+	const tx = ctx.createTransaction();
+	const fromOff = Math.min(sel.anchor.offset, sel.head.offset);
+	const toOff = Math.max(sel.anchor.offset, sel.head.offset);
+	const parentPath = path.slice(0, -1);
+	const blockIdx = path[path.length - 1] ?? 0;
+	const isEmpty = blockTextLength(block) === 0;
+	const lastBlock = fresh[fresh.length - 1] as BlockNode;
+	const lastLen = lastBlock.text ? lastBlock.text.reduce((n, s) => n + s.text.length, 0) : 0;
+
+	if (isEmpty) {
+		for (let i = 0; i < fresh.length; i++) tx.insertBlock([...parentPath, blockIdx + i], fresh[i] as BlockNode);
+		tx.removeBlock([...parentPath, blockIdx + fresh.length]);
+		const lastPath: BlockPath = [...parentPath, blockIdx + fresh.length - 1];
+		tx.setSelection({ anchor: { path: lastPath, offset: lastLen }, head: { path: lastPath, offset: lastLen } });
+		tx.commit();
+		return true;
+	}
+	if (fromOff !== toOff) tx.replaceRange(path, fromOff, toOff, []);
+	tx.splitBlock(path, fromOff);
+	for (let i = 0; i < fresh.length; i++) tx.insertBlock([...parentPath, blockIdx + 1 + i], fresh[i] as BlockNode);
+	const lastPath: BlockPath = [...parentPath, blockIdx + fresh.length];
+	tx.setSelection({ anchor: { path: lastPath, offset: lastLen }, head: { path: lastPath, offset: lastLen } });
 	tx.commit();
 	return true;
 }

@@ -14,6 +14,7 @@ import {
 	isMacLike,
 	newId,
 } from '@plim/core';
+import { sliceFromBlockSelection, sliceFromTextRange, writeClipboardMarkdown } from './clipboard.js';
 
 export type ViewOptions = {
 	container: HTMLElement;
@@ -34,7 +35,7 @@ export type ViewOptions = {
 	// `onBeforeInput` as before. The native event continues to fire
 	// `onClipboardEvent('paste', ev)` either way so action triggers keyed
 	// to the clipboard channel still run.
-	onPaste?: (data: { text: string; html: string; files: File[] }) => boolean;
+	onPaste?: (data: { text: string; html: string; files: File[]; plim?: string }) => boolean;
 	// Optional bridge to render a custom block whose `BlockDescriptor.toComponent`
 	// is defined (e.g., a React component). The view creates a stable host
 	// element inside the block wrapper and hands it to this hook on every
@@ -760,12 +761,144 @@ export function mountView(opts: ViewOptions): View {
 	root.addEventListener('compositionstart', onCompositionStart);
 	root.addEventListener('compositionend', onCompositionEnd);
 
-	const onCopy = (ev: ClipboardEvent) => opts.onClipboardEvent('copy', ev);
-	const onCut = (ev: ClipboardEvent) => opts.onClipboardEvent('cut', ev);
+	const onCopy = (ev: ClipboardEvent) => {
+		opts.onClipboardEvent('copy', ev);
+		if (ev.defaultPrevented) return;
+		performClipboardCopyOrCut(ev, false);
+	};
+	const onCut = (ev: ClipboardEvent) => {
+		opts.onClipboardEvent('cut', ev);
+		if (ev.defaultPrevented) return;
+		performClipboardCopyOrCut(ev, true);
+	};
+	function performClipboardCopyOrCut(ev: ClipboardEvent, isCut: boolean): void {
+		if (!ev.clipboardData) return;
+		const state = opts.getState();
+		// Two slice shapes (see clipboard.ts). For a same-block text range we
+		// only intercept on cut (so we can drive the deletion); copy stays
+		// native so partial-text copy keeps inline-only fidelity (no surprise
+		// block prefixes like `> ` for a quote when only a few words were
+		// selected).
+		let slice: BlockNode[] | null = null;
+		let scope: 'block-set' | 'cross-range' | 'same-block' | null = null;
+		let rangeInfo: { start: { path: number[]; offset: number }; end: { path: number[]; offset: number } } | null = null;
+		if (selection.ids.size > 0) {
+			const blocks = sliceFromBlockSelection(state.doc, selection.ids);
+			if (blocks.length > 0) {
+				slice = blocks;
+				scope = 'block-set';
+			}
+		} else {
+			const r = sliceFromTextRange(state.doc, state.selection);
+			if (r) {
+				slice = r.blocks;
+				scope = 'cross-range';
+				rangeInfo = { start: r.start, end: r.end };
+			} else if (isCut) {
+				// Same-block range cut: collapsed selections have nothing to do;
+				// non-collapsed selections fall through to the in-block delete
+				// path below. We still want to write markdown for the in-block
+				// content so external apps receive the marked-up text.
+				const sel = state.selection;
+				if (!(pathsEqual(sel.anchor.path, sel.head.path) && sel.anchor.offset === sel.head.offset)) {
+					const block = blockAt(state.doc.children, sel.head.path);
+					if (block?.text) {
+						const fromOff = Math.min(sel.anchor.offset, sel.head.offset);
+						const toOff = Math.max(sel.anchor.offset, sel.head.offset);
+						const clone: BlockNode = { id: newId('b'), type: block.type, text: sliceTextSpansLocal(block.text, fromOff, toOff) };
+						if (block.attrs) clone.attrs = { ...block.attrs };
+						slice = [clone];
+						scope = 'same-block';
+					}
+				}
+			}
+		}
+		if (!slice || !scope) return;
+		writeClipboardMarkdown(ev, slice, opts.blocks);
+		ev.preventDefault();
+		if (!isCut) return;
+		if (scope === 'block-set') {
+			deleteSelectedBlocks();
+		} else if (scope === 'same-block') {
+			deleteSelectionIfAny(opts);
+		} else if (scope === 'cross-range' && rangeInfo) {
+			deleteCrossBlockRange(rangeInfo.start, rangeInfo.end);
+		}
+	}
+	function sliceTextSpansLocal(spans: TextSpan[], from: number, to: number): TextSpan[] {
+		if (from >= to) return [];
+		const out: TextSpan[] = [];
+		let off = 0;
+		for (const s of spans) {
+			const end = off + s.text.length;
+			if (end <= from) {
+				off = end;
+				continue;
+			}
+			if (off >= to) break;
+			const a = Math.max(from, off) - off;
+			const b = Math.min(to, end) - off;
+			const sliced = s.text.slice(a, b);
+			if (sliced.length > 0) {
+				const span: TextSpan = { text: sliced };
+				if (s.marks) span.marks = s.marks.map((m) => (m.attrs ? { type: m.type, attrs: { ...m.attrs } } : { type: m.type }));
+				out.push(span);
+			}
+			off = end;
+		}
+		return out;
+	}
+	function deleteCrossBlockRange(start: { path: number[]; offset: number }, end: { path: number[]; offset: number }): void {
+		// Compose: trim start tail, trim end head, remove every "outermost"
+		// middle block in reverse doc-order, then joinBackward end into start.
+		// "Outermost" excludes any middle whose ancestor is also a middle —
+		// removing the ancestor takes the descendant with it, so listing both
+		// would mean operating on a path that no longer exists.
+		const state = opts.getState();
+		const flat = flattenBlocks(state.doc);
+		const startIdx = flat.findIndex((e) => pathsEqual(e.path, start.path));
+		const endIdx = flat.findIndex((e) => pathsEqual(e.path, end.path));
+		if (startIdx < 0 || endIdx < 0 || endIdx <= startIdx) return;
+		const startBlock = flat[startIdx]!.block;
+		const startLen = startBlock.text !== undefined ? blockTextLength(startBlock) : 0;
+		const middleEntries = flat.slice(startIdx + 1, endIdx);
+		// Keep only outermost middles.
+		const middles: number[][] = [];
+		for (const m of middleEntries) {
+			const isUnderAnother = middleEntries.some(
+				(o) => o !== m && o.path.length < m.path.length && o.path.every((seg, i) => seg === m.path[i]),
+			);
+			if (!isUnderAnother) middles.push(m.path.slice());
+		}
+		const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
+		// 1. Trim start tail.
+		if (startBlock.text !== undefined && start.offset < startLen) {
+			tx.replaceRange(start.path, start.offset, startLen, []);
+		}
+		// 2. Trim end head.
+		const endBlock = flat[endIdx]!.block;
+		if (endBlock.text !== undefined && end.offset > 0) {
+			tx.replaceRange(end.path, 0, end.offset, []);
+		}
+		// 3. Remove middles in reverse doc-order.
+		const removeOrder = [...middles].sort((a, b) => comparePaths(b, a));
+		for (const p of removeOrder) tx.removeBlock(p);
+		// 4. Join end into start. End's path needs adjustment for prior removals.
+		const adjustedEndPath = adjustPathAfterRemovals(end.path, middles);
+		tx.joinBackward(adjustedEndPath);
+		tx.setSelection({ anchor: { path: start.path, offset: start.offset }, head: { path: start.path, offset: start.offset } });
+		tx.commit();
+	}
 	const onPaste = (ev: ClipboardEvent) => {
 		const data = ev.clipboardData;
 		const text = data?.getData('text/plain') ?? '';
 		const html = data?.getData('text/html') ?? '';
+		// `application/x-plim` is the lossless plim-native channel. When the
+		// source clipboard came from another plim editor, this carries the
+		// full BlockNode[] JSON (versioned), preserving types/attrs/nesting
+		// that markdown can't roundtrip without per-descriptor fromMarkdown
+		// hooks. The paste pipeline checks this first.
+		const plimRaw = data?.getData('application/x-plim') ?? '';
 		const files = data?.files ? Array.from(data.files) : [];
 		// New pipeline first: if the consumer's handler reports it owned the
 		// paste, we're done (preventDefault already covered). Otherwise the
@@ -773,7 +906,9 @@ export function mountView(opts: ViewOptions): View {
 		// any code path that hasn't opted into the new hook yet).
 		if (opts.onPaste) {
 			ev.preventDefault();
-			const handled = opts.onPaste({ text, html, files });
+			const payload: { text: string; html: string; files: File[]; plim?: string } = { text, html, files };
+			if (plimRaw) payload.plim = plimRaw;
+			const handled = opts.onPaste(payload);
 			if (!handled && text) opts.onBeforeInput(text);
 		} else if (text) {
 			ev.preventDefault();

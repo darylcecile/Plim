@@ -48,7 +48,26 @@ export const calloutBlock = defineBlock({
 		// support callouts; consumers that don't will fall back to a
 		// regular blockquote with an `[!INFO]` prefix.
 		const inline = ctx.serializeInline(ctx.spans);
-		return [`> [!${tone}] ${inline}`];
+		return [`> [!${tone}]\n> ${inline}`];
+	},
+	// Inverse of `toMarkdown`: when pasting from a markdown source (e.g.
+	// another editor, or a plain-text channel that doesn't carry the
+	// `application/x-plim` envelope) we still want `> [!INFO]\n> body`
+	// to land as a callout — not as a blockquote. The hook returns
+	// `null` for any line that isn't our shape, letting the parser fall
+	// through to the built-in blockquote handler.
+	fromMarkdown: ({ lines, index, parseInline }) => {
+		const head = lines[index] ?? '';
+		const m = /^>\s*\[!(\w+)\]\s*$/.exec(head);
+		if (!m) return null;
+		const tone = m[1]!.toLowerCase();
+		const next = lines[index + 1] ?? '';
+		const body = /^>\s?(.*)$/.exec(next);
+		const text = body ? body[1]! : '';
+		return {
+			block: { id: 'tmp', type: 'callout', attrs: { tone }, text: parseInline(text) },
+			consumed: body ? 2 : 1,
+		};
 	},
 	toDOM: (payload) => {
 		const tone = (payload.attrs.tone as CalloutTone | undefined) ?? 'info';

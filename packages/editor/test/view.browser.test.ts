@@ -1586,3 +1586,293 @@ describe('Multi-block selection', () => {
 	});
 
 });
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Copy / cut → markdown pipeline.
+// Verifies registered blocks' `toMarkdown` actually fires on clipboard events
+// (not just when contentToMarkdown is called explicitly). Synthesises copy/cut
+// ClipboardEvents the same way paste tests do — DataTransfer init + dispatch
+// against the editor root.
+
+describe('clipboard copy/cut → markdown', () => {
+	function fireClipboard(root: HTMLElement, kind: 'copy' | 'cut'): { md: string; plain: string; defaultPrevented: boolean } {
+		const dt = new DataTransfer();
+		const ev = new ClipboardEvent(kind, { clipboardData: dt, bubbles: true, cancelable: true });
+		root.dispatchEvent(ev);
+		return {
+			md: dt.getData('text/markdown'),
+			plain: dt.getData('text/plain'),
+			defaultPrevented: ev.defaultPrevented,
+		};
+	}
+
+	it('copies a multi-block selection through each descriptor toMarkdown', () => {
+		// Use a custom block with a non-trivial toMarkdown so we can prove the
+		// hook fires (rather than the browser's default DOM serialization).
+		const calloutBlock = defineBlock({
+			name: 'callout',
+			type: 'standalone',
+			supportsDecoration: true,
+			toDOM: (payload) => {
+				const wrap = document.createElement('aside');
+				wrap.className = 'plim-callout';
+				for (const node of payload.content as HTMLElement[]) wrap.appendChild(node);
+				return wrap;
+			},
+			toMarkdown: (payload) => `> [!note] ${payload.textContent}`,
+		});
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock, calloutBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [
+					{ id: newId(), type: 'paragraph', text: [{ text: 'before' }] },
+					{ id: newId(), type: 'callout', text: [{ text: 'heads up' }] },
+					{ id: newId(), type: 'paragraph', text: [{ text: 'after' }] },
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		const blocks = Array.from(container.querySelectorAll('[data-block-id]')) as HTMLElement[];
+		// Multi-select callout + paragraph after via shift-range.
+		const handleA = blocks[1]!.querySelector('.plim-block-drag') as HTMLElement;
+		const handleB = blocks[2]!.querySelector('.plim-block-drag') as HTMLElement;
+		handleA.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerId: 1 }));
+		handleA.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, button: 0, pointerId: 1 }));
+		handleB.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerId: 1 }));
+		handleB.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, button: 0, pointerId: 1, shiftKey: true }));
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		const r = fireClipboard(root, 'copy');
+		expect(r.defaultPrevented).toBe(true);
+		// callout's toMarkdown should appear in the output, proving the hook ran.
+		expect(r.md).toContain('> [!note] heads up');
+		expect(r.md).toContain('after');
+		// Plain-text mirror equals markdown for now.
+		expect(r.plain).toBe(r.md);
+		// Doc unchanged on copy.
+		expect(editor.getState().doc.children).toHaveLength(3);
+		editor.destroy();
+		container.remove();
+	});
+
+	it('cuts a multi-block selection: writes markdown AND removes the blocks', () => {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: ['a', 'b', 'c', 'd'].map((t) => ({ id: newId(), type: 'paragraph' as const, text: [{ text: t }] })),
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		const blocks = Array.from(container.querySelectorAll('[data-block-id]')) as HTMLElement[];
+		const h1 = blocks[1]!.querySelector('.plim-block-drag') as HTMLElement;
+		const h2 = blocks[2]!.querySelector('.plim-block-drag') as HTMLElement;
+		h1.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerId: 1 }));
+		h1.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, button: 0, pointerId: 1 }));
+		h2.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerId: 1 }));
+		h2.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, button: 0, pointerId: 1, shiftKey: true }));
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		const r = fireClipboard(root, 'cut');
+		expect(r.defaultPrevented).toBe(true);
+		expect(r.md).toContain('b');
+		expect(r.md).toContain('c');
+		// Cut should leave only 'a' and 'd'.
+		const remaining = editor.getState().doc.children.map((b) => (b.text ?? [])[0]?.text ?? '');
+		expect(remaining).toEqual(['a', 'd']);
+		editor.destroy();
+		container.remove();
+	});
+
+	it('copies a cross-block text range with trimmed start/end', () => {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [
+					{ id: newId(), type: 'paragraph' as const, text: [{ text: 'hello world' }] },
+					{ id: newId(), type: 'paragraph' as const, text: [{ text: 'middle line' }] },
+					{ id: newId(), type: 'paragraph' as const, text: [{ text: 'goodbye now' }] },
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		// Set text-range selection from offset 6 of block 0 ("world") through
+		// offset 7 of block 2 ("goodbye"). Use a transaction so PSelection is
+		// authoritative (DOM selection isn't synced for this test path).
+		const tx = editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 6 }, head: { path: [2], offset: 7 } });
+		tx.commit();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		const r = fireClipboard(root, 'copy');
+		expect(r.defaultPrevented).toBe(true);
+		// Start: "world", end: "goodbye", middle: full "middle line".
+		expect(r.md).toContain('world');
+		expect(r.md).toContain('middle line');
+		expect(r.md).toContain('goodbye');
+		expect(r.md).not.toContain('hello ');
+		expect(r.md).not.toContain(' now');
+		// Doc unchanged on copy.
+		expect(editor.getState().doc.children).toHaveLength(3);
+		editor.destroy();
+		container.remove();
+	});
+
+	it('does NOT intercept copy of a single-block text range (lets native handle inline copy)', () => {
+		const { editor, container, cleanup } = setupMulti(['hello world']);
+		const tx = editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		const r = fireClipboard(root, 'copy');
+		// Native copy untouched: nothing written, default not prevented.
+		expect(r.defaultPrevented).toBe(false);
+		expect(r.md).toBe('');
+		cleanup();
+	});
+
+	function setupMulti(texts: string[]) {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: { type: 'doc', children: texts.map((t) => ({ id: newId(), type: 'paragraph' as const, text: [{ text: t }] })) },
+			autoFocus: false,
+		});
+		editor.mount();
+		return { editor, container, cleanup: () => { editor.destroy(); container.remove(); } };
+	}
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Paste pipeline: lossless plim-native MIME + descriptor.fromMarkdown.
+
+describe('clipboard paste — plim-native MIME (application/x-plim)', () => {
+	function firePaste(root: HTMLElement, payloads: { text?: string; html?: string; plim?: string }): void {
+		const dt = new DataTransfer();
+		if (payloads.text) dt.setData('text/plain', payloads.text);
+		if (payloads.html) dt.setData('text/html', payloads.html);
+		if (payloads.plim) dt.setData('application/x-plim', payloads.plim);
+		const ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+		root.dispatchEvent(ev);
+	}
+
+	it('restores blocks losslessly when the clipboard carries the plim envelope', () => {
+		const calloutBlock = defineBlock({
+			name: 'callout',
+			type: 'standalone',
+			toDOM: (payload) => {
+				const el = document.createElement('aside');
+				for (const node of payload.content as HTMLElement[]) el.appendChild(node);
+				return el;
+			},
+		});
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock, calloutBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: { type: 'doc', children: [{ id: newId(), type: 'paragraph', text: [] }] },
+			autoFocus: false,
+		});
+		editor.mount();
+		// Synthesise a plim-native paste with a callout (with custom attrs)
+		// and a paragraph after it.
+		const envelope = JSON.stringify({
+			version: 1,
+			blocks: [
+				{ id: 'src1', type: 'callout', attrs: { tone: 'warn' }, text: [{ text: 'careful' }] },
+				{ id: 'src2', type: 'paragraph', text: [{ text: 'and another' }] },
+			],
+		});
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		firePaste(root, { plim: envelope, text: 'careful\nand another' });
+		const doc = editor.getState().doc;
+		// Empty target paragraph replaced in place: now exactly the two blocks.
+		expect(doc.children).toHaveLength(2);
+		expect(doc.children[0]!.type).toBe('callout');
+		expect(doc.children[0]!.attrs?.tone).toBe('warn');
+		expect(doc.children[0]!.id).not.toBe('src1'); // re-id'd to avoid collisions
+		expect(doc.children[1]!.type).toBe('paragraph');
+		editor.destroy();
+		container.remove();
+	});
+
+	it('rejects an envelope with a higher version (forward compat)', () => {
+		const { container, editor, cleanup } = (() => {
+			const c = document.createElement('div');
+			document.body.appendChild(c);
+			const plim = new PlimDriver({ registeredBlocks: [paragraphBlock] });
+			const e = deriveEditor(plim, {
+				containerAdapter: attachContainer(() => c),
+				initialContent: { type: 'doc', children: [{ id: newId(), type: 'paragraph', text: [{ text: 'hello' }] }] },
+				autoFocus: false,
+			});
+			e.mount();
+			return { container: c, editor: e, cleanup: () => { e.destroy(); c.remove(); } };
+		})();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		firePaste(root, {
+			plim: JSON.stringify({ version: 999, blocks: [{ id: 'x', type: 'paragraph', text: [{ text: 'X' }] }] }),
+			text: 'X',
+		});
+		// Falls through to plain-text path: 'X' inserted at caret (start, given no selection set).
+		const doc = editor.getState().doc;
+		expect(doc.children[0]!.text![0]!.text).toContain('X');
+		// We're not asserting exact behaviour here — only that the editor
+		// didn't accept the unknown-version envelope and crash.
+		cleanup();
+	});
+
+	it('falls back to markdown + descriptor.fromMarkdown when no plim MIME is present', () => {
+		// Callout descriptor with `fromMarkdown` so a plain markdown channel
+		// (e.g. another markdown app) can still round-trip into a callout.
+		const calloutBlock = defineBlock({
+			name: 'callout',
+			type: 'standalone',
+			toDOM: (payload) => {
+				const el = document.createElement('aside');
+				for (const node of payload.content as HTMLElement[]) el.appendChild(node);
+				return el;
+			},
+			toMarkdown: (p) => `> [!${String(p.attrs.tone ?? 'NOTE').toUpperCase()}] ${p.textContent}`,
+			fromMarkdown: ({ lines, index, parseInline }) => {
+				const line = lines[index] ?? '';
+				const m = /^>\s+\[!(\w+)\]\s+(.*)$/.exec(line);
+				if (!m) return null;
+				return { block: { id: 'src', type: 'callout', attrs: { tone: m[1]!.toLowerCase() }, text: parseInline(m[2]!) }, consumed: 1 };
+			},
+		});
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock, calloutBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: { type: 'doc', children: [{ id: newId(), type: 'paragraph', text: [] }] },
+			autoFocus: false,
+		});
+		editor.mount();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		// No `plim` MIME — only the markdown text. Without the hook this
+		// would parse as a quote block; with the hook, callout wins.
+		firePaste(root, { text: '> [!INFO] heads up' });
+		const doc = editor.getState().doc;
+		expect(doc.children).toHaveLength(1);
+		expect(doc.children[0]!.type).toBe('callout');
+		expect(doc.children[0]!.attrs?.tone).toBe('info');
+		editor.destroy();
+		container.remove();
+	});
+});

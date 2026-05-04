@@ -1,6 +1,6 @@
 // Block & mark factories. Note: these factories return descriptors, not instances of an editor.
 
-import type { TextSpan } from './document.js';
+import type { BlockNode, TextSpan } from './document.js';
 import type { EditorHandle } from './editor-handle.js';
 
 export type BlockPayload = {
@@ -51,6 +51,41 @@ export type BlockDescriptor = {
 	 * (image, divider, callout chrome) should set this explicitly.
 	 */
 	toMarkdown?: (payload: BlockPayload, ctx: BlockMarkdownContext) => string | string[];
+	/**
+	 * Parse one or more lines of markdown into a block of this type. Called
+	 * by `parseMarkdown` (in `@plim/markdown`) when this descriptor is
+	 * registered. Receives the current line plus the surrounding cursor so
+	 * multi-line shapes (fenced code, callouts spanning blocks) can peek
+	 * ahead. Return `null` if this descriptor does not match the line — the
+	 * parser will try the next descriptor and finally fall through to
+	 * built-ins. Return `{block, consumed}` to claim ≥1 line(s); `consumed`
+	 * is how many input lines this match ate.
+	 *
+	 * Rationale: this is the dual of `toMarkdown`. Without it, copying a
+	 * callout (which serializes via `toMarkdown` as `> [!INFO] …`) and
+	 * pasting it back parses as a built-in `quote` block — losing the
+	 * callout type and any tone attrs. With `fromMarkdown` registered, the
+	 * roundtrip is lossless even across plain markdown channels.
+	 */
+	fromMarkdown?: (ctx: BlockMarkdownParseContext) => BlockMarkdownParseResult | null;
+};
+
+/**
+ * Cursor over the markdown input, exposed to `BlockDescriptor.fromMarkdown`.
+ * Implementations typically inspect `lines[index]` and may peek further
+ * lines (`lines[index + n]`) for multi-line shapes.
+ */
+export type BlockMarkdownParseContext = {
+	readonly lines: readonly string[];
+	readonly index: number;
+	/** Render an inline markdown line into TextSpans (handles built-in marks). */
+	parseInline(line: string): TextSpan[];
+};
+
+export type BlockMarkdownParseResult = {
+	block: BlockNode;
+	/** Number of input lines this match consumed (≥1). */
+	consumed: number;
 };
 
 export type BlockMarkdownContext = {

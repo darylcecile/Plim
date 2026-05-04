@@ -23,7 +23,7 @@ import {
 } from '@plim/core';
 import { mountView, type View, type ViewOptions } from './view.js';
 import { runBuiltInBeforeAction, runBuiltInKey } from './builtin-actions.js';
-import { pastePlainText, pasteMarkdown, pasteHtml, looksLikeMarkdown, type PasteData } from './paste.js';
+import { pastePlainText, pasteMarkdown, pasteHtml, pastePlimNative, looksLikeMarkdown, type PasteData } from './paste.js';
 
 export type ContainerAdapter = {
 	resolve(): HTMLElement | null;
@@ -384,11 +384,19 @@ export function deriveEditor(plim: PlimDriver, options: DeriveEditorOptions): Ag
 			const handled = ext.transformPaste(data, ctx);
 			if (handled === true) return true;
 		}
+		// Phase 0 — Plim-native lossless. Set by `clipboard.ts` whenever the
+		// copy source is another plim editor. Preserves block types/attrs/
+		// nesting that would degrade through markdown (e.g. callouts → quote
+		// without `fromMarkdown` registered, image attrs, code language).
+		if (data.plim && pastePlimNative(data.plim, ctx)) return true;
 		// Phase 3 — HTML clipboard.
 		if (data.html && pasteHtml(data.html, ctx)) return true;
-		// Phase 2 — markdown auto-detect on plain text.
+		// Phase 2 — markdown auto-detect on plain text. Threading `blocks`
+		// here lets descriptor `fromMarkdown` hooks restore custom blocks
+		// (callouts etc.) from `text/plain` clipboards (other apps, plim
+		// editors without the custom MIME).
 		if (data.text && looksLikeMarkdown(data.text)) {
-			if (pasteMarkdown(data.text, ctx)) return true;
+			if (pasteMarkdown(data.text, ctx, blocks)) return true;
 		}
 		// Phase 1 — plain text with paragraph splitting.
 		if (data.text) {

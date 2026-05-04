@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { contentFromMarkdown } from '@plim/markdown';
-import { blockPlainText } from '@plim/core';
+import { contentFromMarkdown, parseMarkdown } from '@plim/markdown';
+import { blockPlainText, defineBlock, type BlockDescriptor } from '@plim/core';
 
 describe('contentFromMarkdown', () => {
 	it('parses a heading', () => {
@@ -166,6 +166,56 @@ describe('contentFromMarkdown', () => {
 		expect(types).toContain('italic');
 		expect(types).toContain('code');
 		expect(types).toContain('strikethrough');
+	});
+});
+
+describe('parseMarkdown — descriptor.fromMarkdown hook', () => {
+	// Custom callout block whose `toMarkdown` emits `> [!TONE] text` and
+	// whose `fromMarkdown` reverses that. Without this hook, `parseMarkdown`
+	// would route the line to the built-in `quote` parser — losing the
+	// callout type and tone attr (lossy round-trip).
+	const calloutDesc: BlockDescriptor = {
+		name: 'callout',
+		type: 'standalone',
+		toMarkdown: (p) => `> [!${String(p.attrs.tone ?? 'NOTE').toUpperCase()}] ${p.textContent}`,
+		fromMarkdown: ({ lines, index, parseInline }) => {
+			const line = lines[index] ?? '';
+			const m = /^>\s+\[!(\w+)\]\s+(.*)$/.exec(line);
+			if (!m) return null;
+			return {
+				block: { id: 'callout-id', type: 'callout', attrs: { tone: m[1]!.toLowerCase() }, text: parseInline(m[2]!) },
+				consumed: 1,
+			};
+		},
+	};
+	const factory = defineBlock(calloutDesc);
+	const desc = factory({} as never);
+
+	it('parses a callout via the descriptor instead of falling through to quote', () => {
+		const doc = parseMarkdown(['> [!INFO] heads up'], { blocks: [desc] });
+		expect(doc.children).toHaveLength(1);
+		expect(doc.children[0]!.type).toBe('callout');
+		expect(doc.children[0]!.attrs?.tone).toBe('info');
+		expect(blockPlainText(doc.children[0]!)).toBe('heads up');
+	});
+
+	it('falls through to built-in quote when the descriptor returns null', () => {
+		const doc = parseMarkdown(['> just a quote'], { blocks: [desc] });
+		expect(doc.children[0]!.type).toBe('quote');
+	});
+
+	it('lets earlier descriptors win in registration order', () => {
+		const greedy: BlockDescriptor = {
+			name: 'greedy',
+			type: 'standalone',
+			fromMarkdown: ({ lines, index, parseInline }) => ({
+				block: { id: 'g', type: 'greedy', text: parseInline(lines[index] ?? '') },
+				consumed: 1,
+			}),
+		};
+		const doc = parseMarkdown(['> [!INFO] x'], { blocks: [greedy, desc] });
+		// Greedy claims everything; callout never gets a peek.
+		expect(doc.children[0]!.type).toBe('greedy');
 	});
 });
 

@@ -1,4 +1,4 @@
-import type { BlockDescriptor, BlockMarkdownContext, BlockNode, BlockPayload, DocumentNode, MarkInstance, TextSpan } from '@plim/core';
+import type { BlockDescriptor, BlockMarkdownContext, BlockMarkdownParseContext, BlockNode, BlockPayload, DocumentNode, MarkInstance, TextSpan } from '@plim/core';
 import { newId, normalizeText } from '@plim/core';
 
 // Inline parsing: handles **bold**, *italic*, `code`, ~strike~, and [text](url).
@@ -127,11 +127,29 @@ function parseBlock(line: string): BlockNode {
 }
 
 export function contentFromMarkdown(...lines: string[]): DocumentNode {
+	return parseMarkdown(lines);
+}
+
+/**
+ * Same as `contentFromMarkdown` but accepts an array (not variadic) plus
+ * options. Each registered descriptor's `fromMarkdown` is given a chance to
+ * claim every input line (in registration order) before the built-in
+ * parser runs. The first descriptor to return a non-null result wins.
+ *
+ * Fenced code (` ``` `) is consumed by built-in logic before custom
+ * descriptors get a peek — the built-in handles the multi-line collection
+ * and would otherwise interleave awkwardly with line-by-line custom
+ * matchers. Custom descriptors can still claim arbitrary multi-line shapes
+ * (e.g., a 3-line callout block) by returning `consumed > 1`; the parser
+ * advances accordingly.
+ */
+export function parseMarkdown(lines: readonly string[], options?: { blocks?: BlockDescriptor[] }): DocumentNode {
 	const blocks: BlockNode[] = [];
+	const descs = options?.blocks ?? [];
 	let i = 0;
 	while (i < lines.length) {
 		const raw = lines[i] ?? '';
-		// fenced code
+		// Built-in: fenced code (multi-line, consumes until closing fence).
 		if (raw.startsWith('```')) {
 			const lang = raw.slice(3).trim();
 			const buf: string[] = [];
@@ -149,6 +167,22 @@ export function contentFromMarkdown(...lines: string[]): DocumentNode {
 			});
 			continue;
 		}
+		// Custom block descriptors: each gets a peek at the cursor. First
+		// non-null result wins. The descriptor reports how many lines it ate.
+		let claimed = false;
+		if (descs.length) {
+			const ctx: BlockMarkdownParseContext = { lines, index: i, parseInline };
+			for (const d of descs) {
+				if (!d.fromMarkdown) continue;
+				const r = d.fromMarkdown(ctx);
+				if (!r) continue;
+				blocks.push(r.block);
+				i += Math.max(1, r.consumed);
+				claimed = true;
+				break;
+			}
+		}
+		if (claimed) continue;
 		if (raw.length === 0) {
 			blocks.push({ id: newId(), type: 'paragraph', text: [] });
 			i += 1;
