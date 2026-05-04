@@ -27,6 +27,7 @@ import {
 import { contentFromMarkdown } from '@plim/markdown';
 import { ActionPanel, PlimEditor, useAsyncEventListener, useEditorHandle } from '@plim/react';
 import { SlashMenu } from './SlashMenu.js';
+import { MentionMenu, type MentionUser } from './MentionMenu.js';
 
 const plim = new PlimDriver({
 	theme: 'light',
@@ -134,7 +135,7 @@ const plim = new PlimDriver({
 const initialContent = contentFromMarkdown(
 	'# Welcome to Plim',
 	'',
-	'A Notion-style editor built on a clean, fast core. Press **/** to open the block menu, or try Markdown shortcuts like `# `, `- `, `> `, or ``` ``` ```.',
+	'A Notion-style editor built on a clean, fast core. Press **/** to open the block menu, or try Markdown shortcuts like `#`, `-`, `>`, or `\``.',
 	'',
 	'## Features',
 	'',
@@ -159,6 +160,11 @@ export function App() {
 		caretRect: DOMRect | null;
 		resolve: (cmd: string | null) => void;
 	} | null>(null);
+	const [mention, setMention] = React.useState<{
+		anchor: Element | null;
+		caretRect: DOMRect | null;
+		resolve: (user: MentionUser | null) => void;
+	} | null>(null);
 
 	const onSlash = useAsyncEventListener('showSlashCommandMenu', async () => {
 		return await new Promise<string | null>((resolve) => {
@@ -176,9 +182,45 @@ export function App() {
 	});
 
 	const onMention = useAsyncEventListener('showMentionSuggestions', async () => {
-		// Minimal placeholder
-		return null;
+		return await new Promise<MentionUser | null>((resolve) => {
+			const rect = currentCaretRect();
+			let anchor: Element | null = null;
+			const sel = window.getSelection();
+			const node = sel?.anchorNode ?? null;
+			if (node) {
+				const el = node instanceof Element ? node : node.parentElement;
+				anchor = el?.closest('[data-block-id]') ?? null;
+			}
+			setMention({ anchor, caretRect: rect, resolve });
+		});
 	});
+
+	const handleMentionChoice = React.useCallback(
+		(user: MentionUser | null) => {
+			const editor = handle.current;
+			if (!editor) {
+				mention?.resolve(user);
+				setMention(null);
+				return;
+			}
+			if (user) {
+				const state = editor.getState();
+				const sel = state.selection;
+				const tx = editor.createTransaction();
+				// Strip the trigger '@' that the keyboard insertion left in the doc.
+				if (sel.head.offset > 0) {
+					tx.replaceRange(sel.head.path, sel.head.offset - 1, sel.head.offset, [
+						{ text: `@${user.name}`, marks: [{ type: 'link', attrs: { href: `#user-${user.id}` } }] },
+						{ text: ' ' },
+					]);
+				}
+				tx.commit();
+			}
+			mention?.resolve(user);
+			setMention(null);
+		},
+		[handle, mention]
+	);
 
 	const handleSlashChoice = React.useCallback(
 		(cmd: string | null) => {
@@ -283,6 +325,20 @@ export function App() {
 					dismissOnOutsideClick
 				>
 					<SlashMenu onSelect={handleSlashChoice} />
+				</ActionPanel>
+			) : null}
+			{mention ? (
+				<ActionPanel
+					open
+					anchor={() => (mention.anchor ?? mention.caretRect) as Element | DOMRect | null}
+					placement="bottom-start"
+					onClose={() => {
+						mention.resolve(null);
+						setMention(null);
+					}}
+					dismissOnOutsideClick
+				>
+					<MentionMenu onSelect={handleMentionChoice} />
 				</ActionPanel>
 			) : null}
 		</div>

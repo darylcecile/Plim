@@ -297,7 +297,7 @@ h3.plim-block-heading { font-size: 1.25em; }
 pre.plim-block-code {
 	background: var(--code-bg);
 	border-radius: 4px;
-	padding: 16px 16px 32px;
+	padding: 16px;
 	font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 	font-size: 0.85em;
 	line-height: 1.4;
@@ -400,6 +400,93 @@ a[data-mark-type="link"] {
 .slash-menu-item.active,
 .slash-menu-item:hover {
 	background: rgba(55, 53, 47, 0.06);
+}
+
+/* Mention menu */
+.mention-menu {
+	background: var(--menu-bg);
+	border-radius: 6px;
+	box-shadow: var(--menu-shadow);
+	width: 320px;
+	max-height: 320px;
+	overflow: auto;
+	font-size: 14px;
+	padding: 6px 0;
+}
+.mention-menu-header {
+	font-size: 11px;
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+	padding: 6px 14px;
+}
+.mention-menu-empty {
+	padding: 12px 14px;
+	color: var(--text-muted);
+}
+.mention-menu-list {
+	display: flex;
+	flex-direction: column;
+}
+.mention-menu-item {
+	all: unset;
+	display: grid;
+	grid-template-columns: 28px 1fr auto;
+	align-items: center;
+	padding: 6px 14px;
+	cursor: pointer;
+	gap: 0 10px;
+}
+.mention-menu-item .mention-avatar {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 26px;
+	height: 26px;
+	border-radius: 50%;
+	background: rgba(55, 53, 47, 0.08);
+	font-size: 16px;
+	line-height: 1;
+}
+.mention-menu-item .mention-primary {
+	display: inline-flex;
+	flex-direction: column;
+	min-width: 0;
+}
+.mention-menu-item .mention-name {
+	font-weight: 500;
+	color: var(--text);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.mention-menu-item .mention-handle {
+	font-size: 12px;
+	color: var(--text-muted);
+}
+.mention-menu-item .mention-role {
+	font-size: 11px;
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+}
+.mention-menu-item.active,
+.mention-menu-item:hover {
+	background: rgba(55, 53, 47, 0.06);
+}
+
+/* Mention pills (a link mark whose href targets a user). */
+.plim-editor a[href^="#user-"] {
+	color: rgba(55, 53, 47, 0.85);
+	background: rgba(55, 53, 47, 0.06);
+	border-radius: 3px;
+	padding: 0 3px;
+	text-decoration: none;
+	font-weight: 500;
+}
+.plim-editor a[href^="#user-"]:hover {
+	background: rgba(35, 131, 226, 0.14);
+	color: rgb(35, 131, 226);
 }
 
 /* Image block */
