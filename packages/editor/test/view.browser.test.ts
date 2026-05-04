@@ -2791,7 +2791,7 @@ describe('Floating selection toolbar', () => {
 		expect(italic.getAttribute('aria-pressed')).toBe('false');
 	});
 
-	it('shows block-transform items (heading, quote, paragraph) alongside mark items', () => {
+	it('shows ONLY mark items (no block transforms) on a text selection', () => {
 		env = setup({ initial: ['hello world'] });
 		const root = getRoot(env.container);
 		focusEditor(root);
@@ -2799,20 +2799,44 @@ describe('Floating selection toolbar', () => {
 		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
 		tx.commit();
 		const tb = getToolbar()!;
+		// Mark items present
+		expect(tb.querySelector('[data-toolbar-item="bold"]')).not.toBeNull();
+		expect(tb.querySelector('[data-toolbar-item="italic"]')).not.toBeNull();
+		// Block transforms NOT present in selection mode
+		expect(tb.querySelector('[data-toolbar-item="turn-into-paragraph"]')).toBeNull();
+		expect(tb.querySelector('[data-toolbar-item="turn-into-heading-1"]')).toBeNull();
+		expect(tb.querySelector('[data-toolbar-item="turn-into-heading-2"]')).toBeNull();
+		expect(tb.querySelector('[data-toolbar-item="turn-into-heading-3"]')).toBeNull();
+		expect(tb.querySelector('[data-toolbar-item="turn-into-quote"]')).toBeNull();
+	});
+
+	it('shows ONLY block-transform items (no marks) when a block is block-selected via the drag handle', () => {
+		env = setup({ initial: ['hello world'] });
+		const blockEl = env.container.querySelector('[data-block-id]') as HTMLElement;
+		const handle = blockEl.querySelector('.plim-block-drag') as HTMLElement;
+		const down = new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: 0, clientY: 0 });
+		handle.dispatchEvent(down);
+		const up = new PointerEvent('pointerup', { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: 0, clientY: 0 });
+		handle.dispatchEvent(up);
+		expect(blockEl.getAttribute('data-plim-block-selected')).toBe('true');
+		const tb = getToolbar()!;
+		// Block transforms present
 		expect(tb.querySelector('[data-toolbar-item="turn-into-paragraph"]')).not.toBeNull();
 		expect(tb.querySelector('[data-toolbar-item="turn-into-heading-1"]')).not.toBeNull();
 		expect(tb.querySelector('[data-toolbar-item="turn-into-heading-2"]')).not.toBeNull();
 		expect(tb.querySelector('[data-toolbar-item="turn-into-heading-3"]')).not.toBeNull();
 		expect(tb.querySelector('[data-toolbar-item="turn-into-quote"]')).not.toBeNull();
+		// Mark items NOT present in block mode
+		expect(tb.querySelector('[data-toolbar-item="bold"]')).toBeNull();
+		expect(tb.querySelector('[data-toolbar-item="italic"]')).toBeNull();
 	});
 
-	it('clicking "turn into heading 2" rewrites the head block to heading level 2', () => {
+	it('clicking "turn into heading 2" while a block is block-selected rewrites it', () => {
 		env = setup({ initial: ['hello world'] });
-		const root = getRoot(env.container);
-		focusEditor(root);
-		const tx = env.editor.createTransaction();
-		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
-		tx.commit();
+		const blockEl = env.container.querySelector('[data-block-id]') as HTMLElement;
+		const handle = blockEl.querySelector('.plim-block-drag') as HTMLElement;
+		handle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: 0, clientY: 0 }));
+		handle.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: 0, clientY: 0 }));
 		const btn = getToolbar()!.querySelector<HTMLButtonElement>('[data-toolbar-item="turn-into-heading-2"]')!;
 		btn.click();
 		const block = env.editor.getState().doc.children[0]!;
@@ -2820,18 +2844,20 @@ describe('Floating selection toolbar', () => {
 		expect(block.attrs?.level).toBe(2);
 	});
 
-	it('marks the current heading-level button as active', () => {
+	it('marks the current heading-level button as active when a heading block is block-selected', () => {
 		env = setup();
 		const root = getRoot(env.container);
 		focusEditor(root);
 		// Make the first block a heading-1 with text.
-		let tx = env.editor.createTransaction();
+		const tx = env.editor.createTransaction();
 		tx.setBlockType([0], 'heading', { level: 1 });
 		tx.insertText([0], 0, 'Title');
 		tx.commit();
-		tx = env.editor.createTransaction();
-		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 5 } });
-		tx.commit();
+		// Block-select via the drag handle.
+		const blockEl = env.container.querySelector('[data-block-id]') as HTMLElement;
+		const handle = blockEl.querySelector('.plim-block-drag') as HTMLElement;
+		handle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: 0, clientY: 0 }));
+		handle.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: 0, clientY: 0 }));
 		const h1 = getToolbar()!.querySelector<HTMLButtonElement>('[data-toolbar-item="turn-into-heading-1"]')!;
 		const h2 = getToolbar()!.querySelector<HTMLButtonElement>('[data-toolbar-item="turn-into-heading-2"]')!;
 		expect(h1.getAttribute('data-active')).toBe('true');

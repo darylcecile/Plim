@@ -130,6 +130,9 @@ export function mountView(opts: ViewOptions): View {
 		anchorId: null,
 		activeId: null,
 	};
+	// Forward-declared so `applySelectionAttrs` can notify the toolbar
+	// (mounted later in this function) when block-selection changes.
+	let onBlockSelectionChange: () => void = () => {};
 	function blockElById(id: string): HTMLElement | null {
 		return root.querySelector<HTMLElement>(`[${DATA_BLOCK_ID}="${cssAttrEscape(id)}"]`);
 	}
@@ -148,6 +151,7 @@ export function mountView(opts: ViewOptions): View {
 				el.setAttribute('data-plim-block-selected', 'true');
 			}
 		}
+		onBlockSelectionChange();
 	}
 	function selectionSet(ids: Iterable<string>, anchorId: string | null = null, activeId: string | null = null) {
 		selection.ids = new Set(ids);
@@ -1450,7 +1454,9 @@ export function mountView(opts: ViewOptions): View {
 		supportsDecoration: opts.editor.supportsDecoration ?? (() => true),
 		blocks: opts.blocks,
 		marks: opts.marks,
+		getBlockSelection: () => selection.ids,
 	});
+	onBlockSelectionChange = () => toolbar.update();
 
 	return {
 		root,

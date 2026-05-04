@@ -22,6 +22,12 @@ export type ToolbarItemContext = {
 	editor: { createTransaction(): Transaction; dispatch(tx: Transaction): void };
 	anchor: HTMLElement;
 	close(): void;
+	/**
+	 * Block-selection ids when the toolbar is in `'block'` mode. Empty
+	 * Set in selection mode. `perform` for block-mode items should
+	 * iterate this set rather than relying on `state.selection.head.path`.
+	 */
+	blockSelection: ReadonlySet<string>;
 };
 
 export type ToolbarItem = {
@@ -36,6 +42,19 @@ export type ToolbarItem = {
 	group?: 'mark' | 'block' | 'action' | string;
 	/** Sort within group; lower priority renders first. */
 	priority?: number;
+	/**
+	 * Which toolbar mode this item applies to:
+	 * - `'selection'` — shown when the user has a non-collapsed *text* selection
+	 *   (formatting toolbar). Default for `MarkDescriptor.toolbar` items.
+	 * - `'block'` — shown only when one or more blocks are *block-selected*
+	 *   (drag-handle click / multi-block keyboard selection). Default for
+	 *   `BlockDescriptor.toolbar` items, since those are typically block-type
+	 *   transforms that don't make sense on a partial text selection.
+	 *
+	 * A block can opt into `'selection'` to expose a formatting-style action
+	 * alongside marks; a mark could (rarely) opt into `'block'`.
+	 */
+	appliesTo?: 'selection' | 'block';
 	visibleWhen?: (b: ValidationBuilders) => ValidationRule;
 	activeWhen?: (b: ValidationBuilders) => ValidationRule;
 	disabledWhen?: (b: ValidationBuilders) => ValidationRule;

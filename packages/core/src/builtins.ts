@@ -1,6 +1,21 @@
-import { type BlockDescriptor, type MarkDescriptor, type ToolbarItem, defineBlock, defineMark } from './blocks.js';
+import { type BlockDescriptor, type MarkDescriptor, type ToolbarItem, type ToolbarItemContext, defineBlock, defineMark } from './blocks.js';
 import type { EditorHandle } from './editor-handle.js';
-import { getBlockAt } from './selection.js';
+import { flattenBlocks, getBlockAt } from './selection.js';
+
+// Resolve which block paths a block-mode toolbar item should operate on.
+// In block-mode the user has block-selected one or more blocks via the
+// drag handle / shift+click; we walk the doc to find their paths. Falls
+// back to the head selection path for selection-mode invocations.
+function targetPathsForBlockTransform(ctx: ToolbarItemContext): number[][] {
+	if (ctx.blockSelection.size > 0) {
+		const out: number[][] = [];
+		for (const entry of flattenBlocks(ctx.state.doc)) {
+			if (ctx.blockSelection.has(entry.block.id)) out.push(entry.path);
+		}
+		return out;
+	}
+	return [ctx.state.selection.head.path];
+}
 
 // Toolbar helpers ----------------------------------------------------------
 //
@@ -134,11 +149,14 @@ export const paragraphBlock = defineBlock({
 		icon: '¶',
 		group: 'block',
 		priority: 0,
-		visibleWhen: (b) => b.and(['selectionNotEmpty', 'inTextBlock']),
+		// `appliesTo` defaults to 'block' for items contributed by a
+		// BlockDescriptor — they only render when the block is selected.
 		activeWhen: (b) => b.blockTypeIs('paragraph'),
-		perform: ({ state, editor }) => {
-			const tx = editor.createTransaction();
-			tx.setBlockType(state.selection.head.path, 'paragraph');
+		perform: (ctx) => {
+			const tx = ctx.editor.createTransaction();
+			for (const path of targetPathsForBlockTransform(ctx)) {
+				tx.setBlockType(path, 'paragraph');
+			}
 			tx.commit();
 		},
 	},
@@ -151,7 +169,6 @@ function headingTransform(level: 1 | 2 | 3): ToolbarItem {
 		icon: `H${level}`,
 		group: 'block',
 		priority: level,
-		visibleWhen: (b) => b.and(['selectionNotEmpty', 'inTextBlock']),
 		activeWhen: (b) =>
 			b.and([
 				b.blockTypeIs('heading'),
@@ -160,9 +177,11 @@ function headingTransform(level: 1 | 2 | 3): ToolbarItem {
 					return !!blk && blk.type === 'heading' && (blk.attrs?.level as number | undefined) === level;
 				}, `headingLevel${level}`),
 			]),
-		perform: ({ state, editor }) => {
-			const tx = editor.createTransaction();
-			tx.setBlockType(state.selection.head.path, 'heading', { level });
+		perform: (ctx) => {
+			const tx = ctx.editor.createTransaction();
+			for (const path of targetPathsForBlockTransform(ctx)) {
+				tx.setBlockType(path, 'heading', { level });
+			}
 			tx.commit();
 		},
 	};
@@ -214,11 +233,12 @@ export const quoteBlock = defineBlock({
 		icon: '❝',
 		group: 'block',
 		priority: 10,
-		visibleWhen: (b) => b.and(['selectionNotEmpty', 'inTextBlock']),
 		activeWhen: (b) => b.blockTypeIs('quote'),
-		perform: ({ state, editor }) => {
-			const tx = editor.createTransaction();
-			tx.setBlockType(state.selection.head.path, 'quote');
+		perform: (ctx) => {
+			const tx = ctx.editor.createTransaction();
+			for (const path of targetPathsForBlockTransform(ctx)) {
+				tx.setBlockType(path, 'quote');
+			}
 			tx.commit();
 		},
 	},

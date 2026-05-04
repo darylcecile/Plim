@@ -42,6 +42,13 @@ export type ToolbarMountOptions = {
 	supportsDecoration: (blockType: string) => boolean;
 	blocks: BlockDescriptor[];
 	marks: MarkDescriptor[];
+	/**
+	 * View-layer block-selection set (block ids). When non-empty the
+	 * toolbar switches into "block" mode and only renders items whose
+	 * `appliesTo === 'block'`. When empty the toolbar uses the doc-level
+	 * text selection and renders `appliesTo === 'selection'` items.
+	 */
+	getBlockSelection: () => Set<string>;
 };
 
 export type ToolbarMount = {
@@ -54,6 +61,8 @@ type ResolvedItem = {
 	item: ToolbarItem;
 	source: 'mark' | 'block';
 	sourceName: string;
+	/** Resolved mode this item participates in (defaulted from source). */
+	appliesTo: 'selection' | 'block';
 };
 
 /** Collect every toolbar item contributed by the registered marks/blocks. */
@@ -62,28 +71,29 @@ function collectItems(blocks: BlockDescriptor[], marks: MarkDescriptor[]): Resol
 	for (const m of marks) {
 		if (!m.toolbar) continue;
 		const items = Array.isArray(m.toolbar) ? m.toolbar : [m.toolbar];
-		for (const item of items) out.push({ item, source: 'mark', sourceName: m.name });
+		for (const item of items) out.push({ item, source: 'mark', sourceName: m.name, appliesTo: item.appliesTo ?? 'selection' });
 	}
 	for (const b of blocks) {
 		if (!b.toolbar) continue;
 		const items = Array.isArray(b.toolbar) ? b.toolbar : [b.toolbar];
-		for (const item of items) out.push({ item, source: 'block', sourceName: b.name });
+		for (const item of items) out.push({ item, source: 'block', sourceName: b.name, appliesTo: item.appliesTo ?? 'block' });
 	}
 	return out;
 }
 
 /** Default visibility rule for an item that doesn't supply one. */
-function defaultVisible(resolved: ResolvedItem): ValidationRule {
-	if (resolved.source === 'mark') {
+function defaultVisible(resolved: ResolvedItem): ValidationRule | null {
+	if (resolved.appliesTo === 'selection') {
 		return builders.and(['selectionNotEmpty', 'blockSupportsDecoration']);
 	}
-	// Block transforms default to "selection non-empty + in text block".
-	return builders.and(['selectionNotEmpty', 'inTextBlock']);
+	// Block-mode items: visibility is gated externally by the block-selection
+	// set being non-empty. No additional doc-level rule by default.
+	return null;
 }
 
 /** Default active rule for a mark item that doesn't supply one. */
 function defaultActive(resolved: ResolvedItem): ValidationRule | null {
-	if (resolved.source === 'mark') {
+	if (resolved.source === 'mark' && resolved.appliesTo === 'selection') {
 		return builders.markActiveInSelection(resolved.sourceName);
 	}
 	return null;
@@ -128,6 +138,7 @@ export function mountToolbar(opts: ToolbarMountOptions): ToolbarMount {
 
 	function isVisible(resolved: ResolvedItem, ctx: ValidationContext): boolean {
 		const rule = resolved.item.visibleWhen ? resolved.item.visibleWhen(builders) : defaultVisible(resolved);
+		if (rule === null) return true;
 		return evalRule(rule, ctx);
 	}
 
@@ -301,6 +312,7 @@ export function mountToolbar(opts: ToolbarMountOptions): ToolbarMount {
 						editor: { createTransaction: opts.createTransaction, dispatch: opts.dispatch },
 						anchor: btn,
 						close: hide,
+						blockSelection: opts.getBlockSelection(),
 					});
 				});
 				el.appendChild(btn);
@@ -363,14 +375,11 @@ export function mountToolbar(opts: ToolbarMountOptions): ToolbarMount {
 		});
 	}
 
-	function position() {
-		const sel = win.getSelection();
-		if (!sel || sel.rangeCount === 0) {
+	function position(rect: DOMRect | null): boolean {
+		if (!rect) {
 			el.style.display = 'none';
 			return false;
 		}
-		const range = sel.getRangeAt(0);
-		const rect = range.getBoundingClientRect();
 		// `getBoundingClientRect` returns 0/0 for collapsed selections;
 		// guard against accidentally pinning the toolbar to the corner.
 		if (rect.width === 0 && rect.height === 0) {
@@ -395,47 +404,92 @@ export function mountToolbar(opts: ToolbarMountOptions): ToolbarMount {
 		return true;
 	}
 
+	function selectionRect(): DOMRect | null {
+		const sel = win.getSelection();
+		if (!sel || sel.rangeCount === 0) return null;
+		return sel.getRangeAt(0).getBoundingClientRect();
+	}
+
+	function blockSelectionRect(ids: Set<string>): DOMRect | null {
+		// Union of bounding rects of all selected block elements.
+		let top = Infinity;
+		let left = Infinity;
+		let right = -Infinity;
+		let bottom = -Infinity;
+		let any = false;
+		for (const id of ids) {
+			// We escape via attribute selector — block ids are generated
+			// by `newId()` (alphanumerics + underscore) so unescaped is fine.
+			const elBlock = opts.root.querySelector<HTMLElement>(`[data-block-id="${id}"]`);
+			if (!elBlock) continue;
+			const r = elBlock.getBoundingClientRect();
+			top = Math.min(top, r.top);
+			left = Math.min(left, r.left);
+			right = Math.max(right, r.right);
+			bottom = Math.max(bottom, r.bottom);
+			any = true;
+		}
+		if (!any) return null;
+		return new DOMRect(left, top, right - left, bottom - top);
+	}
+
 	function render() {
 		const ctx = valCtx();
 		const sel = ctx.state.selection;
+		const blockSel = opts.getBlockSelection();
 		// Clear children before re-evaluating.
 		el.replaceChildren();
-		if (selectionIsEmpty(sel)) {
+
+		// Mode resolution. Block-selection wins when present.
+		const mode: 'selection' | 'block' | null =
+			blockSel.size > 0 ? 'block' : selectionIsEmpty(sel) ? null : 'selection';
+
+		if (mode === null) {
 			el.style.display = 'none';
 			linkActive = null;
 			return;
 		}
-		// Don't show if the focus has left the editor entirely AND the
+
+		// Don't show if focus has left the editor entirely AND the
 		// pointer isn't currently on the toolbar (clicking a button).
-		const active = doc.activeElement;
-		const insideEditor = active && opts.root.contains(active);
-		const insideToolbar = active && el.contains(active);
-		if (!insideEditor && !insideToolbar && !pointerInside) {
-			el.style.display = 'none';
-			linkActive = null;
-			return;
+		// Block-mode is exempt: drag-handle clicks intentionally move
+		// focus around and we still want the toolbar visible.
+		if (mode === 'selection') {
+			const active = doc.activeElement;
+			const insideEditor = active && opts.root.contains(active);
+			const insideToolbar = active && el.contains(active);
+			if (!insideEditor && !insideToolbar && !pointerInside) {
+				el.style.display = 'none';
+				linkActive = null;
+				return;
+			}
 		}
-		if (linkActive) {
+
+		// Link popover only makes sense in selection mode.
+		if (mode === 'selection' && linkActive) {
 			buildLinkRow();
-			position();
+			position(selectionRect());
 			return;
 		}
-		const visible = items.filter((r) => isVisible(r, ctx));
+		if (mode === 'block') linkActive = null;
+
+		const visible = items.filter((r) => r.appliesTo === mode && isVisible(r, ctx));
 		if (visible.length === 0) {
 			el.style.display = 'none';
 			return;
 		}
 		buildButtonRow(visible, ctx);
-		position();
+		const rect = mode === 'block' ? blockSelectionRect(blockSel) : selectionRect();
+		position(rect);
 	}
 
 	function onScroll() {
 		if (el.style.display === 'none') return;
-		position();
+		render();
 	}
 	function onResize() {
 		if (el.style.display === 'none') return;
-		position();
+		render();
 	}
 	const onKeyDown = (ev: KeyboardEvent) => {
 		if (ev.key === 'Escape' && el.style.display !== 'none') {
