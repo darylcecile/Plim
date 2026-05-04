@@ -2,7 +2,6 @@ import * as React from 'react';
 import {
 	PlimDriver,
 	bulletedListBlock,
-	codeBlock as codeBlockFactory,
 	codeMark,
 	defineAction,
 	embeddedMediaBlock,
@@ -38,6 +37,7 @@ import {
 	type SlashCommandItem,
 } from '@plim/react';
 import { calloutBlock, counterBlock, type CalloutTone } from './customBlocks.js';
+import { codeBlock } from './codeBlock.js';
 import { StatusBadgeMenu, statusBadgeExtension } from './statusBadge.js';
 
 const plim = new PlimDriver({
@@ -52,7 +52,7 @@ const plim = new PlimDriver({
 		todoListBlock,
 		toggleBlock,
 		quoteBlock,
-		codeBlockFactory,
+		codeBlock,
 		horizontalRuleBlock,
 		imageBlock,
 		embeddedMediaBlock,
@@ -143,7 +143,7 @@ const baseContent = contentFromMarkdown(
 	'',
 	'> Try splitting this block by pressing Enter — and joining with Backspace.',
 	'',
-	'```',
+	'```javascript',
 	'function hello() {',
 	'  return "world";',
 	'}',

@@ -36,6 +36,18 @@ export type BlockDescriptor = {
 	 * Notion uses this for headings, callouts, quotes, and dividers.
 	 */
 	continueAs?: string;
+	/**
+	 * If true, plain Enter inside this block inserts a literal `\n` into
+	 * the block's text (line break) instead of splitting into a new block,
+	 * and ArrowDown / ArrowRight at the end of the last visual line / end
+	 * of the block exits to the next block — creating a fresh paragraph
+	 * underneath if no next block exists. Code blocks set this so users
+	 * can compose multi-line code without each Enter creating a new
+	 * code block, while still being able to escape downward via arrow
+	 * keys (Notion's behavior). Shift+Enter (which already inserts `\n`)
+	 * is unaffected.
+	 */
+	multilineText?: boolean;
 	toDOM?: (payload: BlockPayload) => HTMLElement;
 	toComponent?: (payload: BlockPayload) => unknown;
 	/**

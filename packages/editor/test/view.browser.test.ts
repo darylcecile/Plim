@@ -491,6 +491,68 @@ describe('Custom block & mark descriptors (toDOM)', () => {
 		}
 	});
 
+	it('lets a registered descriptor override a built-in block type', () => {
+		// Descriptors with a `name` matching a built-in (e.g. `code`) take
+		// priority over the built-in render path. This is what powers the
+		// example app's sugar-high-tokenized code block: it registers a
+		// `code` descriptor with its own toDOM, and the view layer routes
+		// rendering through that instead of the hardcoded `case 'code'`
+		// switch arm.
+		const customCodeBlock = defineBlock({
+			name: 'code',
+			type: 'standalone',
+			supportsDecoration: false,
+			toDOM: (payload) => {
+				const wrap = document.createElement('section');
+				wrap.className = 'my-custom-code';
+				wrap.setAttribute('data-custom', 'yes');
+				const code = document.createElement('code');
+				code.setAttribute('data-block-content', 'true');
+				code.textContent = payload.textContent;
+				wrap.appendChild(code);
+				return wrap;
+			},
+		});
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({
+			registeredBlocks: [paragraphBlock, customCodeBlock],
+			registeredMarks: [boldMark],
+		});
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc' as const,
+				children: [
+					{
+						id: newId(),
+						type: 'code',
+						text: [{ text: 'const x = 1;' }],
+					},
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		try {
+			const block = container.querySelector('[data-block-type="code"]') as HTMLElement;
+			expect(block).toBeTruthy();
+			// The custom toDOM ran (built-in `<pre>` would not be present).
+			const customSection = block.querySelector('.my-custom-code') as HTMLElement;
+			expect(customSection).toBeTruthy();
+			expect(customSection.getAttribute('data-custom')).toBe('yes');
+			expect(block.querySelector('pre')).toBeNull();
+			// `[data-block-content]` is still present (descriptor's responsibility).
+			const content = block.querySelector('[data-block-content]') as HTMLElement;
+			expect(content).toBeTruthy();
+			expect(content.tagName).toBe('CODE');
+			expect(content.textContent).toBe('const x = 1;');
+		} finally {
+			editor.destroy();
+			container.remove();
+		}
+	});
+
 	it('renders a custom mark via descriptor.toDOM with nested mark support', () => {
 		// `pill` is a custom mark whose descriptor returns an empty wrapper.
 		// The editor places text (and any nested mark wrappers) inside it,
@@ -2021,5 +2083,180 @@ describe('clipboard paste — plim-native MIME (application/x-plim)', () => {
 		expect(doc.children[0]!.attrs?.tone).toBe('info');
 		editor.destroy();
 		container.remove();
+	});
+});
+
+describe('multilineText block descriptor', () => {
+	// Defines a tiny `code`-like block whose `multilineText: true` flag
+	// makes Enter insert a literal `\n` and ArrowDown / ArrowRight at
+	// end-of-line exit to the next block (or auto-create a trailing
+	// paragraph). The descriptor renders a plain `<pre><code>` so the
+	// editor's normal text/selection plumbing applies — no custom DOM
+	// quirks influence the assertions.
+	function multilineCode() {
+		return defineBlock({
+			name: 'code',
+			type: 'standalone',
+			supportsDecoration: false,
+			multilineText: true,
+			toDOM: () => {
+				const pre = document.createElement('pre');
+				const code = document.createElement('code');
+				code.setAttribute('data-block-content', 'true');
+				pre.appendChild(code);
+				return pre;
+			},
+		});
+	}
+
+	function setupCode(initial: { type: string; text?: { text: string }[] }[]): {
+		container: HTMLElement;
+		editor: AgnosticEditor;
+		root: HTMLElement;
+		cleanup: () => void;
+	} {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock, multilineCode()] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: initial.map((b) => ({ id: newId(), type: b.type, text: b.text ?? [] })),
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		return { container, editor, root, cleanup: () => { editor.destroy(); container.remove(); } };
+	}
+
+	it('Enter inside a multilineText block inserts a newline rather than splitting', () => {
+		const env = setupCode([
+			{ type: 'code', text: [{ text: 'hello' }] },
+		]);
+		try {
+			const tx = env.editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 5 }, head: { path: [0], offset: 5 } });
+			tx.commit();
+			env.root.dispatchEvent(
+				new InputEvent('beforeinput', { inputType: 'insertParagraph', bubbles: true, cancelable: true }),
+			);
+			const doc = env.editor.getState().doc;
+			expect(doc.children).toHaveLength(1);
+			expect(doc.children[0]!.type).toBe('code');
+			// Plain text now contains a literal `\n` at the caret position.
+			expect(doc.children[0]!.text!.map((s) => s.text).join('')).toBe('hello\n');
+			const sel = env.editor.getState().selection;
+			expect(sel.head.offset).toBe(6);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it('ArrowDown at end of last line exits to the next block when one exists', () => {
+		const env = setupCode([
+			{ type: 'code', text: [{ text: 'a\nb' }] },
+			{ type: 'paragraph', text: [{ text: 'after' }] },
+		]);
+		try {
+			const tx = env.editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 3 }, head: { path: [0], offset: 3 } });
+			tx.commit();
+			env.root.dispatchEvent(
+				new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }),
+			);
+			const sel = env.editor.getState().selection;
+			expect(sel.head.path).toEqual([1]);
+			expect(sel.head.offset).toBe(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it('ArrowDown on a non-last line lets the browser handle it (no exit)', () => {
+		const env = setupCode([
+			{ type: 'code', text: [{ text: 'a\nb' }] },
+			{ type: 'paragraph', text: [{ text: 'after' }] },
+		]);
+		try {
+			// Caret on the *first* line of the code block — there's still a
+			// `\n` after it, so ArrowDown should not preventDefault. We
+			// observe this by confirming the selection didn't get
+			// programmatically moved into block [1].
+			const tx = env.editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 1 }, head: { path: [0], offset: 1 } });
+			tx.commit();
+			const ev = new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true });
+			env.root.dispatchEvent(ev);
+			expect(ev.defaultPrevented).toBe(false);
+			const sel = env.editor.getState().selection;
+			expect(sel.head.path).toEqual([0]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it('ArrowRight at end of block exits to the next block', () => {
+		const env = setupCode([
+			{ type: 'code', text: [{ text: 'x' }] },
+			{ type: 'paragraph', text: [{ text: 'next' }] },
+		]);
+		try {
+			const tx = env.editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 1 }, head: { path: [0], offset: 1 } });
+			tx.commit();
+			env.root.dispatchEvent(
+				new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }),
+			);
+			const sel = env.editor.getState().selection;
+			expect(sel.head.path).toEqual([1]);
+			expect(sel.head.offset).toBe(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it('ArrowDown at end of last block auto-creates a trailing paragraph', () => {
+		const env = setupCode([
+			{ type: 'code', text: [{ text: 'only' }] },
+		]);
+		try {
+			const tx = env.editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 4 }, head: { path: [0], offset: 4 } });
+			tx.commit();
+			env.root.dispatchEvent(
+				new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }),
+			);
+			const doc = env.editor.getState().doc;
+			expect(doc.children).toHaveLength(2);
+			expect(doc.children[1]!.type).toBe('paragraph');
+			expect(doc.children[1]!.text).toEqual([]);
+			const sel = env.editor.getState().selection;
+			expect(sel.head.path).toEqual([1]);
+			expect(sel.head.offset).toBe(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it('ArrowDown at end of an empty multilineText block does not create a trailing paragraph', () => {
+		// Guard against accidental paragraph-spam on every ArrowDown when
+		// the block has no content yet.
+		const env = setupCode([
+			{ type: 'code', text: [] },
+		]);
+		try {
+			const tx = env.editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 0 } });
+			tx.commit();
+			env.root.dispatchEvent(
+				new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }),
+			);
+			const doc = env.editor.getState().doc;
+			expect(doc.children).toHaveLength(1);
+		} finally {
+			env.cleanup();
+		}
 	});
 });

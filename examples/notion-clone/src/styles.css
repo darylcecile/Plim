@@ -281,3 +281,121 @@ html, body {
 .plim-status-menu-item[data-status='cancelled'] .plim-status-menu-dot {
 	background: #b3261e;
 }
+
+/* ──────────────────────────────────────────────────────────────────────
+   Custom code block — overrides the editor's built-in `code` rendering
+   with a sugar-high tokenized variant + a top-right language picker.
+   ────────────────────────────────────────────────────────────────────── */
+
+/* Sugar-high theme (tokens reference these custom properties via
+   inline `style="color:var(--sh-*)"`). Tuned to read against the soft
+   grey block background. */
+.plim-code-shell {
+	--sh-class: #4f7bb6;
+	--sh-identifier: #2c2c2c;
+	--sh-sign: #8b8b8b;
+	--sh-property: #2c8a8a;
+	--sh-entity: #277f8a;
+	--sh-jsxliterals: #8a558d;
+	--sh-string: #b66437;
+	--sh-keyword: #b35aa8;
+	--sh-comment: #8a8a8a;
+	--sh-space: transparent;
+}
+
+.plim-block-code .plim-code-shell {
+	position: relative;
+}
+
+.plim-block-code .plim-code-pre {
+	background: var(--code-bg);
+	border-radius: 4px;
+	padding: 16px;
+	padding-right: 140px; /* room for the picker so long lines don't slide under it */
+	font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+	font-size: 0.85em;
+	line-height: 1.4;
+	overflow-x: auto;
+	white-space: pre-wrap;
+	margin: 0;
+}
+
+.plim-block-code .plim-code-pre [data-block-content] {
+	display: block;
+	outline: none;
+}
+
+/* Sugar-high renders each logical line as `<span class="sh__line">` with
+   raw "\n" text nodes between them. Under `white-space: pre-wrap` (set on
+   `.plim-code-pre`) the `\n`s already produce the line breaks, so the
+   line spans stay inline — adding `display: block` here would double up
+   the breaks. We keep them inline for layout but they still serve as a
+   semantic grouping in the DOM. */
+
+/* Language picker — top-right of the block. `contenteditable=false` is
+   set on the wrapper element so the editor never tries to map a caret
+   into it; the button `mousedown` handlers also `preventDefault` so
+   clicks never steal focus from the code content. */
+.plim-code-lang {
+	position: absolute;
+	top: 6px;
+	right: 6px;
+	z-index: 1;
+	user-select: none;
+}
+
+.plim-code-lang-button {
+	all: unset;
+	cursor: pointer;
+	padding: 3px 10px;
+	font-size: 12px;
+	font-family: var(--font);
+	color: var(--text-muted);
+	background: rgba(255, 255, 255, 0.6);
+	border: 1px solid rgba(55, 53, 47, 0.08);
+	border-radius: 4px;
+	transition: background 80ms ease, color 80ms ease;
+}
+
+.plim-code-lang-button:hover {
+	background: #ffffff;
+	color: var(--text);
+}
+
+.plim-code-lang-menu {
+	position: absolute;
+	top: calc(100% + 4px);
+	right: 0;
+	margin: 0;
+	padding: 4px;
+	list-style: none;
+	min-width: 160px;
+	max-height: 320px;
+	overflow-y: auto;
+	background: var(--menu-bg);
+	border-radius: 6px;
+	border: 1px solid rgba(55, 53, 47, 0.1);
+	box-shadow: var(--menu-shadow);
+	font-size: 13px;
+}
+
+.plim-code-lang-menu li {
+	padding: 5px 10px;
+	border-radius: 4px;
+	cursor: pointer;
+	color: var(--text);
+}
+
+.plim-code-lang-menu li:hover {
+	background: rgba(55, 53, 47, 0.06);
+}
+
+.plim-code-lang-menu li[aria-current='true'] {
+	font-weight: 600;
+}
+
+.plim-code-lang-menu li[aria-current='true']::after {
+	content: '✓';
+	float: right;
+	color: var(--text-muted);
+}

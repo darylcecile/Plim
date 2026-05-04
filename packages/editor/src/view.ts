@@ -9,6 +9,7 @@ import {
 	type Selection as PSelection,
 	type TextSpan,
 	type Transaction,
+	blockPlainText,
 	blockTextLength,
 	flattenBlocks,
 	isMacLike,
@@ -750,12 +751,27 @@ export function mountView(opts: ViewOptions): View {
 		// line position to keep this rule simple — multi-line wrapped
 		// paragraphs walk through their own offsets first before the
 		// rule fires.
-		if (!opts.readonly && (ev.key === 'ArrowUp' || ev.key === 'ArrowDown') && !ev.isComposing && !ev.shiftKey) {
+		//
+		// `multilineText` blocks (code, etc.) extend this: ArrowDown on
+		// the last line / ArrowRight at end-of-block exits to the next
+		// block (or auto-creates a trailing paragraph if there's none).
+		// Without this the caret gets trapped — Enter inserts `\n`
+		// rather than splitting, so users would have no way to escape.
+		if (
+			!opts.readonly &&
+			(ev.key === 'ArrowUp' || ev.key === 'ArrowDown' || ev.key === 'ArrowRight') &&
+			!ev.isComposing &&
+			!ev.shiftKey &&
+			!ev.metaKey &&
+			!ev.ctrlKey &&
+			!ev.altKey
+		) {
 			const state = opts.getState();
 			const sel = state.selection;
 			if (pathsEqual(sel.head.path, sel.anchor.path)) {
 				const path = sel.head.path;
 				const block = blockAt(state.doc.children, path);
+				const desc = block ? opts.blocks.find((b) => b.name === block.type) : undefined;
 				if (ev.key === 'ArrowUp' && sel.head.offset === 0) {
 					const last = path[path.length - 1] ?? 0;
 					if (last > 0) {
@@ -768,14 +784,86 @@ export function mountView(opts: ViewOptions): View {
 						}
 					}
 				}
-				if (ev.key === 'ArrowDown' && block && sel.head.offset >= blockTextLength(block)) {
-					const flat = flattenBlocks(state.doc);
-					const idx = flat.findIndex((e) => pathsEqual(e.path, path));
-					const next = idx >= 0 ? flat[idx + 1] : undefined;
-					if (next && next.block.text === undefined) {
-						ev.preventDefault();
-						selectionReplaceWith(next.block.id);
-						return;
+				if ((ev.key === 'ArrowDown' || ev.key === 'ArrowRight') && block) {
+					const len = blockTextLength(block);
+					const off = sel.head.offset;
+					// ArrowRight exits only at end-of-block. ArrowDown
+					// exits when on the last visual *text* line, i.e.
+					// no remaining `\n` after the caret. For non-
+					// multiline blocks fall back to the original
+					// "offset >= length" rule so wrapped paragraphs
+					// still let the browser walk their own visual
+					// lines first.
+					let atExit = false;
+					if (ev.key === 'ArrowRight') {
+						atExit = off >= len;
+					} else if (desc?.multilineText) {
+						const text = blockPlainText(block);
+						atExit = text.indexOf('\n', off) === -1;
+					} else {
+						atExit = off >= len;
+					}
+					if (atExit) {
+						const flat = flattenBlocks(state.doc);
+						const idx = flat.findIndex((e) => pathsEqual(e.path, path));
+						const next = idx >= 0 ? flat[idx + 1] : undefined;
+						if (next && next.block.text === undefined) {
+							ev.preventDefault();
+							selectionReplaceWith(next.block.id);
+							return;
+						}
+						// `multilineText` blocks: actively redirect the
+						// caret. ArrowRight from a code block must move
+						// into the next block (text or atomic) rather
+						// than letting the browser walk into the
+						// language-picker DOM. ArrowDown likewise jumps
+						// to the next text block from the last code
+						// line. If there's no next sibling at all and
+						// the block is non-empty, append a trailing
+						// paragraph and land the caret in it — without
+						// this, the caret is permanently trapped.
+						if (desc?.multilineText) {
+							ev.preventDefault();
+							if (next && next.block.text !== undefined) {
+								// Move caret to start of next text block.
+								const nextPath = next.path;
+								const nextEditor = (
+									opts as unknown as { editor: { createTransaction(): Transaction } }
+								).editor;
+								const tx = nextEditor.createTransaction();
+								tx.setSelection({
+									anchor: { path: nextPath, offset: 0 },
+									head: { path: nextPath, offset: 0 },
+								});
+								tx.commit();
+								return;
+							}
+							if (!next && len > 0) {
+								// Append paragraph at parent level.
+								const parentPath = path.slice(0, -1);
+								const idxAtParent = path[path.length - 1] ?? 0;
+								const insertPath = [...parentPath, idxAtParent + 1];
+								const editor = (
+									opts as unknown as { editor: { createTransaction(): Transaction } }
+								).editor;
+								const tx = editor.createTransaction();
+								tx.insertBlock(insertPath, {
+									id: newId(),
+									type: 'paragraph',
+									text: [],
+								});
+								tx.setSelection({
+									anchor: { path: insertPath, offset: 0 },
+									head: { path: insertPath, offset: 0 },
+								});
+								tx.commit();
+								return;
+							}
+							// next exists but is atomic — already
+							// handled above; otherwise fall through and
+							// let the browser do nothing rather than
+							// stay stuck silently.
+						}
 					}
 				}
 			}
@@ -1535,6 +1623,17 @@ function updateBlockElement(el: HTMLElement, node: BlockNode, opts: ViewOptions,
 	if (node.type !== 'divider') {
 		ensureBlockHandles(el, opts);
 	}
+	// Custom descriptors override built-in rendering. This lets consumers
+	// swap out, e.g., the default `code` block for a syntax-highlighted
+	// variant without forking the editor. We only consult the descriptor
+	// when it actually provides a render path (`toDOM` or `toComponent`);
+	// markdown-only descriptors (e.g. a `fromMarkdown` parser for a
+	// fenced-code variant) still fall through to the built-in switch.
+	const customDesc = opts.blocks.find((b) => b.name === node.type);
+	if (customDesc?.toDOM || (customDesc?.toComponent && opts.renderReactBlock)) {
+		renderCustomBlock(el, node, opts, customDesc);
+		return;
+	}
 	// Rendering strategies per block
 	switch (node.type) {
 		case 'divider': {
@@ -1600,15 +1699,10 @@ function updateBlockElement(el: HTMLElement, node: BlockNode, opts: ViewOptions,
 			return;
 		}
 		default: {
-			// Custom block descriptor with `toDOM` or `toComponent` — delegate
-			// rendering. `toDOM` wins if both are defined (lets a descriptor
-			// supply a DOM fallback for SSR / non-React hosts).
-			const desc = opts.blocks.find((b) => b.name === node.type);
-			if (desc?.toDOM || (desc?.toComponent && opts.renderReactBlock)) {
-				renderCustomBlock(el, node, opts, desc);
-				return;
-			}
-			// generic text block (paragraph, heading)
+			// Custom descriptors are handled above the switch (they override
+			// any built-in mapping). Anything reaching the default arm is a
+			// generic text block (paragraph, heading, …) without a custom
+			// render path.
 			ensureContentChild(el, node, opts);
 			renderChildBlocks(el, node, opts, depth);
 		}
@@ -2605,7 +2699,6 @@ function pathForBlockId(blocks: BlockNode[], id: string, parent: number[] = []):
 function handleInsertParagraph(opts: ViewOptions) {
 	const state = opts.getState();
 	const sel = state.selection;
-	const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
 	// Look up the descriptor for the current block to honor `continueAs`:
 	// "structural" blocks (callouts, quotes-as-callout-style, dividers,
 	// images) should not propagate themselves on Enter — the right-hand
@@ -2613,6 +2706,16 @@ function handleInsertParagraph(opts: ViewOptions) {
 	// default to splitting into the same type (paragraph-style behavior).
 	const currentBlock = blockAt(state.doc.children, sel.head.path);
 	const desc = currentBlock ? opts.blocks.find((b) => b.name === currentBlock.type) : undefined;
+	// `multilineText` blocks (code, etc.) treat plain Enter as a line break
+	// — same as Shift+Enter — so users can compose multi-line content
+	// without splitting into a new block on every Enter. Exit-downward is
+	// handled by the arrow-key path; explicit splits go through the slash
+	// menu / drag handle instead.
+	if (desc?.multilineText) {
+		handleInsertLineBreak(opts);
+		return;
+	}
+	const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
 	const continueAs = desc?.continueAs;
 	if (!pathsEqual(sel.anchor.path, sel.head.path) || sel.anchor.offset !== sel.head.offset) {
 		// delete selection then split
