@@ -682,14 +682,38 @@ function ensureBlockHandles(el: HTMLElement, opts: ViewOptions) {
 function updateBlockElement(el: HTMLElement, node: BlockNode, opts: ViewOptions, depth: number, listIndex = 0) {
 	const prevType = el.getAttribute(DATA_BLOCK_TYPE);
 	if (prevType && prevType !== node.type) {
-		// Type changed — strip type-specific affordances.
-		for (const sel of [':scope > .plim-bullet', ':scope > .plim-check', ':scope > .plim-toggle-trigger', ':scope > hr', ':scope > .plim-image-wrap', ':scope > .plim-embed-wrap', ':scope > .plim-rawhtml-wrap', ':scope > .plim-table-wrap']) {
-			const old = el.querySelector(sel);
-			if (old) old.remove();
+		// Type changed — wipe ALL non-handle / non-children-container content
+		// so previous render strategies (custom block chrome, code blocks,
+		// images, dividers, etc.) leave no orphaned DOM behind. Without this
+		// a `setBlockType` from e.g. `callout` → `paragraph` would leave the
+		// callout's `.plim-callout` wrapper in place and `ensureContentChild`
+		// would append a fresh empty `[data-block-content]` *after* it,
+		// producing a "ghost callout + empty paragraph" hybrid.
+		// Preserve `.plim-block-handles` (pointer/keyboard listeners) and
+		// `[data-block-children]` (nested blocks) since both are managed
+		// independently of the block's type-specific content.
+		for (const child of Array.from(el.childNodes)) {
+			if (!(child instanceof HTMLElement)) {
+				child.remove();
+				continue;
+			}
+			if (child.classList.contains('plim-block-handles')) continue;
+			if (child.hasAttribute('data-block-children')) continue;
+			child.remove();
 		}
+		// Drop any cached React-block hosts/slots stashed on the wrapper —
+		// the new type's renderer must rebuild from scratch.
+		const stash = el as unknown as { __plimReactHost?: HTMLElement; __plimReactContentEl?: HTMLElement };
+		delete (stash as Partial<typeof stash>).__plimReactHost;
+		delete (stash as Partial<typeof stash>).__plimReactContentEl;
 		el.removeAttribute('contenteditable');
 		el.removeAttribute('data-checked');
 		el.removeAttribute('data-open');
+		el.removeAttribute('data-empty');
+		// Strip any data-attr-* left over from the previous type's attrs.
+		for (const attr of Array.from(el.attributes)) {
+			if (attr.name.startsWith('data-attr-')) el.removeAttribute(attr.name);
+		}
 	}
 	el.className = blockClassFor(node.type);
 	el.setAttribute(DATA_BLOCK_TYPE, node.type);
@@ -1506,14 +1530,24 @@ function handleInsertParagraph(opts: ViewOptions) {
 	const state = opts.getState();
 	const sel = state.selection;
 	const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
+	// Look up the descriptor for the current block to honor `continueAs`:
+	// "structural" blocks (callouts, quotes-as-callout-style, dividers,
+	// images) should not propagate themselves on Enter — the right-hand
+	// block becomes the descriptor's `continueAs` type instead. If unset,
+	// default to splitting into the same type (paragraph-style behavior).
+	const currentBlock = blockAt(state.doc.children, sel.head.path);
+	const desc = currentBlock ? opts.blocks.find((b) => b.name === currentBlock.type) : undefined;
+	const continueAs = desc?.continueAs;
 	if (!pathsEqual(sel.anchor.path, sel.head.path) || sel.anchor.offset !== sel.head.offset) {
 		// delete selection then split
 		const fromOff = Math.min(sel.anchor.offset, sel.head.offset);
 		const toOff = Math.max(sel.anchor.offset, sel.head.offset);
 		tx.replaceRange(sel.head.path, fromOff, toOff, []);
-		tx.splitBlock(sel.head.path, fromOff);
+		if (continueAs) tx.splitBlock(sel.head.path, fromOff, continueAs);
+		else tx.splitBlock(sel.head.path, fromOff);
 	} else {
-		tx.splitBlock(sel.head.path, sel.head.offset);
+		if (continueAs) tx.splitBlock(sel.head.path, sel.head.offset, continueAs);
+		else tx.splitBlock(sel.head.path, sel.head.offset);
 	}
 	tx.commit();
 }

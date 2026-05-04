@@ -5,6 +5,7 @@ export * from './triggers.js';
 export * from './validation.js';
 export * from './actions.js';
 export * from './blocks.js';
+export * from './editor-handle.js';
 export * from './extension.js';
 export * from './driver.js';
 export * from './snapshot.js';

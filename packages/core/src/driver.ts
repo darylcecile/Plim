@@ -1,19 +1,20 @@
 import type { ActionDescriptor } from './actions.js';
 import type { BlockDescriptor, MarkDescriptor } from './blocks.js';
+import type { EditorHandle } from './editor-handle.js';
 import type { ExtensionFactory, Theme } from './extension.js';
 
 export type PlimDriverConfig = {
 	theme?: Theme;
 	extensions?: ExtensionFactory[];
-	registeredMarks?: Array<() => MarkDescriptor>;
-	registeredBlocks?: Array<() => BlockDescriptor>;
+	registeredMarks?: Array<(editor: EditorHandle) => MarkDescriptor>;
+	registeredBlocks?: Array<(editor: EditorHandle) => BlockDescriptor>;
 	registeredActions?: ActionDescriptor[];
 };
 
 export class PlimDriver {
 	readonly theme: Theme;
-	readonly markFactories: Array<() => MarkDescriptor>;
-	readonly blockFactories: Array<() => BlockDescriptor>;
+	readonly markFactories: Array<(editor: EditorHandle) => MarkDescriptor>;
+	readonly blockFactories: Array<(editor: EditorHandle) => BlockDescriptor>;
 	readonly actions: ActionDescriptor[];
 	readonly extensions: ExtensionFactory[];
 
@@ -27,12 +28,12 @@ export class PlimDriver {
 		this.extensions = config.extensions ?? [];
 	}
 
-	resolveBlocks(): BlockDescriptor[] {
-		return this.blockFactories.map((f) => f());
+	resolveBlocks(editor: EditorHandle): BlockDescriptor[] {
+		return this.blockFactories.map((f) => f(editor));
 	}
 
-	resolveMarks(): MarkDescriptor[] {
-		return this.markFactories.map((f) => f());
+	resolveMarks(editor: EditorHandle): MarkDescriptor[] {
+		return this.markFactories.map((f) => f(editor));
 	}
 
 	getHistory(): {

@@ -37,15 +37,7 @@ import {
 	type MentionUser,
 	type SlashCommandItem,
 } from '@plim/react';
-import { calloutBlock, makeCounterBlock, type CalloutTone } from './customBlocks.js';
-
-// `counterBlock` needs to commit transactions back into the editor when
-// the user presses +/- inside the React component, so we expose the
-// current editor handle to the descriptor via a closure. The handle is
-// populated by <PlimEditor /> on mount and read each time a counter
-// renders or commits.
-let editorAccess: import('@plim/editor').AgnosticEditor | null = null;
-const counterBlock = makeCounterBlock(() => editorAccess);
+import { calloutBlock, counterBlock, type CalloutTone } from './customBlocks.js';
 
 const plim = new PlimDriver({
 	theme: 'light',
@@ -275,17 +267,6 @@ const slashItems: readonly SlashCommandItem[] = [...DEFAULT_SLASH_ITEMS, ...cust
 
 export function App() {
 	const handle = useEditorHandle();
-	// Expose the live editor to `counterBlock`'s closure so the React
-	// component can commit transactions back into the doc when the user
-	// clicks +/−. PlimEditor populates `handle.current` imperatively
-	// inside its mount effect; this effect runs after that and copies the
-	// reference into the module-scope variable the descriptor closes over.
-	React.useEffect(() => {
-		editorAccess = handle.current;
-		return () => {
-			editorAccess = null;
-		};
-	});
 	return (
 		<div className="page">
 			<header className="page-header">

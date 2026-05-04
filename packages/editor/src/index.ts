@@ -4,6 +4,7 @@ import {
 	type BlockDescriptor,
 	type BlockPayload,
 	type DocumentNode,
+	type EditorHandle,
 	type EditorState,
 	type ExtensionShape,
 	type MarkDescriptor,
@@ -44,26 +45,10 @@ export type DeriveEditorOptions = {
 	renderReactBlock?: (host: HTMLElement, payload: BlockPayload, desc: BlockDescriptor) => void;
 };
 
-export type AgnosticEditor = {
-	readonly plim: PlimDriver;
-	readonly isReady: boolean;
-	getState(): EditorState;
-	setState(s: EditorState): void;
-	dispatch(tx: Transaction): void;
-	createTransaction(): Transaction;
-	onTransaction(cb: (tx: Transaction, state: EditorState) => void): () => void;
-	onAsyncEvent<T = unknown>(name: string, handler: (event: { name: string; payload?: unknown }, state: EditorState, ctx: ActionContext) => Promise<T> | T): () => void;
-	whenReady(cb: () => void): void;
-	restoreSnapshot(snap: Snapshot): void;
+export type AgnosticEditor = EditorHandle & {
 	mount(): void;
 	destroy(): void;
 	readonly view: View | null;
-	readonly history: History;
-	readonly blocks: BlockDescriptor[];
-	readonly marks: MarkDescriptor[];
-	readonly actions: ActionDescriptor[];
-	supportsDecoration(blockType: string): boolean;
-	triggerAsyncEvent<T = unknown>(name: string, payload?: unknown): Promise<T>;
 };
 
 const EMPTY_DOC: DocumentNode = {
@@ -135,16 +120,13 @@ export function deriveEditor(plim: PlimDriver, options: DeriveEditorOptions): Ag
 	};
 
 	// ---- Build registries (extensions can contribute) ----
-	const blocks: BlockDescriptor[] = plim.resolveBlocks();
-	const marks: MarkDescriptor[] = plim.resolveMarks();
+	// We must resolve blocks/marks AFTER the editor handle exists so factories
+	// can close over it (e.g., a `<CounterCard>` that commits transactions on
+	// click). The arrays themselves are declared up-front and the editor
+	// holds references to them; we mutate in place once the handle is built.
+	const blocks: BlockDescriptor[] = [];
+	const marks: MarkDescriptor[] = [];
 	const actions: ActionDescriptor[] = [...plim.actions];
-	for (const factory of plim.extensions) {
-		const ext = processExtension(factory, /* editor placeholder */ {} as unknown);
-		extensionShapes.push(ext);
-		if (ext.registeredBlocks) for (const f of ext.registeredBlocks) blocks.push(f());
-		if (ext.registeredMarks) for (const f of ext.registeredMarks) marks.push(f());
-		if (ext.registeredActions) for (const a of ext.registeredActions) actions.push(a);
-	}
 
 	function supportsDecoration(blockType: string): boolean {
 		const desc = blocks.find((b) => b.name === blockType);
@@ -264,6 +246,20 @@ export function deriveEditor(plim: PlimDriver, options: DeriveEditorOptions): Ag
 		},
 		onChange: (cb) => history.onChange(cb),
 	});
+
+	// Now that the editor handle exists, resolve blocks/marks and process
+	// extensions with the real editor passed in. Factories close over it so
+	// custom blocks (`defineBlock((editor) => ...)`) can commit transactions
+	// without a deferred `() => editorAccess` lookup.
+	for (const desc of plim.resolveBlocks(editor)) blocks.push(desc);
+	for (const desc of plim.resolveMarks(editor)) marks.push(desc);
+	for (const factory of plim.extensions) {
+		const ext = processExtension(factory, editor);
+		extensionShapes.push(ext);
+		if (ext.registeredBlocks) for (const f of ext.registeredBlocks) blocks.push(f(editor));
+		if (ext.registeredMarks) for (const f of ext.registeredMarks) marks.push(f(editor));
+		if (ext.registeredActions) for (const a of ext.registeredActions) actions.push(a);
+	}
 
 	// ---- Input pipeline ----
 	const pendingCancellations = new Map<ActionDescriptor, { cancel: () => void }>();

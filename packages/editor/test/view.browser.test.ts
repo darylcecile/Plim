@@ -962,3 +962,147 @@ describe('paste pipeline — extension hook (transformPaste)', () => {
 	});
 });
 
+// ───────────────────────────────────────────────────────────────────────
+// Custom block ↔ paragraph type-change cleanup + `continueAs` Enter
+// behavior. Both regressions live in `updateBlockElement` / `handleInsertParagraph`.
+// ───────────────────────────────────────────────────────────────────────
+
+describe('Custom block lifecycle', () => {
+	function makeCallout() {
+		return defineBlock({
+			name: 'callout',
+			type: 'standalone',
+			supportsDecoration: true,
+			continueAs: 'paragraph',
+			toDOM: (payload) => {
+				const wrap = document.createElement('div');
+				wrap.className = 'plim-callout';
+				wrap.setAttribute('data-tone', String(payload.attrs.tone ?? 'info'));
+				const icon = document.createElement('span');
+				icon.className = 'plim-callout-icon';
+				icon.setAttribute('contenteditable', 'false');
+				icon.textContent = '!';
+				wrap.appendChild(icon);
+				for (const node of payload.content as HTMLElement[]) wrap.appendChild(node);
+				return wrap;
+			},
+		});
+	}
+
+	it('Backspace on empty callout converts cleanly to paragraph (no ghost callout chrome)', () => {
+		// Repro: type into a callout, clear it, press Backspace at offset 0.
+		// Bug was that `setBlockType('paragraph')` left the `.plim-callout`
+		// chrome around because the type-change cleanup only stripped
+		// known built-in selectors. Now we wipe ALL non-handle children.
+		const calloutBlock = makeCallout();
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({
+			registeredBlocks: [paragraphBlock, calloutBlock],
+		});
+		const blockId = newId();
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [{ id: blockId, type: 'callout', attrs: { tone: 'info' }, text: [] }],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		// Confirm callout chrome is initially mounted.
+		expect(root.querySelector('.plim-callout')).toBeTruthy();
+		// Place caret at offset 0 of the empty callout, then trigger
+		// deleteContentBackward (what the browser fires on Backspace).
+		const tx = editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 0 } });
+		tx.commit();
+		const ev = new InputEvent('beforeinput', { inputType: 'deleteContentBackward', bubbles: true, cancelable: true });
+		root.dispatchEvent(ev);
+		// After the conversion, the block element is reused but its DOM
+		// must have been wiped: no callout chrome remains, only a fresh
+		// `[data-block-content]` for the new paragraph render.
+		const block = root.querySelector('[data-block-id]') as HTMLElement;
+		expect(block.getAttribute('data-block-type')).toBe('paragraph');
+		expect(block.querySelector('.plim-callout')).toBeNull();
+		expect(block.querySelector('.plim-callout-icon')).toBeNull();
+		// Exactly one content slot, and it's empty.
+		const slots = block.querySelectorAll('[data-block-content]');
+		expect(slots.length).toBe(1);
+		expect((slots[0] as HTMLElement).textContent).toBe('');
+		editor.destroy();
+		container.remove();
+	});
+
+	it('Enter on a callout creates a paragraph (continueAs), not another callout', () => {
+		const calloutBlock = makeCallout();
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({
+			registeredBlocks: [paragraphBlock, calloutBlock],
+		});
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [{ id: newId(), type: 'callout', attrs: { tone: 'info' }, text: [{ text: 'hello' }] }],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		// Caret at end of callout text.
+		const tx = editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 5 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		// Fire insertParagraph (Enter without Shift in beforeinput).
+		const ev = new InputEvent('beforeinput', { inputType: 'insertParagraph', bubbles: true, cancelable: true });
+		root.dispatchEvent(ev);
+		const state = editor.getState();
+		expect(state.doc.children.length).toBe(2);
+		expect(state.doc.children[0]!.type).toBe('callout');
+		expect(state.doc.children[1]!.type).toBe('paragraph'); // the key assertion
+		// And the callout's text is preserved on the left.
+		expect(state.doc.children[0]!.text?.[0]?.text).toBe('hello');
+		editor.destroy();
+		container.remove();
+	});
+
+	it('Without continueAs, Enter on a custom block still propagates the same type (default behavior)', () => {
+		const cardBlock = defineBlock({
+			name: 'card',
+			type: 'standalone',
+			toDOM: (payload) => {
+				const wrap = document.createElement('div');
+				wrap.className = 'plim-card';
+				for (const node of payload.content as HTMLElement[]) wrap.appendChild(node);
+				return wrap;
+			},
+		});
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock, cardBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [{ id: newId(), type: 'card', text: [{ text: 'one' }] }],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		const tx = editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 3 }, head: { path: [0], offset: 3 } });
+		tx.commit();
+		const ev = new InputEvent('beforeinput', { inputType: 'insertParagraph', bubbles: true, cancelable: true });
+		root.dispatchEvent(ev);
+		const state = editor.getState();
+		expect(state.doc.children.length).toBe(2);
+		expect(state.doc.children[1]!.type).toBe('card'); // unchanged default behavior
+		editor.destroy();
+		container.remove();
+	});
+});
+

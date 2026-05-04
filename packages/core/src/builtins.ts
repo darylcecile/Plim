@@ -1,4 +1,5 @@
 import { type BlockDescriptor, type MarkDescriptor, defineBlock, defineMark } from './blocks.js';
+import type { EditorHandle } from './editor-handle.js';
 
 // Marks ---------------------------------------------------------------------
 //
@@ -164,7 +165,7 @@ export const tableBlock = defineBlock({
 	supportsDecoration: false,
 });
 
-export const builtInBlocks: Array<() => BlockDescriptor> = [
+export const builtInBlocks: Array<(editor: EditorHandle) => BlockDescriptor> = [
 	paragraphBlock,
 	headingBlock,
 	bulletedListBlock,
@@ -176,7 +177,7 @@ export const builtInBlocks: Array<() => BlockDescriptor> = [
 	horizontalRuleBlock,
 ];
 
-export const builtInMarks: Array<() => MarkDescriptor> = [
+export const builtInMarks: Array<(editor: EditorHandle) => MarkDescriptor> = [
 	boldMark,
 	italicMark,
 	underlineMark,

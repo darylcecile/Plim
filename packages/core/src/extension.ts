@@ -1,12 +1,13 @@
 import type { ActionDescriptor } from './actions.js';
 import type { BlockDescriptor, MarkDescriptor } from './blocks.js';
+import type { EditorHandle } from './editor-handle.js';
 
 export type Theme = string | { name?: string; tokens?: Record<string, string> };
 
 export type ExtensionShape = {
 	name: string;
-	registeredBlocks?: Array<() => BlockDescriptor>;
-	registeredMarks?: Array<() => MarkDescriptor>;
+	registeredBlocks?: Array<(editor: EditorHandle) => BlockDescriptor>;
+	registeredMarks?: Array<(editor: EditorHandle) => MarkDescriptor>;
 	registeredActions?: ActionDescriptor[];
 	onTransaction?: (tx: unknown, ctx: unknown) => void;
 	onAsyncEvent?: (name: string, state: unknown, ctx: unknown) => Promise<unknown> | unknown;
@@ -25,7 +26,7 @@ export type ExtensionShape = {
 	transformPaste?: (data: { text: string; html: string; files: File[] }, ctx: unknown) => boolean | undefined | void;
 };
 
-export type ExtensionFactory = (editor: unknown) => ExtensionShape;
+export type ExtensionFactory = (editor: EditorHandle) => ExtensionShape;
 
 const __cache = new WeakMap<ExtensionFactory, ExtensionShape>();
 
@@ -33,7 +34,7 @@ export function defineExtension(factory: ExtensionFactory): ExtensionFactory {
 	return factory;
 }
 
-export function processExtension(factory: ExtensionFactory, editor: unknown): ExtensionShape {
+export function processExtension(factory: ExtensionFactory, editor: EditorHandle): ExtensionShape {
 	const cached = __cache.get(factory);
 	if (cached) return cached;
 	const shape = factory(editor);

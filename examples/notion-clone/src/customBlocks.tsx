@@ -1,6 +1,5 @@
 import * as React from 'react';
-import { defineBlock } from '@plim/core';
-import type { AgnosticEditor } from '@plim/editor';
+import { defineBlock, type EditorHandle } from '@plim/core';
 
 // ──────────────────────────────────────────────────────────────────────────
 // Callout (toDOM example)
@@ -29,6 +28,28 @@ export const calloutBlock = defineBlock({
 	name: 'callout',
 	type: 'standalone',
 	supportsDecoration: true,
+	// Notion-style: Enter at the end of a callout starts a fresh paragraph
+	// rather than cloning the callout. The callout is "structural" — its
+	// chrome (icon + tone background) is opt-in per-block, so propagating
+	// it on every Enter feels surprising. The descriptor opts in via
+	// `continueAs`; the editor's split handler reads it and passes the
+	// type to `tx.splitBlock(path, offset, newType)`.
+	continueAs: 'paragraph',
+	// Markdown serialization: emit as a blockquote with a tone-prefixed
+	// inline marker so we can round-trip through commonmark hosts that
+	// don't know about callouts. The `> [!info]` GFM-style alert syntax
+	// is recognized by GitHub / Obsidian / many Notion exporters.
+	toMarkdown: (payload, ctx) => {
+		const tone = String(payload.attrs.tone ?? 'info').toUpperCase();
+		// Use `ctx.spans` (raw text spans with marks) + `ctx.serializeInline`
+		// so bold/italic/code/links inside the callout round-trip through
+		// markdown cleanly. The GFM-style `> [!INFO]` alert syntax is
+		// recognized by GitHub, Obsidian, and most markdown parsers that
+		// support callouts; consumers that don't will fall back to a
+		// regular blockquote with an `[!INFO]` prefix.
+		const inline = ctx.serializeInline(ctx.spans);
+		return [`> [!${tone}] ${inline}`];
+	},
 	toDOM: (payload) => {
 		const tone = (payload.attrs.tone as CalloutTone | undefined) ?? 'info';
 		const wrap = document.createElement('div');
@@ -73,7 +94,7 @@ export const calloutBlock = defineBlock({
 //    survives a reload / undo.
 
 function CounterCard(props: {
-	editor: AgnosticEditor | null;
+	editor: EditorHandle;
 	id: string;
 	title: string;
 	persistedCount: number;
@@ -92,7 +113,6 @@ function CounterCard(props: {
 	const persist = (next: number) => {
 		setOptimistic(next);
 		const editor = props.editor;
-		if (!editor) return;
 		const path = findPathForBlockId(editor, props.id);
 		if (!path) return;
 		const tx = editor.createTransaction();
@@ -134,7 +154,7 @@ function CounterCard(props: {
 // custom block doesn't have direct access to its own path because the doc
 // can be re-arranged (drag, splits) between renders, so we look it up at
 // commit time rather than caching.
-function findPathForBlockId(editor: AgnosticEditor, id: string): number[] | null {
+function findPathForBlockId(editor: EditorHandle, id: string): number[] | null {
 	const walk = (children: { id: string; children?: { id: string }[] }[], parent: number[]): number[] | null => {
 		for (let i = 0; i < children.length; i++) {
 			const c = children[i];
@@ -151,21 +171,22 @@ function findPathForBlockId(editor: AgnosticEditor, id: string): number[] | null
 }
 
 // `toComponent` returns a React element built from the descriptor payload.
-// We thread the editor handle in via a closure factory so the component
-// can commit transactions back into the doc.
-export function makeCounterBlock(getEditor: () => AgnosticEditor | null) {
-	return defineBlock({
-		name: 'counter',
-		type: 'standalone',
-		atomic: true,
-		supportsDecoration: false,
-		toComponent: (payload) => (
-			<CounterCard
-				editor={getEditor()}
-				id={payload.id}
-				title={String(payload.attrs.title ?? 'Counter')}
-				persistedCount={Number(payload.attrs.count ?? 0)}
-			/>
-		),
-	});
-}
+// `defineBlock` accepts an `(editor) => descriptor` factory form: the driver
+// invokes it at resolution time inside `deriveEditor`, after the editor
+// handle exists, so the descriptor can close over `editor` directly. This
+// supersedes the previous closure-injection dance (passing a `() =>
+// editorAccess` getter from App.tsx and populating it from a useEffect).
+export const counterBlock = defineBlock((editor) => ({
+	name: 'counter',
+	type: 'standalone',
+	atomic: true,
+	supportsDecoration: false,
+	toComponent: (payload) => (
+		<CounterCard
+			editor={editor}
+			id={payload.id}
+			title={String(payload.attrs.title ?? 'Counter')}
+			persistedCount={Number(payload.attrs.count ?? 0)}
+		/>
+	),
+}));
