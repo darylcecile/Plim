@@ -132,20 +132,17 @@ const plim = new PlimDriver({
 
 const baseContent = contentFromMarkdown(
 	'# Welcome to Plim',
-	'',
-	'A Notion-style editor built on a clean, fast core. Press **/** to open the block menu, or try Markdown shortcuts like `#`, `-`, `>`, or `\``.',
-	'',
+	'A Notion-inspired editor built with DX in mind. Press `/` to open the block menu, or try writing markdown directly',
 	'## Features',
-	'',
 	'- Block-based editing',
-	'- *Inline* **formatting** with `code`',
-	'- Slash commands and mentions',
+	'- *Inline* **formatting** ~with~ including `code`',
+	'- Slash commands and @-mentions',
 	'',
 	'> Try splitting this block by pressing Enter — and joining with Backspace.',
 	'',
 	'```javascript',
-	'function hello() {',
-	'  return "world";',
+	'function sayHello() {',
+	'  return "Hello world";',
 	'}',
 	'```',
 	''
@@ -304,9 +301,6 @@ export function App() {
 		<div className="page">
 			<header className="page-header">
 				<div className="emoji">📝</div>
-				<h1 className="page-title" contentEditable suppressContentEditableWarning>
-					Untitled
-				</h1>
 			</header>
 			<PlimEditor plim={plim} handle={handle} initialContent={initialContent} autoFocus />
 			<SlashCommandMenu editor={handle} items={slashItems} />
