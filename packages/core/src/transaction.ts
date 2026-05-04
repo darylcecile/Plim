@@ -182,7 +182,82 @@ function withDocChange(doc: DocumentNode, mutate: (root: DocumentNode) => void):
 	// Deep clone (small docs - fine).
 	const cloned = JSON.parse(JSON.stringify(doc)) as DocumentNode;
 	mutate(cloned);
-	return cloned;
+	// Structural-sharing pass: walk the cloned tree alongside the
+	// previous one and re-alias any subtree that's structurally
+	// identical to its predecessor. This restores reference equality
+	// for blocks the transaction didn't touch — most txs change one
+	// block, so 99% of the doc keeps its prior identity. The view
+	// layer can then short-circuit `updateBlockElement` for unchanged
+	// blocks via `node === prevNode` checks. Cost: one
+	// `JSON.stringify` per block per tx (cheap for small blocks),
+	// gated behind an id-equality fast path. Net win because the
+	// renderer's per-block update is far costlier.
+	return reuseUnchangedRefs(doc, cloned);
+}
+
+/**
+ * Walk `prev` and `next` (post-mutation clone) in parallel; whenever a
+ * subtree's structural form is identical, splice the previous reference
+ * into `next`. Block identity is keyed on `id` to avoid expensive
+ * comparisons across reordered siblings — if ids match at the same
+ * position we compare shape, otherwise we leave `next`'s clone in
+ * place.
+ *
+ * Structural equality is determined via `JSON.stringify` rather than a
+ * recursive deep-equal walk: it's a single pass over each block's
+ * material (text spans, attrs, attribute order is stable since both
+ * trees came from the same JSON source), and avoids the O(n*depth)
+ * cost of per-field comparison while still being correct for plain
+ * data (no functions, no symbols — Plim docs are pure JSON-shaped).
+ */
+function reuseUnchangedRefs(prev: DocumentNode, next: DocumentNode): DocumentNode {
+	if (!prev.children || !next.children) return next;
+	const reusedChildren = reuseChildren(prev.children, next.children);
+	if (reusedChildren === next.children) return next;
+	return { ...next, children: reusedChildren };
+}
+
+function reuseChildren(prev: BlockNode[], next: BlockNode[]): BlockNode[] {
+	if (prev === next) return prev;
+	let reused: BlockNode[] | null = null;
+	for (let i = 0; i < next.length; i++) {
+		const nextChild = next[i]!;
+		const prevChild = prev[i];
+		const candidate = prevChild && prevChild.id === nextChild.id ? reuseBlock(prevChild, nextChild) : nextChild;
+		if (candidate !== nextChild) {
+			if (!reused) reused = next.slice();
+			reused[i] = candidate;
+		}
+	}
+	return reused ?? next;
+}
+
+function reuseBlock(prev: BlockNode, next: BlockNode): BlockNode {
+	if (prev === next) return prev;
+	// Shallow shape compare (id/type/attrs/text). If those differ,
+	// no point recursing into children — the block itself is changed
+	// and the renderer must reprocess it anyway. We deliberately
+	// stringify *only* the block's own material and exclude
+	// `children` so a deep subtree change in a descendant doesn't
+	// mark every ancestor as "changed" for no reason — children are
+	// re-aliased independently below.
+	const prevShallow = shallowKey(prev);
+	const nextShallow = shallowKey(next);
+	const prevHasChildren = !!prev.children;
+	const nextHasChildren = !!next.children;
+	if (prevShallow !== nextShallow) return next;
+	if (!prevHasChildren && !nextHasChildren) return prev;
+	if (!prevHasChildren || !nextHasChildren) return next;
+	const reusedChildren = reuseChildren(prev.children!, next.children!);
+	if (reusedChildren === prev.children) return prev;
+	return { ...next, children: reusedChildren };
+}
+
+function shallowKey(b: BlockNode): string {
+	// Stable string of (id, type, attrs, text) — excludes `children`.
+	// JSON.stringify is sufficient because BlockNode is plain data
+	// and we never deviate from a fixed property set.
+	return JSON.stringify({ id: b.id, type: b.type, attrs: b.attrs ?? null, text: b.text ?? null });
 }
 
 function arrAt(parent: BlockNode | DocumentNode): BlockNode[] {

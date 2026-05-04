@@ -2401,3 +2401,106 @@ describe('Trailing-paragraph autocreate (last block)', () => {
 		}
 	});
 });
+
+describe('Arrow into atomic neighbour from mid-block (visual-line)', () => {
+	// Native browser ArrowDown skips non-editable atomic blocks (they're
+	// outside the text flow), so when the caret is on the last visual
+	// line of the current text block and the next sibling is atomic, we
+	// have to intercept and block-select the atom — otherwise the caret
+	// jumps right past it into the block beyond. Same idea in reverse
+	// for ArrowUp into an atomic prev sibling.
+	function setupAtom() {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock, imageBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [
+					{ id: 'p-before', type: 'paragraph', text: [{ text: 'before atom' }] },
+					{ id: 'img', type: 'image', attrs: { src: 'https://example.test/x.png' } },
+					{ id: 'p-after', type: 'paragraph', text: [{ text: 'after atom' }] },
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		return { container, editor, root, cleanup: () => { editor.destroy(); container.remove(); } };
+	}
+
+	it('ArrowDown from mid-paragraph block-selects the next atomic sibling (no offset gate)', () => {
+		const env = setupAtom();
+		try {
+			// Caret at offset 3 of "before atom" — NOT at end-of-block.
+			// Without the visual-edge fix, native ArrowDown skips the
+			// image and lands in the paragraph after.
+			const tx = env.editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 3 }, head: { path: [0], offset: 3 } });
+			tx.commit();
+			env.root.dispatchEvent(
+				new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }),
+			);
+			const selected = env.container.querySelectorAll('[data-plim-block-selected="true"]');
+			expect(selected.length).toBe(1);
+			expect(selected[0]!.getAttribute('data-block-id')).toBe('img');
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it('ArrowUp from mid-paragraph block-selects the previous atomic sibling (no offset gate)', () => {
+		const env = setupAtom();
+		try {
+			// Caret at offset 3 of "after atom" — NOT at offset 0.
+			const tx = env.editor.createTransaction();
+			tx.setSelection({ anchor: { path: [2], offset: 3 }, head: { path: [2], offset: 3 } });
+			tx.commit();
+			env.root.dispatchEvent(
+				new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }),
+			);
+			const selected = env.container.querySelectorAll('[data-plim-block-selected="true"]');
+			expect(selected.length).toBe(1);
+			expect(selected[0]!.getAttribute('data-block-id')).toBe('img');
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it('ArrowDown when next sibling is a text block falls through to native (no atomic interception)', () => {
+		// Without an atomic next sibling, mid-block ArrowDown should
+		// NOT preventDefault — the browser handles caret movement into
+		// the next text block natively.
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [
+					{ id: 'p1', type: 'paragraph', text: [{ text: 'one' }] },
+					{ id: 'p2', type: 'paragraph', text: [{ text: 'two' }] },
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		try {
+			const tx = editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 1 }, head: { path: [0], offset: 1 } });
+			tx.commit();
+			const ev = new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true });
+			root.dispatchEvent(ev);
+			// No block-selection took place.
+			expect(container.querySelectorAll('[data-plim-block-selected="true"]').length).toBe(0);
+			// Default not prevented (browser still moves caret natively).
+			expect(ev.defaultPrevented).toBe(false);
+		} finally {
+			editor.destroy();
+			container.remove();
+		}
+	});
+});

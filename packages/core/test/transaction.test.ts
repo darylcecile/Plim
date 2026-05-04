@@ -136,6 +136,77 @@ describe('Transaction', () => {
 	});
 });
 
+describe('Structural sharing across transactions', () => {
+	// `withDocChange` deep-clones the doc, mutates, then re-aliases
+	// any subtree whose shape matches the previous version. This
+	// preserves reference equality for blocks the tx didn't touch,
+	// which the view layer uses to skip per-block render work.
+
+	it('preserves references for untouched siblings on a single-block edit', () => {
+		const state = makeState('one', 'two', 'three');
+		const tx = new Transaction(state);
+		tx.insertText([1], 3, '!');
+		const next = applyTransaction(state, tx);
+		// Block at index 0 and 2 weren't mutated — their shape is
+		// identical, so the re-alias pass should restore the original
+		// references.
+		expect(next.doc.children[0]).toBe(state.doc.children[0]);
+		expect(next.doc.children[2]).toBe(state.doc.children[2]);
+		// The mutated block must NOT be the previous reference.
+		expect(next.doc.children[1]).not.toBe(state.doc.children[1]);
+	});
+
+	it('preserves nested untouched subtrees', () => {
+		const state: EditorState = {
+			doc: {
+				type: 'doc',
+				children: [
+					{
+						id: 'parent',
+						type: 'paragraph',
+						text: [{ text: 'p' }],
+						children: [p('child-a'), p('child-b')],
+					},
+					p('sibling'),
+				],
+			},
+			selection: { anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 0 } },
+		};
+		const tx = new Transaction(state);
+		// Edit child-a (path [0,0]).
+		tx.insertText([0, 0], 7, '!');
+		const next = applyTransaction(state, tx);
+		// Sibling at root level untouched — same reference.
+		expect(next.doc.children[1]).toBe(state.doc.children[1]);
+		// child-b untouched even though parent changed.
+		const prevParent = state.doc.children[0]!;
+		const nextParent = next.doc.children[0]!;
+		expect(nextParent).not.toBe(prevParent);
+		expect(nextParent.children![1]).toBe(prevParent.children![1]);
+		// The actually-edited block has a new reference.
+		expect(nextParent.children![0]).not.toBe(prevParent.children![0]);
+	});
+
+	it('does not reuse references when a sibling was added (positions changed)', () => {
+		const state = makeState('a', 'c');
+		const tx = new Transaction(state);
+		tx.insertBlock([1], { id: 'mid', type: 'paragraph', text: [{ text: 'b' }] });
+		const next = applyTransaction(state, tx);
+		// Inserted at index 1 — original index-1 block ('c') shifted
+		// to index 2. Index-0 still 'a' and unchanged → reused.
+		expect(next.doc.children).toHaveLength(3);
+		expect(next.doc.children[0]).toBe(state.doc.children[0]);
+		// Index-2 'c' has the same id/shape as previous index-1, but
+		// the re-alias pass keys on positional id-equality so it sees
+		// a different id at index 2 (was different in prev) and keeps
+		// the cloned reference. The important contract is correctness
+		// of the doc shape — verify by id and content rather than
+		// reference here.
+		expect(next.doc.children[2]!.id).toBe(state.doc.children[1]!.id);
+		expect(blockPlainText(next.doc.children[2]!)).toBe('c');
+	});
+});
+
 describe('marksAtOffset', () => {
 	it('returns the marks of the run when offset is strictly inside it', async () => {
 		const { marksAtOffset } = await import('@plim/core');

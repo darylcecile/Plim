@@ -783,21 +783,40 @@ export function mountView(opts: ViewOptions): View {
 				const path = sel.head.path;
 				const block = blockAt(state.doc.children, path);
 				const desc = block ? opts.blocks.find((b) => b.name === block.type) : undefined;
-				if (ev.key === 'ArrowUp' && sel.head.offset === 0) {
+				if (ev.key === 'ArrowUp') {
 					const last = path[path.length - 1] ?? 0;
 					if (last > 0) {
 						const prevPath = [...path.slice(0, -1), last - 1];
 						const prev = blockAt(state.doc.children, prevPath);
 						if (prev && prev.text === undefined) {
-							ev.preventDefault();
-							selectionReplaceWith(prev.id);
-							return;
+							// Atomic prev: native ArrowUp skips it (it's
+							// outside the editable text flow), so the
+							// caret would jump straight into the block
+							// above. Intercept whenever the caret is at
+							// offset 0 OR visually on the first line of
+							// the current block — Notion's behaviour.
+							const blockEl = blockElementAtPath(root, path);
+							const content = blockEl?.querySelector(
+								'[data-block-content]',
+							) as HTMLElement | null;
+							const atTop =
+								sel.head.offset === 0 ||
+								(content !== null && caretAtVisualEdge(content, 'top'));
+							if (atTop) {
+								ev.preventDefault();
+								selectionReplaceWith(prev.id);
+								return;
+							}
 						}
 					}
 				}
 				if ((ev.key === 'ArrowDown' || ev.key === 'ArrowRight') && block) {
 					const len = blockTextLength(block);
 					const off = sel.head.offset;
+					const flat = flattenBlocks(state.doc);
+					const idx = flat.findIndex((e) => pathsEqual(e.path, path));
+					const next = idx >= 0 ? flat[idx + 1] : undefined;
+					const nextIsAtomic = !!next && next.block.text === undefined;
 					// ArrowRight exits only at end-of-block. ArrowDown
 					// exits when on the last visual *text* line, i.e.
 					// no remaining `\n` after the caret. For non-
@@ -814,10 +833,25 @@ export function mountView(opts: ViewOptions): View {
 					} else {
 						atExit = off >= len;
 					}
+					// Atomic-next escape hatch (ArrowDown only — Right
+					// already requires strict end-of-block which is
+					// the right strict semantics): if the next sibling
+					// is atomic and the caret is visually on the last
+					// line of the current block, intercept regardless
+					// of offset. Without this, native ArrowDown walks
+					// past the atom (it's not in the editable text
+					// flow) and lands in the block after, instead of
+					// block-selecting the atom — Notion intercepts.
+					if (!atExit && ev.key === 'ArrowDown' && nextIsAtomic) {
+						const blockEl = blockElementAtPath(root, path);
+						const content = blockEl?.querySelector(
+							'[data-block-content]',
+						) as HTMLElement | null;
+						if (content !== null && caretAtVisualEdge(content, 'bottom')) {
+							atExit = true;
+						}
+					}
 					if (atExit) {
-						const flat = flattenBlocks(state.doc);
-						const idx = flat.findIndex((e) => pathsEqual(e.path, path));
-						const next = idx >= 0 ? flat[idx + 1] : undefined;
 						const editorRef = (
 							opts as unknown as { editor: { createTransaction(): Transaction } }
 						).editor;
@@ -1411,6 +1445,19 @@ function ensureTag(existing: HTMLElement | null, tag: string): HTMLElement {
 }
 
 function renderBlocks(parent: HTMLElement, nodes: BlockNode[], opts: ViewOptions, depth = 0) {
+	// Build an id → element map once per call so the per-node lookup
+	// below is O(1) instead of O(n). With the previous
+	// `Array.from(parent.children).find(...)` pattern, a 100-block doc
+	// did 10,000 DOM scans per render — small per-op but a real budget
+	// hit on every keystroke. The map is cheap (n entries, freed at
+	// function exit) and keeps reordering correct because we still
+	// drive insertion via `desired` order.
+	const existingById = new Map<string, HTMLElement>();
+	for (const child of Array.from(parent.children)) {
+		if (!(child instanceof HTMLElement)) continue;
+		const id = child.getAttribute(DATA_BLOCK_ID);
+		if (id !== null) existingById.set(id, child);
+	}
 	// Maintain children by id
 	const desired = new Map<string, BlockNode>();
 	const order: string[] = [];
@@ -1419,14 +1466,12 @@ function renderBlocks(parent: HTMLElement, nodes: BlockNode[], opts: ViewOptions
 		order.push(n.id);
 	}
 	// Remove unwanted
-	const toRemove: HTMLElement[] = [];
-	for (const child of Array.from(parent.children)) {
-		if (!(child instanceof HTMLElement)) continue;
-		if (!child.hasAttribute(DATA_BLOCK_ID)) continue;
-		const id = child.getAttribute(DATA_BLOCK_ID)!;
-		if (!desired.has(id)) toRemove.push(child);
+	for (const [id, el] of existingById) {
+		if (!desired.has(id)) {
+			el.remove();
+			existingById.delete(id);
+		}
 	}
-	for (const r of toRemove) r.remove();
 
 	// Iterate desired order, reorder/create as needed
 	let cursorNode: ChildNode | null = parent.firstChild;
@@ -1436,16 +1481,18 @@ function renderBlocks(parent: HTMLElement, nodes: BlockNode[], opts: ViewOptions
 	let numberedRun = 0;
 	for (const id of order) {
 		const node = desired.get(id)!;
-		let el = Array.from(parent.children).find((c) => c instanceof HTMLElement && c.getAttribute(DATA_BLOCK_ID) === id) as HTMLElement | undefined;
+		let el = existingById.get(id);
 		const tag = tagFor(node.type, node.attrs);
 		if (el && el.tagName.toLowerCase() !== tag) {
 			if (cursorNode === el) cursorNode = el.nextSibling;
 			el.remove();
+			existingById.delete(id);
 			el = undefined;
 		}
 		if (!el) {
 			el = document.createElement(tag);
 			el.setAttribute(DATA_BLOCK_ID, id);
+			existingById.set(id, el);
 		}
 		// Insert at right position
 		if (cursorNode !== el) {
@@ -1454,9 +1501,41 @@ function renderBlocks(parent: HTMLElement, nodes: BlockNode[], opts: ViewOptions
 		}
 		cursorNode = el.nextSibling;
 		const listIndex = node.type === 'numbered_list_item' ? ++numberedRun : (numberedRun = 0);
+		// Per-block skip: if the BlockNode reference, depth, listIndex,
+		// and readonly flag all match the previous render, the rendered
+		// DOM is already correct. Only kicks in when transactions
+		// preserve references for unchanged subtrees (see
+		// `reuseUnchangedRefs` in `withDocChange`); without that
+		// optimisation, every node has a fresh reference per tx and
+		// this check never hits — but it's also never wrong, so it's
+		// safe to leave on unconditionally.
+		const stash = el as unknown as BlockRenderStash;
+		if (
+			stash.__plimNode === node &&
+			stash.__plimDepth === depth &&
+			stash.__plimListIndex === listIndex &&
+			stash.__plimReadonly === opts.readonly
+		) {
+			continue;
+		}
 		updateBlockElement(el, node, opts, depth, listIndex);
+		stash.__plimNode = node;
+		stash.__plimDepth = depth;
+		stash.__plimListIndex = listIndex;
+		stash.__plimReadonly = opts.readonly;
 	}
 }
+
+// Stashed per-block render context, used by `renderBlocks` to short-
+// circuit `updateBlockElement` when a transaction preserved this
+// node's reference (see `reuseUnchangedRefs`). Adds ~32 bytes per
+// block element — negligible vs. the cost of redundant DOM writes.
+type BlockRenderStash = {
+	__plimNode?: BlockNode;
+	__plimDepth?: number;
+	__plimListIndex?: number;
+	__plimReadonly?: boolean;
+};
 
 function ensureBlockHandles(el: HTMLElement, opts: ViewOptions) {
 	if (opts.readonly) return;
@@ -2541,6 +2620,51 @@ function blockElementAtPath(rootEl: HTMLElement, path: number[]): HTMLElement | 
 		parent = child;
 	}
 	return parent === rootEl ? null : parent;
+}
+
+/**
+ * Detect whether the current selection's caret sits on the first or
+ * last *visual* line of the given block-content element. Used by the
+ * arrow-key handler to decide whether to intercept ArrowUp/ArrowDown
+ * for atomic-neighbour selection: native browser ArrowDown skips
+ * non-editable atoms (they're outside the text flow), so when the
+ * caret is on the last visual line of a wrapped paragraph and the
+ * next sibling is atomic, we have to preventDefault and select the
+ * atom ourselves rather than let the caret jump straight past.
+ *
+ * Implementation: caret rect (from the live `Selection`'s range)
+ * vs `content.getBoundingClientRect()` with a tolerance scaled to the
+ * caret's own height (≈ half a line-box) so we absorb sub-pixel
+ * rounding and small line-box-vs-bounding-rect mismatches.
+ *
+ * Edge cases handled:
+ *   • Range bounding rect is 0×0 when collapsed at certain DOM
+ *     boundaries (between text nodes, before/after inline elements).
+ *     Falls back to the focus node's parent element rect — coarser
+ *     but always non-zero.
+ *   • Returns false on missing selection; callers gate on the
+ *     existing offset-based predicates so the visual-line check is
+ *     additive rather than load-bearing.
+ */
+function caretAtVisualEdge(content: HTMLElement, side: 'top' | 'bottom'): boolean {
+	const sel = window.getSelection();
+	if (!sel || sel.rangeCount === 0) return false;
+	const range = sel.getRangeAt(0).cloneRange();
+	let caretRect: DOMRect | null = range.getBoundingClientRect();
+	if (caretRect.width === 0 && caretRect.height === 0) {
+		const focus = sel.focusNode;
+		const focusEl =
+			focus instanceof Element ? focus : (focus?.parentElement ?? null);
+		caretRect = focusEl ? focusEl.getBoundingClientRect() : null;
+	}
+	if (!caretRect || caretRect.height === 0) return false;
+	const contentRect = content.getBoundingClientRect();
+	// Tolerance scaled to caret height — generous enough to absorb
+	// rounding but tight enough that a caret one line above last line
+	// in a tall wrapped paragraph still reads as "not at edge".
+	const tol = Math.max(4, caretRect.height * 0.5);
+	if (side === 'top') return caretRect.top - contentRect.top <= tol;
+	return contentRect.bottom - caretRect.bottom <= tol;
 }
 
 function findTextNodeAtOffset(content: HTMLElement, offset: number): { node: Node; offset: number } {
