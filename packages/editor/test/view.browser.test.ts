@@ -2504,3 +2504,190 @@ describe('Arrow into atomic neighbour from mid-block (visual-line)', () => {
 		}
 	});
 });
+
+describe('Enter while a block is selected', () => {
+	// Pressing Enter on a block-selected block (e.g. an image atom or
+	// any block reached via the drag-handle / Esc / arrow-key
+	// selection) should drop out of block-selection mode and into a
+	// new empty paragraph right after the selection. Matches Notion.
+	it('inserts a fresh paragraph after the selected block and moves caret into it', () => {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock, imageBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [
+					{ id: 'p1', type: 'paragraph', text: [{ text: 'before' }] },
+					{ id: 'img', type: 'image', attrs: { src: 'https://example.test/x.png' } },
+					{ id: 'p2', type: 'paragraph', text: [{ text: 'after' }] },
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		try {
+			// Block-select the image via the drag handle (mirrors
+			// real user flow, also exercises the selection wiring).
+			const imgEl = container.querySelector('[data-block-id="img"]') as HTMLElement;
+			const handle = imgEl.querySelector('.plim-block-drag') as HTMLElement;
+			handle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: 0, clientY: 0 }));
+			handle.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: 0, clientY: 0 }));
+			expect(imgEl.getAttribute('data-plim-block-selected')).toBe('true');
+			// Press Enter.
+			root.dispatchEvent(
+				new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+			);
+			const state = editor.getState();
+			// Doc grew by one block; new block is a paragraph at index 2.
+			expect(state.doc.children).toHaveLength(4);
+			expect(state.doc.children[2]!.type).toBe('paragraph');
+			expect(state.doc.children[2]!.text).toEqual([]);
+			// The originally-trailing paragraph ('after') is now at index 3.
+			expect(state.doc.children[3]!.id).toBe('p2');
+			// Caret landed in the new paragraph.
+			expect(state.selection.head.path).toEqual([2]);
+			expect(state.selection.head.offset).toBe(0);
+			// Block-selection cleared.
+			expect(container.querySelectorAll('[data-plim-block-selected="true"]').length).toBe(0);
+		} finally {
+			editor.destroy();
+			container.remove();
+		}
+	});
+});
+
+describe('Backspace at start of empty paragraph with atomic prev', () => {
+	// Default joinBackward into an atomic prev *removes* the atom
+	// (treats it like a divider). For an empty paragraph that's the
+	// wrong direction — the user pressed Backspace because the
+	// paragraph was unwanted, not the atom. Notion: empty paragraph
+	// is removed, atom above is block-selected.
+	it('removes the empty paragraph and block-selects the atomic prev', () => {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock, imageBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [
+					{ id: 'p1', type: 'paragraph', text: [{ text: 'before' }] },
+					{ id: 'img', type: 'image', attrs: { src: 'https://example.test/x.png' } },
+					{ id: 'empty', type: 'paragraph', text: [] },
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		try {
+			const tx = editor.createTransaction();
+			tx.setSelection({ anchor: { path: [2], offset: 0 }, head: { path: [2], offset: 0 } });
+			tx.commit();
+			root.dispatchEvent(
+				new InputEvent('beforeinput', {
+					inputType: 'deleteContentBackward',
+					bubbles: true,
+					cancelable: true,
+				}),
+			);
+			const state = editor.getState();
+			expect(state.doc.children).toHaveLength(2);
+			expect(state.doc.children[0]!.id).toBe('p1');
+			expect(state.doc.children[1]!.id).toBe('img');
+			const selected = container.querySelectorAll('[data-plim-block-selected="true"]');
+			expect(selected.length).toBe(1);
+			expect(selected[0]!.getAttribute('data-block-id')).toBe('img');
+		} finally {
+			editor.destroy();
+			container.remove();
+		}
+	});
+
+	it('does NOT trigger when the empty paragraph has a text-block prev (joins normally)', () => {
+		// Sanity: existing joinBackward into a text prev (caret to
+		// end of prev) preserved.
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [
+					{ id: 'p1', type: 'paragraph', text: [{ text: 'hello' }] },
+					{ id: 'empty', type: 'paragraph', text: [] },
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		try {
+			const tx = editor.createTransaction();
+			tx.setSelection({ anchor: { path: [1], offset: 0 }, head: { path: [1], offset: 0 } });
+			tx.commit();
+			root.dispatchEvent(
+				new InputEvent('beforeinput', {
+					inputType: 'deleteContentBackward',
+					bubbles: true,
+					cancelable: true,
+				}),
+			);
+			const state = editor.getState();
+			expect(state.doc.children).toHaveLength(1);
+			expect(state.doc.children[0]!.id).toBe('p1');
+			expect(state.selection.head.path).toEqual([0]);
+			expect(state.selection.head.offset).toBe(5);
+			expect(container.querySelectorAll('[data-plim-block-selected="true"]').length).toBe(0);
+		} finally {
+			editor.destroy();
+			container.remove();
+		}
+	});
+
+	it('does NOT trigger from a non-empty paragraph (existing joinBackward semantics preserved)', () => {
+		// If the paragraph has content, joinBackward into atomic prev
+		// retains its old behaviour. The escape hatch only kicks in
+		// when the paragraph itself is empty.
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock, imageBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [
+					{ id: 'img', type: 'image', attrs: { src: 'https://example.test/x.png' } },
+					{ id: 'p', type: 'paragraph', text: [{ text: 'tail' }] },
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		try {
+			const tx = editor.createTransaction();
+			tx.setSelection({ anchor: { path: [1], offset: 0 }, head: { path: [1], offset: 0 } });
+			tx.commit();
+			root.dispatchEvent(
+				new InputEvent('beforeinput', {
+					inputType: 'deleteContentBackward',
+					bubbles: true,
+					cancelable: true,
+				}),
+			);
+			const state = editor.getState();
+			// Image got removed (existing joinBackward behaviour).
+			expect(state.doc.children).toHaveLength(1);
+			expect(state.doc.children[0]!.id).toBe('p');
+			expect(container.querySelectorAll('[data-plim-block-selected="true"]').length).toBe(0);
+		} finally {
+			editor.destroy();
+			container.remove();
+		}
+	});
+});

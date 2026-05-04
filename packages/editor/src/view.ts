@@ -655,6 +655,42 @@ export function mountView(opts: ViewOptions): View {
 		}
 		if (type === 'deleteContentBackward') {
 			ev.preventDefault();
+			// Special case: caret at offset 0 of an *empty* paragraph
+			// whose previous flat sibling is an atomic block. Default
+			// `joinBackward` for a non-text prev removes the *prev*
+			// (the atomic) — wrong semantics for "back out into the
+			// atom above me". Notion: the empty paragraph goes away
+			// and the atom is block-selected. We do that here by
+			// removing the paragraph and replacing the selection with
+			// the atom's id. Limited to empty paragraphs so that
+			// joinBackward into an atomic prev from a *non-empty*
+			// paragraph keeps the existing "drop the atom, fold this
+			// content into… nothing" behaviour (rare, but if a user
+			// does it intentionally we shouldn't surprise them).
+			const state = opts.getState();
+			const sel = state.selection;
+			if (
+				pathsEqual(sel.anchor.path, sel.head.path) &&
+				sel.anchor.offset === sel.head.offset &&
+				sel.head.offset === 0
+			) {
+				const block = blockAt(state.doc.children, sel.head.path);
+				if (block && block.type === 'paragraph' && blockTextLength(block) === 0) {
+					const flat = flattenBlocks(state.doc);
+					const idx = flat.findIndex((e) => pathsEqual(e.path, sel.head.path));
+					const prev = idx > 0 ? flat[idx - 1] : undefined;
+					if (prev && prev.block.text === undefined) {
+						const editorRef = (
+							opts as unknown as { editor: { createTransaction(): Transaction } }
+						).editor;
+						const tx = editorRef.createTransaction();
+						tx.removeBlock(sel.head.path);
+						tx.commit();
+						selectionReplaceWith(prev.block.id);
+						return;
+					}
+				}
+			}
 			handleDeleteBackward(opts);
 			return;
 		}
@@ -708,6 +744,44 @@ export function mountView(opts: ViewOptions): View {
 			if (ev.key === 'Backspace' || ev.key === 'Delete') {
 				ev.preventDefault();
 				deleteSelectedBlocks();
+				return;
+			}
+			// Enter while one or more blocks are selected: insert a
+			// fresh empty paragraph immediately after the *last*
+			// selected block (flat order) and land the caret in it.
+			// Matches Notion: pressing Enter on a selected image /
+			// callout / atom drops you out of block-selection mode
+			// into a normal text-editing context. Modifiers (Shift,
+			// Cmd, etc.) fall through to the generic "drop selection
+			// and re-handle" path below so existing shortcuts (e.g.
+			// Cmd+Enter when wired by an extension) continue to work.
+			if (ev.key === 'Enter' && !ev.shiftKey && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+				ev.preventDefault();
+				const state = opts.getState();
+				const flat = flattenBlocks(state.doc);
+				const selFlat = flat.filter((e) => selection.ids.has(e.block.id));
+				if (selFlat.length === 0) {
+					selectionClear();
+					return;
+				}
+				const last = selFlat[selFlat.length - 1]!;
+				// Insert at sibling-index + 1 within the same parent.
+				// Nested selections (e.g. inside a list item's
+				// children array) get their continuation paragraph
+				// at the same nesting level — feels natural because
+				// the user can keep typing in context.
+				const parentPath = last.path.slice(0, -1);
+				const idxAtParent = last.path[last.path.length - 1] ?? 0;
+				const insertPath = [...parentPath, idxAtParent + 1];
+				const editor = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor;
+				const tx = editor.createTransaction();
+				tx.insertBlock(insertPath, { id: newId(), type: 'paragraph', text: [] });
+				tx.setSelection({
+					anchor: { path: insertPath, offset: 0 },
+					head: { path: insertPath, offset: 0 },
+				});
+				tx.commit();
+				selectionClear();
 				return;
 			}
 			// Shift+ArrowUp/Down extends the selection from the anchor.
