@@ -2260,3 +2260,144 @@ describe('multilineText block descriptor', () => {
 		}
 	});
 });
+
+describe('Trailing-paragraph autocreate (last block)', () => {
+	// The autocreate rule isn't gated on `multilineText` — any non-empty,
+	// non-paragraph block at the end of the doc should produce a fresh
+	// paragraph on ArrowDown / ArrowRight so users have somewhere to keep
+	// typing. Plain paragraphs are intentionally exempted: ArrowDown at
+	// the bottom of an idle doc shouldn't spam empties.
+	function setupBasic(initial: { type: string; text?: { text: string }[] }[]): {
+		container: HTMLElement;
+		editor: AgnosticEditor;
+		root: HTMLElement;
+		cleanup: () => void;
+	} {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock, headingBlock, quoteBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: initial.map((b) => ({ id: newId(), type: b.type, text: b.text ?? [] })),
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		return { container, editor, root, cleanup: () => { editor.destroy(); container.remove(); } };
+	}
+
+	it('ArrowDown at end of last heading creates a trailing paragraph', () => {
+		const env = setupBasic([
+			{ type: 'heading', text: [{ text: 'Title' }] },
+		]);
+		try {
+			const tx = env.editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 5 }, head: { path: [0], offset: 5 } });
+			tx.commit();
+			env.root.dispatchEvent(
+				new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }),
+			);
+			const doc = env.editor.getState().doc;
+			expect(doc.children).toHaveLength(2);
+			expect(doc.children[1]!.type).toBe('paragraph');
+			const sel = env.editor.getState().selection;
+			expect(sel.head.path).toEqual([1]);
+			expect(sel.head.offset).toBe(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it('ArrowRight at end of last quote creates a trailing paragraph', () => {
+		const env = setupBasic([
+			{ type: 'quote', text: [{ text: 'wisdom' }] },
+		]);
+		try {
+			const tx = env.editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 6 }, head: { path: [0], offset: 6 } });
+			tx.commit();
+			env.root.dispatchEvent(
+				new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }),
+			);
+			const doc = env.editor.getState().doc;
+			expect(doc.children).toHaveLength(2);
+			expect(doc.children[1]!.type).toBe('paragraph');
+			const sel = env.editor.getState().selection;
+			expect(sel.head.path).toEqual([1]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it('ArrowDown at end of last (non-empty) paragraph creates a trailing paragraph', () => {
+		// Notion behaviour: at the bottom of a finished paragraph,
+		// ArrowDown gives the user a fresh line to keep typing. The
+		// "no spam" property is preserved because the new paragraph is
+		// empty (`len === 0`), so a follow-up ArrowDown short-circuits
+		// via the empty-block guard below.
+		const env = setupBasic([
+			{ type: 'paragraph', text: [{ text: 'tail' }] },
+		]);
+		try {
+			const tx = env.editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 4 }, head: { path: [0], offset: 4 } });
+			tx.commit();
+			env.root.dispatchEvent(
+				new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }),
+			);
+			const doc = env.editor.getState().doc;
+			expect(doc.children).toHaveLength(2);
+			expect(doc.children[1]!.type).toBe('paragraph');
+			expect(doc.children[1]!.text).toEqual([]);
+			const sel = env.editor.getState().selection;
+			expect(sel.head.path).toEqual([1]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it('ArrowDown twice at end of last paragraph still only creates one trailing paragraph (empty-block guard)', () => {
+		const env = setupBasic([
+			{ type: 'paragraph', text: [{ text: 'tail' }] },
+		]);
+		try {
+			const tx = env.editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 4 }, head: { path: [0], offset: 4 } });
+			tx.commit();
+			env.root.dispatchEvent(
+				new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }),
+			);
+			env.root.dispatchEvent(
+				new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }),
+			);
+			const doc = env.editor.getState().doc;
+			expect(doc.children).toHaveLength(2);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it('ArrowDown at end of empty heading does NOT create a trailing paragraph', () => {
+		// `len > 0` guard: an empty block isn't really "the last
+		// non-empty block" — pressing ArrowDown shouldn't spawn a
+		// sibling for what is itself a fresh empty.
+		const env = setupBasic([
+			{ type: 'heading', text: [] },
+		]);
+		try {
+			const tx = env.editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 0 } });
+			tx.commit();
+			env.root.dispatchEvent(
+				new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }),
+			);
+			const doc = env.editor.getState().doc;
+			expect(doc.children).toHaveLength(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+});

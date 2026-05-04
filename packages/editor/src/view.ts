@@ -752,11 +752,22 @@ export function mountView(opts: ViewOptions): View {
 		// paragraphs walk through their own offsets first before the
 		// rule fires.
 		//
-		// `multilineText` blocks (code, etc.) extend this: ArrowDown on
-		// the last line / ArrowRight at end-of-block exits to the next
-		// block (or auto-creates a trailing paragraph if there's none).
-		// Without this the caret gets trapped — Enter inserts `\n`
-		// rather than splitting, so users would have no way to escape.
+		// Two further behaviours layered on:
+		//   • `multilineText` blocks (code, etc.) — ArrowDown on the
+		//     last line / ArrowRight at end-of-block redirects to the
+		//     next block. Without this the caret gets trapped because
+		//     Enter inserts `\n` rather than splitting, so users would
+		//     have no way to escape downward.
+		//   • Trailing-paragraph autocreate — ArrowDown / ArrowRight
+		//     past the end of the doc (no next block) on a non-empty,
+		//     non-paragraph block appends a fresh paragraph and lands
+		//     the caret in it. Matches Notion: ArrowDown at the end of
+		//     a heading / callout / code block / quote at the bottom
+		//     of the page produces a continuation paragraph rather
+		//     than silently doing nothing. Skipped when the block is
+		//     a paragraph (avoids spamming empties on idle ArrowDown
+		//     mashing) or when the block is empty (no content to
+		//     "continue").
 		if (
 			!opts.readonly &&
 			(ev.key === 'ArrowUp' || ev.key === 'ArrowDown' || ev.key === 'ArrowRight') &&
@@ -807,63 +818,64 @@ export function mountView(opts: ViewOptions): View {
 						const flat = flattenBlocks(state.doc);
 						const idx = flat.findIndex((e) => pathsEqual(e.path, path));
 						const next = idx >= 0 ? flat[idx + 1] : undefined;
+						const editorRef = (
+							opts as unknown as { editor: { createTransaction(): Transaction } }
+						).editor;
 						if (next && next.block.text === undefined) {
 							ev.preventDefault();
 							selectionReplaceWith(next.block.id);
 							return;
 						}
-						// `multilineText` blocks: actively redirect the
-						// caret. ArrowRight from a code block must move
-						// into the next block (text or atomic) rather
-						// than letting the browser walk into the
-						// language-picker DOM. ArrowDown likewise jumps
-						// to the next text block from the last code
-						// line. If there's no next sibling at all and
-						// the block is non-empty, append a trailing
-						// paragraph and land the caret in it — without
-						// this, the caret is permanently trapped.
-						if (desc?.multilineText) {
+						if (next && desc?.multilineText && next.block.text !== undefined) {
+							// `multilineText` blocks must actively
+							// redirect into the next text block —
+							// browser-native ArrowRight from a code
+							// block walks into adjacent isolated DOM
+							// (language picker, etc.); ArrowDown on
+							// last-line doesn't always advance.
 							ev.preventDefault();
-							if (next && next.block.text !== undefined) {
-								// Move caret to start of next text block.
-								const nextPath = next.path;
-								const nextEditor = (
-									opts as unknown as { editor: { createTransaction(): Transaction } }
-								).editor;
-								const tx = nextEditor.createTransaction();
-								tx.setSelection({
-									anchor: { path: nextPath, offset: 0 },
-									head: { path: nextPath, offset: 0 },
-								});
-								tx.commit();
-								return;
-							}
-							if (!next && len > 0) {
-								// Append paragraph at parent level.
-								const parentPath = path.slice(0, -1);
-								const idxAtParent = path[path.length - 1] ?? 0;
-								const insertPath = [...parentPath, idxAtParent + 1];
-								const editor = (
-									opts as unknown as { editor: { createTransaction(): Transaction } }
-								).editor;
-								const tx = editor.createTransaction();
-								tx.insertBlock(insertPath, {
-									id: newId(),
-									type: 'paragraph',
-									text: [],
-								});
-								tx.setSelection({
-									anchor: { path: insertPath, offset: 0 },
-									head: { path: insertPath, offset: 0 },
-								});
-								tx.commit();
-								return;
-							}
-							// next exists but is atomic — already
-							// handled above; otherwise fall through and
-							// let the browser do nothing rather than
-							// stay stuck silently.
+							const nextPath = next.path;
+							const tx = editorRef.createTransaction();
+							tx.setSelection({
+								anchor: { path: nextPath, offset: 0 },
+								head: { path: nextPath, offset: 0 },
+							});
+							tx.commit();
+							return;
 						}
+						if (!next && len > 0) {
+							// Append a trailing paragraph at the parent
+							// level. The `len > 0` guard alone is
+							// sufficient: an empty block at end-of-doc
+							// has nothing to "continue" from, and an
+							// empty paragraph (the natural landing pad)
+							// short-circuits via that same rule on the
+							// next press, so idle ArrowDown can't keep
+							// stacking blanks. Non-empty paragraphs
+							// DO spawn — matches Notion's behaviour
+							// where pressing Down at the bottom of a
+							// finished paragraph gives you a new line
+							// to keep typing.
+							ev.preventDefault();
+							const parentPath = path.slice(0, -1);
+							const idxAtParent = path[path.length - 1] ?? 0;
+							const insertPath = [...parentPath, idxAtParent + 1];
+							const tx = editorRef.createTransaction();
+							tx.insertBlock(insertPath, {
+								id: newId(),
+								type: 'paragraph',
+								text: [],
+							});
+							tx.setSelection({
+								anchor: { path: insertPath, offset: 0 },
+								head: { path: insertPath, offset: 0 },
+							});
+							tx.commit();
+							return;
+						}
+						// Otherwise fall through: browser handles native
+						// ArrowDown across plain text blocks; no-op for
+						// empty / paragraph blocks at end-of-doc.
 					}
 				}
 			}
