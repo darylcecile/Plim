@@ -2896,3 +2896,87 @@ describe('Floating selection toolbar', () => {
 		expect(getToolbar()).toBeNull();
 	});
 });
+
+describe('markdown shortcut — checkbox', () => {
+	let env: ReturnType<typeof setup> | null = null;
+	afterEach(() => {
+		env?.cleanup();
+		env = null;
+	});
+
+	function type(root: HTMLElement, str: string): void {
+		for (const ch of str) {
+			const ev = new InputEvent('beforeinput', { inputType: 'insertText', data: ch, bubbles: true, cancelable: true });
+			root.dispatchEvent(ev);
+		}
+	}
+
+	function placeCaret(env: NonNullable<typeof env>, path: number[], offset: number): void {
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path, offset }, head: { path, offset } });
+		tx.commit();
+	}
+
+	it('typing "- " in an empty paragraph creates a bulleted_list_item, then typing "[ ] " upgrades it to to_do (unchecked)', () => {
+		env = setup();
+		const root = getRoot(env.container);
+		placeCaret(env, [0], 0);
+		type(root, '- ');
+		expect(env.editor.getState().doc.children[0]!.type).toBe('bulleted_list_item');
+		// Now in an empty bullet — type "[ ] "
+		type(root, '[ ] ');
+		const block = env.editor.getState().doc.children[0]!;
+		expect(block.type).toBe('to_do');
+		expect((block.attrs as { checked: boolean }).checked).toBe(false);
+		// Caret at offset 0, no leftover bracket text
+		expect(block.text?.length ?? 0).toBe(0);
+	});
+
+	it('typing "[x] " in an empty bulleted_list_item upgrades it to a checked to_do', () => {
+		env = setup();
+		const root = getRoot(env.container);
+		placeCaret(env, [0], 0);
+		type(root, '- ');
+		type(root, '[x] ');
+		const block = env.editor.getState().doc.children[0]!;
+		expect(block.type).toBe('to_do');
+		expect((block.attrs as { checked: boolean }).checked).toBe(true);
+	});
+
+	it('typing "[ ] " at the start of a paragraph does NOT convert to to_do (only empty bullets upgrade)', () => {
+		env = setup();
+		const root = getRoot(env.container);
+		placeCaret(env, [0], 0);
+		type(root, '[ ] ');
+		const block = env.editor.getState().doc.children[0]!;
+		expect(block.type).toBe('paragraph');
+		// Bracket text remains literal
+		const txt = (block.text ?? []).map((s) => s.text).join('');
+		expect(txt).toBe('[ ] ');
+	});
+
+	it('typing "[ ] " mid-paragraph (after existing text) does not convert', () => {
+		env = setup({ initial: ['hello'] });
+		const root = getRoot(env.container);
+		placeCaret(env, [0], 5);
+		type(root, '[ ] ');
+		const block = env.editor.getState().doc.children[0]!;
+		expect(block.type).toBe('paragraph');
+		const txt = (block.text ?? []).map((s) => s.text).join('');
+		expect(txt).toBe('hello[ ] ');
+	});
+
+	it('typing "[ ] " in a non-empty bullet does not convert (regex anchors require exact line)', () => {
+		env = setup();
+		const root = getRoot(env.container);
+		placeCaret(env, [0], 0);
+		type(root, '- ');
+		type(root, 'foo ');
+		// Now bullet contains "foo "; typing "[ ] " should not match "^[ ] $"
+		type(root, '[ ] ');
+		const block = env.editor.getState().doc.children[0]!;
+		expect(block.type).toBe('bulleted_list_item');
+		const txt = (block.text ?? []).map((s) => s.text).join('');
+		expect(txt).toBe('foo [ ] ');
+	});
+});

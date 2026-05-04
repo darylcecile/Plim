@@ -150,7 +150,7 @@ function outdent(state: EditorState, ctx: ActionContext, path: number[]): void {
 // character first (if any) — the caller did this already by routing here —
 // and then apply transformations on the resulting text.
 
-const LINE_RULES: Array<{ re: RegExp; apply: (m: RegExpMatchArray, ctx: ActionContext, path: number[]) => void }> = [
+const LINE_RULES: Array<{ re: RegExp; when?: (block: BlockNode) => boolean; apply: (m: RegExpMatchArray, ctx: ActionContext, path: number[]) => void }> = [
 	{
 		re: /^(#{1,3}) $/,
 		apply: (m, ctx, path) => {
@@ -183,11 +183,16 @@ const LINE_RULES: Array<{ re: RegExp; apply: (m: RegExpMatchArray, ctx: ActionCo
 		},
 	},
 	{
-		re: /^\[\] $/,
-		apply: (_m, ctx, path) => {
+		// `[ ] ` or `[x] ` — only upgrade an empty bulleted_list_item to a to_do.
+		// Rejects `[ ] ` typed in a fresh paragraph (and any non-bullet block)
+		// so we don't surprise users who actually want literal brackets.
+		re: /^\[([ xX]?)\] $/,
+		when: (b) => b.type === 'bulleted_list_item',
+		apply: (m, ctx, path) => {
+			const checked = (m[1] ?? '').toLowerCase() === 'x';
 			const tx = ctx.createTransaction();
-			tx.replaceRange(path, 0, 3, []);
-			tx.setBlockType(path, 'to_do', { checked: false });
+			tx.replaceRange(path, 0, m[0].length, []);
+			tx.setBlockType(path, 'to_do', { checked });
 			tx.setSelection({ anchor: { path, offset: 0 }, head: { path, offset: 0 } });
 			tx.commit();
 		},
@@ -330,6 +335,7 @@ export function runBuiltInBeforeAction(text: string, state: EditorState, ctx: Ac
 	// Line rules: only when caret is at end-of-line and text is exactly one line
 	if (text === ' ' || text === '`' || text === '-') {
 		for (const rule of LINE_RULES) {
+			if (rule.when && !rule.when(nextBlock)) continue;
 			const m = txt.match(rule.re);
 			if (m) {
 				rule.apply(m, ctx, path);
