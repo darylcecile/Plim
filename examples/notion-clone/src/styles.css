@@ -424,6 +424,11 @@ a[data-mark-type="link"] {
 	padding: 12px 14px;
 	color: var(--text-muted);
 }
+.mention-menu-loading {
+	padding: 12px 14px;
+	color: var(--text-muted);
+	font-style: italic;
+}
 .mention-menu-list {
 	display: flex;
 	flex-direction: column;
@@ -475,16 +480,16 @@ a[data-mark-type="link"] {
 	background: rgba(55, 53, 47, 0.06);
 }
 
-/* Mention pills (a link mark whose href targets a user). */
-.plim-editor a[href^="#user-"] {
+/* Mention pills (rendered by the dedicated mention mark from @plim/core). */
+.plim-editor .plim-mention {
 	color: rgba(55, 53, 47, 0.85);
 	background: rgba(55, 53, 47, 0.06);
 	border-radius: 3px;
 	padding: 0 3px;
-	text-decoration: none;
 	font-weight: 500;
+	cursor: pointer;
 }
-.plim-editor a[href^="#user-"]:hover {
+.plim-editor .plim-mention:hover {
 	background: rgba(35, 131, 226, 0.14);
 	color: rgb(35, 131, 226);
 }

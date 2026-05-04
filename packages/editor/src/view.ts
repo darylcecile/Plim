@@ -1164,6 +1164,18 @@ function wrapForMark(type: string, attrs?: Record<string, unknown>): HTMLElement
 		case 'highlight':
 			el = document.createElement('mark');
 			break;
+		case 'mention':
+			el = document.createElement('span');
+			el.className = 'plim-mention';
+			if (attrs?.id) el.setAttribute('data-mention-id', String(attrs.id));
+			if (attrs?.href) el.setAttribute('data-mention-href', String(attrs.href));
+			// Mentions are atomic — selecting/typing inside the pill should be
+			// treated as selecting the whole thing. `contenteditable=false`
+			// would block the cursor entirely; keeping it editable but marking
+			// it `data-atomic` lets us extend deletion behavior in the editor
+			// while leaving normal selection paint intact.
+			el.setAttribute('data-atomic', 'true');
+			break;
 		default:
 			el = document.createElement('span');
 			el.setAttribute('data-mark', type);

@@ -32,6 +32,7 @@ import {
 	mentionExtension,
 	slashCommandExtension,
 	useEditorHandle,
+	type MentionUser,
 } from '@plim/react';
 
 const plim = new PlimDriver({
@@ -154,7 +155,39 @@ export function App() {
 			</header>
 			<PlimEditor plim={plim} handle={handle} initialContent={initialContent} autoFocus />
 			<SlashCommandMenu editor={handle} />
-			<MentionMenu editor={handle} />
+			<MentionMenu editor={handle} searchUsers={fakeAsyncUserSearch} />
 		</div>
+	);
+}
+
+// Demo async user source. Real apps would hit an API; here we simulate
+// a 250ms network round-trip and honour the AbortSignal so cancelled
+// requests don't fight newer ones.
+const ALL_USERS: MentionUser[] = [
+	{ id: 'u1', name: 'Alice Anderson', handle: 'alice', avatar: '🦊', role: 'Engineering' },
+	{ id: 'u2', name: 'Ben Becker', handle: 'ben', avatar: '🐻', role: 'Design' },
+	{ id: 'u3', name: 'Carla Cruz', handle: 'carla', avatar: '🐱', role: 'Product' },
+	{ id: 'u4', name: 'Diego Diaz', handle: 'diego', avatar: '🦅', role: 'Engineering' },
+	{ id: 'u5', name: 'Elena Eriksen', handle: 'elena', avatar: '🐺', role: 'Marketing' },
+	{ id: 'u6', name: 'Farah Fadel', handle: 'farah', avatar: '🐯', role: 'Operations' },
+	{ id: 'u7', name: 'Gabriel Gomes', handle: 'gabriel', avatar: '🦁', role: 'Engineering' },
+	{ id: 'u8', name: 'Hana Hashimoto', handle: 'hana', avatar: '🐰', role: 'Research' },
+];
+
+async function fakeAsyncUserSearch(query: string, signal: AbortSignal): Promise<MentionUser[]> {
+	await new Promise<void>((resolve, reject) => {
+		const id = window.setTimeout(resolve, 250);
+		signal.addEventListener('abort', () => {
+			window.clearTimeout(id);
+			reject(new DOMException('aborted', 'AbortError'));
+		});
+	});
+	const q = query.trim().toLowerCase();
+	if (!q) return ALL_USERS.slice(0, 5);
+	return ALL_USERS.filter(
+		(u) =>
+			u.name.toLowerCase().includes(q) ||
+			u.handle.toLowerCase().includes(q) ||
+			(u.role ? u.role.toLowerCase().includes(q) : false)
 	);
 }

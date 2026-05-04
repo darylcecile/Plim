@@ -70,6 +70,26 @@ export const highlightMark = defineMark({
 	},
 });
 
+// Mention mark — atomic inline reference to an entity (user, page, etc.).
+// Renders as a `<span class="plim-mention">` so consumers can style it as a
+// pill, and exposes its identifier via `data-mention-id` for downstream
+// hooks (analytics, click handlers, etc.). The presence of this mark on a
+// span signals to the editor that the span should behave as an atomic unit
+// (a single Backspace deletes the whole run rather than one character).
+export const mentionMark = defineMark({
+	name: 'mention',
+	toDOM: (p) => {
+		const el = document.createElement('span');
+		el.className = 'plim-mention';
+		el.textContent = p.text;
+		const id = (p.attrs?.id as string | undefined) ?? '';
+		const href = p.attrs?.href as string | undefined;
+		if (id) el.setAttribute('data-mention-id', id);
+		if (href) el.setAttribute('data-mention-href', href);
+		return el;
+	},
+});
+
 // Blocks --------------------------------------------------------------------
 
 export const paragraphBlock = defineBlock({
@@ -179,4 +199,5 @@ export const builtInMarks: Array<() => MarkDescriptor> = [
 	codeMark,
 	linkMark,
 	highlightMark,
+	mentionMark,
 ];
