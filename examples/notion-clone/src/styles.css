@@ -1,3 +1,5 @@
+@import url("@plim/editor/styles.css");
+
 :root {
 	--page-bg: #ffffff;
 	--text: rgb(55, 53, 47);
@@ -61,722 +63,6 @@ html, body {
 .page-title:empty:before {
 	content: "Untitled";
 	color: var(--text-faint);
-}
-
-/* Editor surface */
-.plim-editor {
-	outline: none;
-	caret-color: var(--text);
-	font-size: 16px;
-	white-space: pre-wrap;
-	word-wrap: break-word;
-}
-.plim-editor ::selection {
-	background: rgba(35, 131, 226, 0.28);
-}
-.plim-editor *::selection {
-	background: rgba(35, 131, 226, 0.28);
-}
-
-/* Block defaults */
-.plim-block {
-	position: relative;
-	padding: 3px 2px;
-	margin: 1px 0;
-	min-height: 1.5em;
-}
-.plim-block:first-child {
-	margin-top: 0;
-}
-
-/* Paragraphs and list items use a slightly tighter line-height so that
- * Shift+Enter soft breaks (and natural word-wrap) sit closer together,
- * matching Notion's compact paragraph rhythm. */
-.plim-block-paragraph,
-.plim-block-bulleted_list_item,
-.plim-block-numbered_list_item,
-.plim-block-to_do,
-.plim-block-toggle,
-.plim-block-quote {
-	line-height: 1.4;
-}
-
-/* Hover affordances: + and drag handle on the gutter.
- * Use `rem` so the gutter offset is identical regardless of block font-size
- * (otherwise headings push the handles much further left than paragraphs). */
-.plim-block-handles {
-	position: absolute;
-	top: 0.25rem;
-	left: -3rem;
-	display: flex;
-	gap: 0;
-	align-items: center;
-	opacity: 0;
-	pointer-events: none;
-	transition: opacity 80ms ease;
-	user-select: none;
-	height: 1.5rem;
-}
-.plim-block:hover > .plim-block-handles,
-.plim-block:focus-within > .plim-block-handles {
-	opacity: 1;
-	pointer-events: auto;
-}
-.plim-block-add,
-.plim-block-drag {
-	all: unset;
-	cursor: pointer;
-	width: 22px;
-	height: 22px;
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	border-radius: 4px;
-	color: rgba(55, 53, 47, 0.45);
-	font-size: 18px;
-	line-height: 1;
-	font-weight: 400;
-}
-.plim-block-add:hover,
-.plim-block-drag:hover {
-	background: rgba(55, 53, 47, 0.08);
-	color: rgba(55, 53, 47, 0.85);
-}
-.plim-block-drag {
-	cursor: grab;
-	font-size: 13px;
-	letter-spacing: -2.5px;
-	padding-right: 2px;
-}
-.plim-block-drag:active {
-	cursor: grabbing;
-}
-.plim-block--dragging {
-	opacity: 0.4;
-}
-.plim-drop-indicator {
-	pointer-events: none;
-	height: 2px;
-	background: rgb(35, 131, 226);
-	border-radius: 1px;
-	z-index: 5;
-}
-/* Empty-block placeholders (Notion shows these only on the focused empty block) */
-.plim-block[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
-	color: var(--text-faint);
-	pointer-events: none;
-	position: absolute;
-}
-.plim-block-paragraph[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
-	content: "Type '/' for commands";
-}
-h1.plim-block-heading[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
-	content: "Heading 1";
-}
-h2.plim-block-heading[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
-	content: "Heading 2";
-}
-h3.plim-block-heading[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
-	content: "Heading 3";
-}
-.plim-block-bulleted_list_item[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
-	content: "List";
-}
-.plim-block-numbered_list_item[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
-	content: "List";
-}
-.plim-block-to_do[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
-	content: "To-do";
-}
-.plim-block-toggle[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
-	content: "Toggle";
-}
-.plim-block-quote[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
-	content: "Empty quote";
-}
-.plim-block-code[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
-	content: "Type code…";
-}
-
-/* Headings */
-.plim-block-heading {
-	margin-top: 1.4em;
-	margin-bottom: 4px;
-	font-weight: 700;
-	line-height: 1.3;
-	letter-spacing: -0.01em;
-}
-.plim-block-heading:first-child {
-	margin-top: 0;
-}
-h1.plim-block-heading { font-size: 1.875em; }
-h2.plim-block-heading { font-size: 1.5em; }
-h3.plim-block-heading { font-size: 1.25em; }
-
-/* List items */
-.plim-block-bulleted_list_item,
-.plim-block-numbered_list_item,
-.plim-block-to_do,
-.plim-block-toggle {
-	display: flex;
-	flex-direction: column;
-	padding-left: 0;
-}
-.plim-block-bulleted_list_item > .plim-bullet,
-.plim-block-numbered_list_item > .plim-bullet {
-	display: inline-block;
-	width: 24px;
-	text-align: center;
-	color: var(--text);
-	user-select: none;
-}
-.plim-block-bulleted_list_item > [data-block-content],
-.plim-block-numbered_list_item > [data-block-content],
-.plim-block-to_do > [data-block-content],
-.plim-block-toggle > [data-block-content] {
-	display: inline;
-}
-.plim-block-bulleted_list_item,
-.plim-block-numbered_list_item,
-.plim-block-to_do,
-.plim-block-toggle {
-	display: grid;
-	grid-template-columns: 24px 1fr;
-	align-items: start;
-	column-gap: 2px;
-}
-.plim-block-bulleted_list_item > [data-block-children],
-.plim-block-numbered_list_item > [data-block-children],
-.plim-block-to_do > [data-block-children],
-.plim-block-toggle > [data-block-children] {
-	grid-column: 2 / 3;
-	margin-left: 0;
-}
-
-.plim-block-to_do > .plim-check {
-	margin: 4px 0 0 4px;
-	width: 16px;
-	height: 16px;
-	accent-color: var(--accent);
-}
-.plim-block-to_do[data-checked="true"] > [data-block-content] {
-	color: var(--text-muted);
-	text-decoration: line-through;
-}
-
-.plim-block-toggle > .plim-toggle-trigger {
-	display: inline-block;
-	width: 20px;
-	text-align: center;
-	cursor: pointer;
-	color: var(--text);
-	user-select: none;
-	transform: rotate(0deg);
-	transition: transform 100ms ease;
-	font-size: 12px;
-	margin-top: 6px;
-}
-.plim-block-toggle > .plim-toggle-trigger.open {
-	transform: rotate(90deg);
-}
-.plim-block-toggle:not([data-open="true"]) > [data-block-children] {
-	display: none;
-}
-
-/* Quote */
-.plim-block-quote {
-	border-left: 3px solid var(--quote-border);
-	padding: 4px 0 4px 14px;
-	font-size: 1.05em;
-	line-height: 1.5;
-	margin-top: 6px;
-	margin-bottom: 6px;
-}
-
-/* Code block — wrapper is a <div> (so drag handles in the negative-margin
-   gutter aren't clipped); the inner <pre> owns the scrollable code-look
-   styling. */
-.plim-block-code > pre {
-	background: var(--code-bg);
-	border-radius: 4px;
-	padding: 16px;
-	font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-	font-size: 0.85em;
-	line-height: 1.4;
-	overflow-x: auto;
-	white-space: pre-wrap;
-	margin: 0;
-}
-.plim-block-code pre [data-block-content] {
-	display: block;
-}
-
-/* Divider */
-.plim-block-divider {
-	padding: 8px 0;
-}
-.plim-block-divider hr {
-	border: none;
-	border-top: 1px solid var(--divider);
-	margin: 0;
-}
-
-/* Inline marks */
-.plim-inline-code {
-	background: var(--code-bg);
-	border-radius: 4px;
-	padding: 1px 4px;
-	font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-	font-size: 0.85em;
-	color: #eb5757;
-}
-mark[data-mark-type="highlight"] {
-	background: var(--mark-bg);
-	color: inherit;
-	padding: 0 2px;
-	border-radius: 2px;
-}
-a[data-mark-type="link"] {
-	color: var(--text);
-	text-decoration: underline;
-	text-decoration-color: var(--divider);
-	text-underline-offset: 4px;
-}
-
-/* Slash menu */
-.slash-menu {
-	background: var(--menu-bg);
-	border-radius: 6px;
-	box-shadow: var(--menu-shadow);
-	width: 320px;
-	max-height: 360px;
-	overflow: auto;
-	font-size: 14px;
-	padding: 6px 0;
-}
-.slash-menu-header {
-	font-size: 11px;
-	color: var(--text-muted);
-	text-transform: uppercase;
-	letter-spacing: 0.5px;
-	padding: 6px 14px;
-}
-.slash-menu-empty {
-	padding: 12px 14px;
-	color: var(--text-muted);
-}
-.slash-menu-list {
-	display: flex;
-	flex-direction: column;
-}
-.slash-menu-item {
-	all: unset;
-	display: grid;
-	grid-template-columns: 36px 1fr;
-	align-items: center;
-	padding: 6px 14px;
-	cursor: pointer;
-	gap: 4px 10px;
-}
-.slash-menu-item .slash-icon {
-	grid-row: 1 / 3;
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	width: 36px;
-	height: 36px;
-	border: 1px solid var(--divider);
-	border-radius: 4px;
-	font-size: 14px;
-	font-weight: 500;
-	color: var(--text);
-	background: #fff;
-}
-.slash-menu-item .slash-label {
-	font-weight: 500;
-	color: var(--text);
-}
-.slash-menu-item .slash-hint {
-	font-size: 12px;
-	color: var(--text-muted);
-}
-.slash-menu-item.active,
-.slash-menu-item:hover {
-	background: rgba(55, 53, 47, 0.06);
-}
-
-/* Mention menu */
-.mention-menu {
-	background: var(--menu-bg);
-	border-radius: 6px;
-	box-shadow: var(--menu-shadow);
-	width: 320px;
-	max-height: 320px;
-	overflow: auto;
-	font-size: 14px;
-	padding: 6px 0;
-}
-.mention-menu-header {
-	font-size: 11px;
-	color: var(--text-muted);
-	text-transform: uppercase;
-	letter-spacing: 0.5px;
-	padding: 6px 14px;
-}
-.mention-menu-empty {
-	padding: 12px 14px;
-	color: var(--text-muted);
-}
-.mention-menu-loading {
-	padding: 12px 14px;
-	color: var(--text-muted);
-	font-style: italic;
-}
-.mention-menu-list {
-	display: flex;
-	flex-direction: column;
-}
-.mention-menu-item {
-	all: unset;
-	display: grid;
-	grid-template-columns: 28px 1fr auto;
-	align-items: center;
-	padding: 6px 14px;
-	cursor: pointer;
-	gap: 0 10px;
-}
-.mention-menu-item .mention-avatar {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	width: 26px;
-	height: 26px;
-	border-radius: 50%;
-	background: rgba(55, 53, 47, 0.08);
-	font-size: 16px;
-	line-height: 1;
-}
-.mention-menu-item .mention-primary {
-	display: inline-flex;
-	flex-direction: column;
-	min-width: 0;
-}
-.mention-menu-item .mention-name {
-	font-weight: 500;
-	color: var(--text);
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-.mention-menu-item .mention-handle {
-	font-size: 12px;
-	color: var(--text-muted);
-}
-.mention-menu-item .mention-role {
-	font-size: 11px;
-	color: var(--text-muted);
-	text-transform: uppercase;
-	letter-spacing: 0.5px;
-}
-.mention-menu-item.active,
-.mention-menu-item:hover {
-	background: rgba(55, 53, 47, 0.06);
-}
-
-/* Mention pills (rendered by the dedicated mention mark from @plim/core). */
-.plim-editor .plim-mention {
-	color: rgba(55, 53, 47, 0.85);
-	background: rgba(55, 53, 47, 0.06);
-	border-radius: 3px;
-	padding: 0 3px;
-	font-weight: 500;
-	cursor: pointer;
-}
-.plim-editor .plim-mention:hover {
-	background: rgba(35, 131, 226, 0.14);
-	color: rgb(35, 131, 226);
-}
-
-/* Block-selected highlight. Matches Notion's pattern: a soft blue
-   tinted fill spanning the block's content width, no border outline.
-   Reads cleanly against both white page background and image content
-   (the tint is subtle enough to not wash out colors). The ::after
-   layer is `pointer-events: none` so clicks still hit the underlying
-   block content. `inset: 0 -4px` extends the fill 4px past the
-   block's text column so it visually breaks free of the line — same
-   as Notion. */
-[data-block-id][data-plim-block-selected="true"] {
-	position: relative;
-}
-[data-block-id][data-plim-block-selected="true"]::after {
-	content: '';
-	position: absolute;
-	inset: -2px -3px;
-	background: rgba(35, 131, 226, 0.14);
-	border-radius: 10px;
-	pointer-events: none;
-	z-index: 0;
-}
-/* Keep block content above the highlight layer so text/images render
-   normally. Without this, the ::after's z-index: 0 would still sit
-   above static-positioned siblings. Excludes `.plim-block-handles`
-   because it relies on its own `position: absolute` to live in the
-   gutter; forcing `position: relative` here would re-flow it into
-   the block's normal layout (visible as a phantom top padding when
-   the block is selected). */
-[data-block-id][data-plim-block-selected="true"] > *:not(.plim-block-handles) {
-	position: relative;
-	z-index: 1;
-}
-
-/* Image block */
-.plim-block-image .plim-image-wrap {
-	display: block;
-	margin: 4px 0;
-}
-/* Alignment of the inline-block frame inside the wrap. */
-.plim-image-wrap[data-align='left'] {
-	text-align: left;
-}
-.plim-image-wrap[data-align='center'] {
-	text-align: center;
-}
-.plim-image-wrap[data-align='right'] {
-	text-align: right;
-}
-.plim-image-frame {
-	position: relative;
-	display: inline-block;
-	max-width: 100%;
-	line-height: 0; /* kill the inline-img baseline gap */
-	vertical-align: top;
-}
-.plim-image {
-	display: block;
-	width: 100%;
-	max-width: 100%;
-	border-radius: 4px;
-}
-
-/* Floating toolbar over the top-right of the image. Visible on hover
-   or when the block is selected. The toolbar lives inside .plim-image-frame
-   so it tracks the image's bounds rather than the wrap. */
-.plim-image-toolbar {
-	position: absolute;
-	top: 8px;
-	right: 8px;
-	display: flex;
-	gap: 2px;
-	padding: 3px;
-	background: rgba(15, 15, 15, 0.85);
-	border: 1px solid rgba(255, 255, 255, 0.08);
-	border-radius: 6px;
-	box-shadow: 0 4px 12px rgba(15, 15, 15, 0.3);
-	opacity: 0;
-	pointer-events: none;
-	transition: opacity 120ms ease;
-	line-height: 1; /* override frame's line-height: 0 */
-	z-index: 2;
-}
-.plim-block-image:hover .plim-image-toolbar,
-.plim-block-image[data-plim-block-selected='true'] .plim-image-toolbar,
-.plim-image-toolbar:focus-within {
-	opacity: 1;
-	pointer-events: auto;
-}
-.plim-image-toolbar-btn {
-	all: unset;
-	display: inline-flex;
-	align-items: center;
-	gap: 4px;
-	padding: 4px 8px;
-	font-size: 12px;
-	color: rgba(255, 255, 255, 0.92);
-	border-radius: 4px;
-	cursor: pointer;
-	transition: background 80ms ease;
-	user-select: none;
-}
-.plim-image-toolbar-btn:hover,
-.plim-image-toolbar-btn:focus-visible {
-	background: rgba(255, 255, 255, 0.12);
-}
-.plim-image-toolbar-align {
-	font-size: 14px;
-	font-family: 'Apple Color Emoji', 'Segoe UI Emoji', system-ui, sans-serif;
-	min-width: 24px;
-	justify-content: center;
-}
-.plim-image-toolbar-delete:hover {
-	background: rgba(235, 87, 87, 0.4);
-}
-.plim-image-resize {
-	position: absolute;
-	top: 0;
-	bottom: 0;
-	right: 0;
-	width: 14px;
-	cursor: ew-resize;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	opacity: 0;
-	transition: opacity 120ms ease;
-}
-.plim-image-resize::before {
-	content: '';
-	display: block;
-	width: 6px;
-	height: 42px;
-	max-height: 50%;
-	border-radius: 3px;
-	background: rgba(15, 15, 15, 0.6);
-	border: 1px solid rgba(255, 255, 255, 0.6);
-	box-shadow: 0 1px 2px rgba(15, 15, 15, 0.3);
-}
-.plim-block-image:hover .plim-image-resize,
-.plim-image-resize-active {
-	opacity: 1;
-}
-.plim-image-resize-active::before {
-	background: rgba(35, 131, 226, 0.9);
-	border-color: rgba(255, 255, 255, 0.85);
-}
-.plim-image-placeholder,
-.plim-embed-placeholder,
-.plim-rawhtml-placeholder {
-	all: unset;
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	padding: 12px 16px;
-	width: 100%;
-	box-sizing: border-box;
-	background: rgba(55, 53, 47, 0.04);
-	border-radius: 4px;
-	color: var(--text-muted);
-	cursor: pointer;
-	font-size: 14px;
-}
-.plim-image-placeholder:hover,
-.plim-embed-placeholder:hover,
-.plim-rawhtml-placeholder:hover {
-	background: rgba(55, 53, 47, 0.08);
-}
-.plim-image-caption {
-	margin-top: 4px;
-	font-size: 13px;
-	color: var(--text-muted);
-	min-height: 1.2em;
-	outline: none;
-}
-.plim-image-caption:empty::before {
-	content: attr(data-placeholder);
-	color: var(--text-faint);
-}
-/* Hide the caption row entirely when not requested. The element stays
-   in the DOM (so its stash reference + listeners survive), but takes
-   up no space. When the user clicks the Caption toolbar button we set
-   data-caption-visible=true and focus it. */
-.plim-image-wrap[data-caption-visible='false'] .plim-image-caption {
-	display: none;
-}
-
-/* Embed block */
-.plim-block-embed .plim-embed-wrap {
-	margin: 4px 0;
-}
-.plim-embed {
-	width: 100%;
-	height: 360px;
-	border: 1px solid var(--divider);
-	border-radius: 4px;
-	background: #fff;
-}
-
-/* Raw HTML block */
-.plim-block-raw_html .plim-rawhtml-wrap {
-	margin: 4px 0;
-	position: relative;
-}
-.plim-rawhtml {
-	width: 100%;
-	min-height: 80px;
-	border: 1px solid var(--divider);
-	border-radius: 4px;
-	background: #fff;
-}
-.plim-rawhtml-edit {
-	position: absolute;
-	top: 6px;
-	right: 6px;
-	padding: 4px 8px;
-	font-size: 12px;
-	background: rgba(255, 255, 255, 0.92);
-	border: 1px solid var(--divider);
-	border-radius: 4px;
-	cursor: pointer;
-}
-
-/* Table block */
-.plim-block-table .plim-table-wrap {
-	margin: 6px 0;
-	overflow-x: auto;
-}
-.plim-table {
-	border-collapse: collapse;
-	border: 1px solid var(--divider);
-	background: #fff;
-}
-.plim-table tr:first-child td {
-	background: rgba(55, 53, 47, 0.03);
-	font-weight: 500;
-}
-.plim-table td {
-	border: 1px solid var(--divider);
-	padding: 7px 10px;
-	min-width: 120px;
-	min-height: 30px;
-	vertical-align: top;
-	font-size: 14px;
-	line-height: 1.5;
-	outline: none;
-	transition: background 60ms ease;
-}
-.plim-table td:hover {
-	background: rgba(55, 53, 47, 0.025);
-}
-.plim-table tr:first-child td:hover {
-	background: rgba(55, 53, 47, 0.05);
-}
-.plim-table td:focus {
-	background: rgba(35, 131, 226, 0.06);
-	box-shadow: inset 0 0 0 2px var(--accent);
-}
-.plim-table-controls {
-	display: flex;
-	gap: 6px;
-	margin-top: 6px;
-	opacity: 0;
-	transition: opacity 80ms ease;
-}
-.plim-block-table:hover .plim-table-controls,
-.plim-block-table:focus-within .plim-table-controls {
-	opacity: 1;
-}
-.plim-table-controls button {
-	all: unset;
-	cursor: pointer;
-	padding: 4px 10px;
-	font-size: 12px;
-	color: var(--text-muted);
-	border: 1px solid var(--divider);
-	border-radius: 4px;
-	background: #fff;
-}
-.plim-table-controls button:hover {
-	background: rgba(55, 53, 47, 0.06);
-	color: var(--text);
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
@@ -881,4 +167,117 @@ a[data-mark-type="link"] {
 }
 .plim-counter-btn:active {
 	background: rgba(55, 53, 47, 0.06);
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   Inline status badge — atomic mark rendered as a pill. Three colour
+   themes (ready/pending/cancelled) plus a focus ring when the caret
+   sits at one of its edges (`data-plim-atom-active`, stamped by the
+   editor for any `[data-atomic="true"]` descendant of a block-content
+   element when the caret lands adjacent to it).
+   ──────────────────────────────────────────────────────────────────── */
+.plim-status {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 1px 8px 1px 6px;
+	border-radius: 999px;
+	font-size: 12px;
+	font-weight: 500;
+	line-height: 18px;
+	letter-spacing: 0.01em;
+	white-space: nowrap;
+	cursor: pointer;
+	user-select: none;
+	transition: filter 80ms ease, box-shadow 80ms ease;
+	vertical-align: 1px;
+	border: 1px solid transparent;
+}
+.plim-status::before {
+	content: '';
+	display: inline-block;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: currentColor;
+	flex: 0 0 auto;
+}
+.plim-status[data-status='ready'] {
+	background: #e7f5ec;
+	color: #28774d;
+}
+.plim-status[data-status='pending'] {
+	background: #fff4d6;
+	color: #8a6300;
+}
+.plim-status[data-status='cancelled'] {
+	background: #fbe5e5;
+	color: #b3261e;
+}
+.plim-status:hover {
+	filter: brightness(0.97);
+}
+.plim-status[data-plim-atom-active='true'] {
+	box-shadow: 0 0 0 2px rgba(35, 131, 226, 0.45);
+	border-color: rgba(35, 131, 226, 0.55);
+}
+/* When the caret is parked at the edge of any atomic mark wrapper, hide
+   the native blinking I-beam — the focus ring on the atom is the active
+   indicator. Generic across all atoms (mentions, status, future). */
+[data-block-content]:has([data-plim-atom-active='true']) {
+	caret-color: transparent;
+}
+
+/* Status menu — opens on pill click or Enter at trailing edge. The
+   action panel handles positioning + outside-click dismissal; we just
+   style the menu shell + items. */
+.plim-status-menu {
+	display: flex;
+	flex-direction: column;
+	min-width: 168px;
+	padding: 4px;
+	background: #ffffff;
+	border-radius: 8px;
+	border: 1px solid rgba(55, 53, 47, 0.1);
+	box-shadow: rgba(15, 15, 15, 0.05) 0 0 0 1px, rgba(15, 15, 15, 0.1) 0 3px 6px,
+		rgba(15, 15, 15, 0.2) 0 9px 24px;
+}
+.plim-status-menu-item {
+	all: unset;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 6px 8px;
+	border-radius: 6px;
+	cursor: pointer;
+	font-size: 13px;
+	color: var(--text);
+}
+.plim-status-menu-item:hover,
+.plim-status-menu-item:focus-visible {
+	background: rgba(55, 53, 47, 0.06);
+}
+.plim-status-menu-item[data-active='true'] {
+	font-weight: 600;
+}
+.plim-status-menu-item[data-active='true']::after {
+	content: '✓';
+	margin-left: auto;
+	color: rgba(55, 53, 47, 0.6);
+}
+.plim-status-menu-dot {
+	display: inline-block;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	flex: 0 0 auto;
+}
+.plim-status-menu-item[data-status='ready'] .plim-status-menu-dot {
+	background: #28774d;
+}
+.plim-status-menu-item[data-status='pending'] .plim-status-menu-dot {
+	background: #8a6300;
+}
+.plim-status-menu-item[data-status='cancelled'] .plim-status-menu-dot {
+	background: #b3261e;
 }

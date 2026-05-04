@@ -91,6 +91,19 @@ function findBlockContent(blockEl: HTMLElement): HTMLElement | null {
 	return null;
 }
 
+// Walk up from `node` looking for the nearest ancestor with
+// `data-atomic="true"`, stopping at `boundary` (typically the block-
+// content wrapper) so we never escape into a parent block. Returns the
+// atomic element or null. Used by the atom-active highlight pass.
+function atomicAncestor(node: Node, boundary: HTMLElement): HTMLElement | null {
+	let cur: HTMLElement | null = (node.parentNode as HTMLElement | null) ?? null;
+	while (cur && cur !== boundary) {
+		if (cur.getAttribute && cur.getAttribute('data-atomic') === 'true') return cur;
+		cur = cur.parentElement;
+	}
+	return null;
+}
+
 export function mountView(opts: ViewOptions): View {
 	const root = document.createElement('div');
 	root.className = 'plim-editor';
@@ -205,6 +218,63 @@ export function mountView(opts: ViewOptions): View {
 		if (selection.anchorId && !liveIds.has(selection.anchorId)) selection.anchorId = next[0] ?? null;
 		if (selection.activeId && !liveIds.has(selection.activeId)) selection.activeId = selection.anchorId;
 		applySelectionAttrs();
+	}
+
+	// Generic inline-atom highlight. Any descendant of a block-content
+	// element that carries `data-atomic="true"` (typically the wrapper
+	// emitted by an atomic mark's `toDOM` — mentions, status pills,
+	// custom inline tokens, etc.) becomes a "selectable atom": when the
+	// caret lands at one of its edges via arrow keys / click /
+	// programmatic selection, the editor stamps `data-plim-atom-active=
+	// "true"` on it so consumers can paint a focus ring purely from CSS,
+	// without each extension wiring its own subscription. Trailing edge
+	// wins on boundary ties (caret between an atom and a regular text
+	// run highlights the atom). The stamp is a view-layer DOM attr,
+	// never written into the doc, and is cleared every render so stale
+	// highlights can't outlive the transaction that produced them.
+	function reapplyAtomActiveAfterRender(sel: PSelection) {
+		// Clear previous stamps first — cheap because atoms are sparse.
+		root.querySelectorAll<HTMLElement>('[data-plim-atom-active="true"]').forEach((el) => {
+			el.removeAttribute('data-plim-atom-active');
+		});
+		// Only highlight on a collapsed caret in a single block.
+		if (!pathsEqual(sel.anchor.path, sel.head.path) || sel.anchor.offset !== sel.head.offset) return;
+		const blockEl = blockElementAtPath(root, sel.head.path);
+		if (!blockEl) return;
+		const content = findBlockContent(blockEl);
+		if (!content) return;
+		const targetOffset = sel.head.offset;
+		// Walk text descendants accumulating a doc-style offset. Two
+		// passes are conceptually run in one walk: first preferring a
+		// text node ending at the caret (trailing edge of an atom);
+		// then, only if no atom was found there, a text node starting
+		// at the caret (leading edge). Trailing-edge wins on boundary
+		// ties because Notion-like UIs place the cursor *after* the
+		// just-typed/inserted item, so that's where the eye expects the
+		// highlight.
+		const walker = root.ownerDocument.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+		let pos = 0;
+		let trailingMatch: HTMLElement | null = null;
+		let leadingMatch: HTMLElement | null = null;
+		let node = walker.nextNode();
+		while (node) {
+			const len = (node.textContent ?? '').length;
+			const start = pos;
+			const end = pos + len;
+			if (start === targetOffset && !leadingMatch) {
+				const atom = atomicAncestor(node, content);
+				if (atom) leadingMatch = atom;
+			}
+			if (end === targetOffset && !trailingMatch) {
+				const atom = atomicAncestor(node, content);
+				if (atom) trailingMatch = atom;
+			}
+			if (start > targetOffset) break;
+			pos = end;
+			node = walker.nextNode();
+		}
+		const target = trailingMatch ?? leadingMatch;
+		if (target) target.setAttribute('data-plim-atom-active', 'true');
 	}
 
 	function deleteSelectedBlocks() {
@@ -323,6 +393,7 @@ export function mountView(opts: ViewOptions): View {
 			renderBlocks(root, state.doc.children, opts);
 			applySelection(root, state.selection);
 			reapplyBlockSelectedAfterRender();
+			reapplyAtomActiveAfterRender(state.selection);
 		} finally {
 			updating = false;
 		}

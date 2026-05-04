@@ -545,6 +545,153 @@ describe('Custom block & mark descriptors (toDOM)', () => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Generic atom-active highlight
+//
+// Any mark whose toDOM wrapper carries `data-atomic="true"` is treated as an
+// indivisible inline atom. When the caret sits at either edge of such a run
+// the editor stamps `data-plim-atom-active="true"` on the wrapper so styling
+// (focus ring, etc.) can react. The mechanism lives in the view layer and is
+// shared across all atomic marks (mentions, status pills, future atoms).
+
+describe('generic atom-active highlight', () => {
+	it('stamps data-plim-atom-active on the wrapper when caret is at trailing or leading edge, clears when caret moves away', () => {
+		const atomMark = defineMark({
+			name: 'atom',
+			toDOM: () => {
+				const el = document.createElement('span');
+				el.className = 'my-atom';
+				el.setAttribute('data-atomic', 'true');
+				return el;
+			},
+		});
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({
+			registeredBlocks: [paragraphBlock],
+			registeredMarks: [atomMark],
+		});
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc' as const,
+				children: [
+					{
+						id: newId(),
+						type: 'paragraph',
+						// Layout: "pre " + ATOM("tag") + " post"  →  offsets 0..4 (plain), 4..7 (atom), 7..12 (plain)
+						text: [
+							{ text: 'pre ' },
+							{ text: 'tag', marks: [{ type: 'atom' }] },
+							{ text: ' post' },
+						],
+					},
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		try {
+			const atom = () => container.querySelector('.my-atom') as HTMLElement;
+			const isActive = () => atom().getAttribute('data-plim-atom-active') === 'true';
+
+			// Caret outside the atom run → no highlight.
+			let tx = editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 0 } });
+			editor.dispatch(tx);
+			expect(isActive()).toBe(false);
+
+			// Caret at trailing edge of atom (offset 7).
+			tx = editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 7 }, head: { path: [0], offset: 7 } });
+			editor.dispatch(tx);
+			expect(isActive()).toBe(true);
+
+			// Caret at leading edge of atom (offset 4).
+			tx = editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 4 }, head: { path: [0], offset: 4 } });
+			editor.dispatch(tx);
+			expect(isActive()).toBe(true);
+
+			// Caret well past the atom → highlight cleared.
+			tx = editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 10 }, head: { path: [0], offset: 10 } });
+			editor.dispatch(tx);
+			expect(isActive()).toBe(false);
+		} finally {
+			editor.destroy();
+			container.remove();
+		}
+	});
+
+	it('only highlights the adjacent atom when multiple atoms exist in the same block', () => {
+		const atomMark = defineMark({
+			name: 'atom',
+			toDOM: () => {
+				const el = document.createElement('span');
+				el.className = 'my-atom';
+				el.setAttribute('data-atomic', 'true');
+				return el;
+			},
+		});
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({
+			registeredBlocks: [paragraphBlock],
+			registeredMarks: [atomMark],
+		});
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc' as const,
+				children: [
+					{
+						id: newId(),
+						type: 'paragraph',
+						// "A" + ATOM("one") + " B " + ATOM("two") + " C"
+						// offsets: 0..1, 1..4, 4..7, 7..10, 10..12
+						text: [
+							{ text: 'A' },
+							{ text: 'one', marks: [{ type: 'atom' }] },
+							{ text: ' B ' },
+							{ text: 'two', marks: [{ type: 'atom' }] },
+							{ text: ' C' },
+						],
+					},
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		try {
+			const atoms = () => Array.from(container.querySelectorAll('.my-atom')) as HTMLElement[];
+			const activeIdx = () =>
+				atoms().findIndex((a) => a.getAttribute('data-plim-atom-active') === 'true');
+
+			// Trailing edge of first atom (offset 4).
+			let tx = editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 4 }, head: { path: [0], offset: 4 } });
+			editor.dispatch(tx);
+			expect(activeIdx()).toBe(0);
+
+			// Leading edge of second atom (offset 7).
+			tx = editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 7 }, head: { path: [0], offset: 7 } });
+			editor.dispatch(tx);
+			expect(activeIdx()).toBe(1);
+
+			// Between the two atoms (offset 5) → neither active.
+			tx = editor.createTransaction();
+			tx.setSelection({ anchor: { path: [0], offset: 5 }, head: { path: [0], offset: 5 } });
+			editor.dispatch(tx);
+			expect(activeIdx()).toBe(-1);
+		} finally {
+			editor.destroy();
+			container.remove();
+		}
+	});
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Paste pipeline (Phase 1 — plain-text fidelity)
 //
 // Synthetic ClipboardEvents in Chromium accept a `clipboardData` init via the

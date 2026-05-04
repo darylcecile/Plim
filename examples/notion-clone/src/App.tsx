@@ -38,10 +38,11 @@ import {
 	type SlashCommandItem,
 } from '@plim/react';
 import { calloutBlock, counterBlock, type CalloutTone } from './customBlocks.js';
+import { StatusBadgeMenu, statusBadgeExtension } from './statusBadge.js';
 
 const plim = new PlimDriver({
 	theme: 'light',
-	extensions: [slashCommandExtension(), mentionExtension()],
+	extensions: [slashCommandExtension(), mentionExtension(), statusBadgeExtension()],
 	registeredMarks: [boldMark, italicMark, underlineMark, strikethroughMark, codeMark, linkMark, highlightMark],
 	registeredBlocks: [
 		paragraphBlock,
@@ -209,6 +210,38 @@ const initialContent = {
 				{ text: ' block — a real React component that persists its value into the doc and survives undo/redo.' },
 			],
 		},
+		{
+			type: 'heading' as const,
+			id: newId(),
+			attrs: { level: 2 },
+			text: [{ text: 'Inline status badges' }],
+		},
+		{
+			type: 'paragraph' as const,
+			id: newId(),
+			text: [
+				{ text: 'Type ' },
+				{ text: '[[!ready]]', marks: [{ type: 'code' }] },
+				{ text: ', ' },
+				{ text: '[[!pending]]', marks: [{ type: 'code' }] },
+				{ text: ', or ' },
+				{ text: '[[!cancelled]]', marks: [{ type: 'code' }] },
+				{ text: ' anywhere — it auto-replaces with a pill. Click a pill to change status, or arrow to its trailing edge and press Enter.' },
+			],
+		},
+		{
+			type: 'paragraph' as const,
+			id: newId(),
+			text: [
+				{ text: 'Ship the redesigned dashboard ' },
+				{ text: 'Ready', marks: [{ type: 'status', attrs: { status: 'ready' } }] },
+				{ text: ', migrate metrics ' },
+				{ text: 'Pending', marks: [{ type: 'status', attrs: { status: 'pending' } }] },
+				{ text: ', deprecate v1 API ' },
+				{ text: 'Cancelled', marks: [{ type: 'status', attrs: { status: 'cancelled' } }] },
+				{ text: '.' },
+			],
+		},
 	],
 };
 
@@ -278,6 +311,7 @@ export function App() {
 			<PlimEditor plim={plim} handle={handle} initialContent={initialContent} autoFocus />
 			<SlashCommandMenu editor={handle} items={slashItems} />
 			<MentionMenu editor={handle} searchUsers={fakeAsyncUserSearch} />
+			<StatusBadgeMenu editor={handle} />
 		</div>
 	);
 }

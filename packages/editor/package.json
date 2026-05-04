@@ -9,7 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+	"./styles.css": {
+	  "import": "./dist/styles.css"
+	}
   },
   "files": [
     "dist"
@@ -20,7 +23,7 @@
     "@plim/markdown": "workspace:*"
   },
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && cp src/styles.css dist/styles.css",
     "typecheck": "tsc -b --pretty false"
   }
 }

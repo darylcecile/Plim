@@ -8,6 +8,7 @@ import {
 	blockTextLength,
 	flattenBlocks,
 	getBlockAt,
+	marksAtOffset,
 	nextBlockPath,
 	prevBlockPath,
 } from '@plim/core';
@@ -293,15 +294,26 @@ export function runBuiltInBeforeAction(text: string, state: EditorState, ctx: Ac
 	const block = getBlockAt(state.doc, path);
 	if (!block) return false;
 
-	// Insert text first into the doc
+	// Insert text first into the doc. New chars inherit the marks at the
+	// caret offset (strictly-inside-a-run wins; at a run boundary the
+	// intersection of the adjacent runs' marks is used) so typing in the
+	// middle of an existing marked run extends the run instead of splitting
+	// it. For a non-collapsed selection we use the marks at `fromOff` of the
+	// pre-insert state — typed chars inherit the marks at the start of what
+	// they replace, which matches user intent ("type to overwrite, keep the
+	// formatting of what was selected").
 	const tx = ctx.createTransaction();
 	const fromOff = Math.min(sel.anchor.offset, sel.head.offset);
 	const toOff = Math.max(sel.anchor.offset, sel.head.offset);
 	const samePathSel = pathsEqual(sel.anchor.path, sel.head.path);
+	const insertOff = samePathSel && fromOff !== toOff ? fromOff : sel.head.offset;
+	const inheritedMarks = marksAtOffset(block.text, insertOff);
+	const span: TextSpan =
+		inheritedMarks.length > 0 ? { text, marks: inheritedMarks } : { text };
 	if (samePathSel && fromOff !== toOff) {
-		tx.replaceRange(path, fromOff, toOff, [{ text }]);
+		tx.replaceRange(path, fromOff, toOff, [span]);
 	} else {
-		tx.insertText(path, sel.head.offset, text);
+		tx.insertText(path, sel.head.offset, text, inheritedMarks.length ? inheritedMarks : undefined);
 	}
 	tx.setSelection({
 		anchor: { path, offset: (samePathSel ? fromOff : sel.head.offset) + text.length },

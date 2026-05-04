@@ -104,6 +104,47 @@ export function hasMark(spans: TextSpan[] | undefined, from: number, to: number,
 	return true;
 }
 
+/**
+ * Returns the marks an insertion at `offset` should inherit. Used by the
+ * input pipeline so typing inside an existing marked run (e.g. in the middle
+ * of an `code` span) extends the run instead of splitting it. Rules:
+ *   - if `offset` is strictly inside one span (start < offset < end), inherit
+ *     that span's marks;
+ *   - if `offset` sits exactly between two spans (right edge of A == left edge
+ *     of B), inherit the intersection of A.marks and B.marks (so a mark that
+ *     spans across the boundary continues, but a mark that starts/ends at the
+ *     boundary does not);
+ *   - at the very start or end of the block, no marks inherit.
+ *
+ * Boundary intersection is the conservative ProseMirror-ish "non-inclusive at
+ * the right edge" behavior — typing right after `code` does not extend `code`,
+ * matching Notion. Callers wanting "extend at trailing edge" semantics for
+ * specific marks (bold/italic) can override via stored-marks state.
+ */
+export function marksAtOffset(spans: TextSpan[] | undefined, offset: number): MarkInstance[] {
+	if (!spans || spans.length === 0) return [];
+	let pos = 0;
+	let leftMarks: MarkInstance[] | null = null;
+	let rightMarks: MarkInstance[] | null = null;
+	for (let i = 0; i < spans.length; i++) {
+		const span = spans[i]!;
+		const start = pos;
+		const end = pos + span.text.length;
+		if (offset > start && offset < end) {
+			return (span.marks ?? []).map(cloneMark);
+		}
+		if (offset === end) leftMarks = span.marks ?? [];
+		if (offset === start && i > 0) rightMarks = span.marks ?? [];
+		pos = end;
+	}
+	if (leftMarks !== null && rightMarks !== null) {
+		return leftMarks
+			.filter((lm) => rightMarks!.some((rm) => rm.type === lm.type && JSON.stringify(rm.attrs ?? {}) === JSON.stringify(lm.attrs ?? {})))
+			.map(cloneMark);
+	}
+	return [];
+}
+
 /** Slice spans between from..to. */
 export function sliceText(spans: TextSpan[] | undefined, from: number, to: number): TextSpan[] {
 	if (!spans) return [];

@@ -135,3 +135,41 @@ describe('Transaction', () => {
 		expect(bolded?.text).toBe('hello');
 	});
 });
+
+describe('marksAtOffset', () => {
+	it('returns the marks of the run when offset is strictly inside it', async () => {
+		const { marksAtOffset } = await import('@plim/core');
+		// "hello world" — single span, all `code`
+		const spans = [{ text: 'hello world', marks: [{ type: 'code' }] }];
+		// Cursor before "world" → offset 6, strictly inside the span
+		expect(marksAtOffset(spans, 6).map((m) => m.type)).toEqual(['code']);
+	});
+
+	it('returns no marks at the very start or very end of the block', async () => {
+		const { marksAtOffset } = await import('@plim/core');
+		const spans = [{ text: 'hello', marks: [{ type: 'code' }] }];
+		expect(marksAtOffset(spans, 0)).toEqual([]);
+		expect(marksAtOffset(spans, 5)).toEqual([]);
+	});
+
+	it('intersects adjacent runs at an internal boundary', async () => {
+		const { marksAtOffset } = await import('@plim/core');
+		// "hello" (bold+code) + "world" (bold) → boundary at offset 5
+		const spans = [
+			{ text: 'hello', marks: [{ type: 'bold' }, { type: 'code' }] },
+			{ text: 'world', marks: [{ type: 'bold' }] },
+		];
+		const got = marksAtOffset(spans, 5).map((m) => m.type).sort();
+		expect(got).toEqual(['bold']);
+	});
+
+	it('returns empty at boundary when neighbors share no marks', async () => {
+		const { marksAtOffset } = await import('@plim/core');
+		// "hello" (code) + "world" (no marks)
+		const spans = [
+			{ text: 'hello', marks: [{ type: 'code' }] },
+			{ text: 'world' },
+		];
+		expect(marksAtOffset(spans, 5)).toEqual([]);
+	});
+});
