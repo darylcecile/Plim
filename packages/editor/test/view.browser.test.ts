@@ -2,15 +2,21 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import {
 	PlimDriver,
 	bulletedListBlock,
+	defineBlock,
+	defineMark,
 	headingBlock,
 	numberedListBlock,
 	paragraphBlock,
 	quoteBlock,
 	codeBlock as codeBlockFactory,
+	horizontalRuleBlock,
 	todoListBlock,
 	boldMark,
 	italicMark,
 	codeMark,
+	linkMark,
+	strikethroughMark,
+	underlineMark,
 	newId,
 } from '@plim/core';
 import { attachContainer, deriveEditor, type AgnosticEditor } from '@plim/editor';
@@ -19,8 +25,8 @@ function setup(opts?: { initial?: string[] }): { editor: AgnosticEditor; contain
 	const container = document.createElement('div');
 	document.body.appendChild(container);
 	const plim = new PlimDriver({
-		registeredBlocks: [paragraphBlock, headingBlock, bulletedListBlock, numberedListBlock, quoteBlock, todoListBlock, codeBlockFactory],
-		registeredMarks: [boldMark, italicMark, codeMark],
+		registeredBlocks: [paragraphBlock, headingBlock, bulletedListBlock, numberedListBlock, quoteBlock, todoListBlock, codeBlockFactory, horizontalRuleBlock],
+		registeredMarks: [boldMark, italicMark, codeMark, linkMark, strikethroughMark, underlineMark],
 	});
 	const initialContent = opts?.initial
 		? {
@@ -412,3 +418,547 @@ describe('editor view (real browser)', () => {
 		}
 	});
 });
+
+describe('Custom block & mark descriptors (toDOM)', () => {
+	it('renders a custom block via descriptor.toDOM, including its content element', () => {
+		// `callout` is a fictional block type unknown to built-ins. We register
+		// it via defineBlock with a toDOM that produces a labeled wrapper around
+		// the editor-provided content element. The view should detect the
+		// descriptor (no hardcoded switch case) and delegate rendering.
+		const calloutBlock = defineBlock({
+			name: 'callout',
+			type: 'standalone',
+			supportsDecoration: true,
+			toDOM: (payload) => {
+				const wrap = document.createElement('div');
+				wrap.className = 'plim-callout';
+				wrap.setAttribute('data-callout-tone', String(payload.attrs.tone ?? 'info'));
+				const icon = document.createElement('span');
+				icon.className = 'plim-callout-icon';
+				icon.setAttribute('contenteditable', 'false');
+				icon.textContent = '★';
+				wrap.appendChild(icon);
+				// Content element from the editor — already populated with text spans.
+				for (const node of payload.content as HTMLElement[]) wrap.appendChild(node);
+				return wrap;
+			},
+		});
+
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({
+			registeredBlocks: [paragraphBlock, calloutBlock],
+			registeredMarks: [boldMark],
+		});
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc' as const,
+				children: [
+					{
+						id: newId(),
+						type: 'callout',
+						attrs: { tone: 'warn' },
+						text: [{ text: 'heads up' }],
+					},
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		try {
+			const block = container.querySelector('[data-block-type="callout"]') as HTMLElement;
+			expect(block).toBeTruthy();
+			const calloutWrap = block.querySelector(':scope > .plim-callout') as HTMLElement;
+			expect(calloutWrap).toBeTruthy();
+			expect(calloutWrap.getAttribute('data-callout-tone')).toBe('warn');
+			expect(calloutWrap.querySelector('.plim-callout-icon')!.textContent).toBe('★');
+			const content = calloutWrap.querySelector('[data-block-content]') as HTMLElement;
+			expect(content).toBeTruthy();
+			expect(content.textContent).toBe('heads up');
+			// data-attr-* should still be stamped on the wrapper for downstream CSS hooks.
+			expect(block.getAttribute('data-attr-tone')).toBe('warn');
+		} finally {
+			editor.destroy();
+			container.remove();
+		}
+	});
+
+	it('renders a custom mark via descriptor.toDOM with nested mark support', () => {
+		// `pill` is a custom mark whose descriptor returns an empty wrapper.
+		// The editor places text (and any nested mark wrappers) inside it,
+		// so combining `bold` + `pill` on the same span must still produce
+		// a properly nested DOM tree rather than dropping the inner text.
+		const pillMark = defineMark({
+			name: 'pill',
+			toDOM: (payload) => {
+				const el = document.createElement('span');
+				el.className = 'my-pill';
+				if (payload.attrs.color) el.setAttribute('data-color', String(payload.attrs.color));
+				return el;
+			},
+		});
+
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({
+			registeredBlocks: [paragraphBlock],
+			registeredMarks: [boldMark, pillMark],
+		});
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc' as const,
+				children: [
+					{
+						id: newId(),
+						type: 'paragraph',
+						text: [{ text: 'tagged', marks: [{ type: 'bold' }, { type: 'pill', attrs: { color: 'red' } }] }],
+					},
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		try {
+			const pill = container.querySelector('.my-pill') as HTMLElement;
+			expect(pill).toBeTruthy();
+			expect(pill.getAttribute('data-color')).toBe('red');
+			expect(pill.getAttribute('data-mark-type')).toBe('pill');
+			// The bold wrapper is the outer mark in the span; pill is nested
+			// inside it. Text leaf lives at the innermost level.
+			expect(pill.textContent).toBe('tagged');
+			const strong = container.querySelector('strong') as HTMLElement;
+			expect(strong.contains(pill)).toBe(true);
+		} finally {
+			editor.destroy();
+			container.remove();
+		}
+	});
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Paste pipeline (Phase 1 — plain-text fidelity)
+//
+// Synthetic ClipboardEvents in Chromium accept a `clipboardData` init via the
+// `DataTransfer` constructor. We dispatch into the editor root so the view's
+// `paste` listener runs end-to-end. This exercises the new `onPaste` option
+// that routes plain text through `pastePlainText` (block split on \n\n+,
+// soft-break preservation on single \n).
+
+function firePaste(root: HTMLElement, payload: { text?: string; html?: string }): void {
+	const dt = new DataTransfer();
+	if (payload.text) dt.setData('text/plain', payload.text);
+	if (payload.html) dt.setData('text/html', payload.html);
+	const ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+	root.dispatchEvent(ev);
+}
+
+describe('paste pipeline — plain text', () => {
+	let env: ReturnType<typeof setup> | null = null;
+	afterEach(() => {
+		env?.cleanup();
+		env = null;
+	});
+
+	it('preserves a single \\n as a soft break inside one block', () => {
+		env = setup();
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 0 } });
+		tx.commit();
+		firePaste(getRoot(env.container), { text: 'line one\nline two' });
+		const doc = env.editor.getState().doc;
+		expect(doc.children).toHaveLength(1);
+		expect(doc.children[0]!.text![0]!.text).toBe('line one\nline two');
+	});
+
+	it('splits on a blank line into separate blocks of the same type', () => {
+		env = setup();
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 0 } });
+		tx.commit();
+		firePaste(getRoot(env.container), { text: 'first para\n\nsecond para\n\nthird' });
+		const doc = env.editor.getState().doc;
+		expect(doc.children).toHaveLength(3);
+		expect(doc.children[0]!.text![0]!.text).toBe('first para');
+		expect(doc.children[1]!.text![0]!.text).toBe('second para');
+		expect(doc.children[2]!.text![0]!.text).toBe('third');
+		// All three blocks should be paragraphs (no type promotion across the split).
+		expect(doc.children.every((c) => c.type === 'paragraph')).toBe(true);
+		// Caret should land at end of last inserted chunk.
+		const sel = env.editor.getState().selection;
+		expect(sel?.head.path).toEqual([2]);
+		expect(sel?.head.offset).toBe('third'.length);
+	});
+
+	it('combines hard and soft breaks (each chunk keeps embedded \\n)', () => {
+		env = setup();
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 0 } });
+		tx.commit();
+		firePaste(getRoot(env.container), { text: 'a\nb\n\nc\nd' });
+		const doc = env.editor.getState().doc;
+		expect(doc.children).toHaveLength(2);
+		expect(doc.children[0]!.text![0]!.text).toBe('a\nb');
+		expect(doc.children[1]!.text![0]!.text).toBe('c\nd');
+	});
+
+	it('normalises Windows \\r\\n and lone \\r before splitting', () => {
+		env = setup();
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 0 } });
+		tx.commit();
+		firePaste(getRoot(env.container), { text: 'win\r\nlines\r\n\r\nmac\rclassic' });
+		const doc = env.editor.getState().doc;
+		expect(doc.children).toHaveLength(2);
+		expect(doc.children[0]!.text![0]!.text).toBe('win\nlines');
+		expect(doc.children[1]!.text![0]!.text).toBe('mac\nclassic');
+	});
+
+	it('inserts pasted blocks at the caret position, splitting an existing block', () => {
+		env = setup({ initial: ['hello world'] });
+		// Caret in middle of "hello |world"
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 6 }, head: { path: [0], offset: 6 } });
+		tx.commit();
+		firePaste(getRoot(env.container), { text: 'X\n\nY' });
+		const doc = env.editor.getState().doc;
+		// Original block becomes "hello X" (first chunk inserted at offset 6),
+		// new block "Y" is created — but the rest of the original ("world")
+		// stays in the *new* block after the splitBlock from the paste? No:
+		// splitBlock takes the running offset (after first insert) which is
+		// 7 ("hello X|"); the rest of the original ("world") moves to the
+		// new block, then "Y" is inserted before "world".
+		expect(doc.children).toHaveLength(2);
+		expect(doc.children[0]!.text![0]!.text).toBe('hello X');
+		expect(doc.children[1]!.text![0]!.text).toBe('Yworld');
+	});
+
+	it('replaces a non-collapsed selection with the pasted content', () => {
+		env = setup({ initial: ['ABCDEFGH'] });
+		// Select "CDEF"
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 2 }, head: { path: [0], offset: 6 } });
+		tx.commit();
+		firePaste(getRoot(env.container), { text: 'X\n\nY' });
+		const doc = env.editor.getState().doc;
+		expect(doc.children).toHaveLength(2);
+		expect(doc.children[0]!.text![0]!.text).toBe('ABX');
+		expect(doc.children[1]!.text![0]!.text).toBe('YGH');
+	});
+
+	it('paste is one undo step', () => {
+		env = setup({ initial: ['start'] });
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 5 }, head: { path: [0], offset: 5 } });
+		tx.commit();
+		firePaste(getRoot(env.container), { text: ' a\n\nb\n\nc' });
+		expect(env.editor.getState().doc.children).toHaveLength(3);
+		// History entry from the paste is the most recent push; popping it
+		// once should restore the pre-paste doc.
+		const entry = env.editor.history.popUndo();
+		expect(entry).toBeTruthy();
+		env.editor.setState(entry!.stateBefore);
+		const doc = env.editor.getState().doc;
+		expect(doc.children).toHaveLength(1);
+		expect(doc.children[0]!.text![0]!.text).toBe('start');
+	});
+});
+
+describe('paste pipeline — markdown auto-detect', () => {
+	let env: ReturnType<typeof setup> | null = null;
+	afterEach(() => {
+		env?.cleanup();
+		env = null;
+	});
+
+	it('parses headings into heading blocks when pasted into an empty doc', () => {
+		env = setup();
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 0 } });
+		tx.commit();
+		firePaste(getRoot(env.container), { text: '# Heading 1\n\n## Heading 2\n\nBody copy' });
+		const doc = env.editor.getState().doc;
+		expect(doc.children).toHaveLength(3);
+		expect(doc.children[0]!.type).toBe('heading');
+		expect(doc.children[0]!.attrs?.level).toBe(1);
+		expect(doc.children[1]!.type).toBe('heading');
+		expect(doc.children[1]!.attrs?.level).toBe(2);
+		expect(doc.children[2]!.type).toBe('paragraph');
+	});
+
+	it('parses bullet lists', () => {
+		env = setup();
+		firePaste(getRoot(env.container), { text: '- one\n- two\n- three' });
+		const doc = env.editor.getState().doc;
+		expect(doc.children).toHaveLength(3);
+		expect(doc.children.every((c) => c.type === 'bulleted_list_item')).toBe(true);
+	});
+
+	it('parses fenced code blocks', () => {
+		env = setup();
+		firePaste(getRoot(env.container), { text: '```ts\nconst x = 1;\nconst y = 2;\n```' });
+		const doc = env.editor.getState().doc;
+		expect(doc.children).toHaveLength(1);
+		expect(doc.children[0]!.type).toBe('code');
+		expect(doc.children[0]!.attrs?.language).toBe('ts');
+		expect(doc.children[0]!.text![0]!.text).toBe('const x = 1;\nconst y = 2;');
+	});
+
+	it('does NOT trigger on plain prose with stray asterisks', () => {
+		env = setup();
+		// Inline-only markup — no block marker on any line — must fall through to plain text.
+		firePaste(getRoot(env.container), { text: 'Yes I *think* so.\n\nMaybe **really**.' });
+		const doc = env.editor.getState().doc;
+		expect(doc.children).toHaveLength(2);
+		expect(doc.children[0]!.text![0]!.text).toBe('Yes I *think* so.');
+		expect(doc.children[1]!.text![0]!.text).toBe('Maybe **really**.');
+	});
+
+	it('splits the current block when pasting markdown into mid-text', () => {
+		env = setup({ initial: ['hello world'] });
+		const tx = env.editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 6 }, head: { path: [0], offset: 6 } });
+		tx.commit();
+		firePaste(getRoot(env.container), { text: '# Big' });
+		const doc = env.editor.getState().doc;
+		// Original "hello |world" → ["hello ", "Big" (h1), "world"]
+		expect(doc.children).toHaveLength(3);
+		expect(doc.children[0]!.text![0]!.text).toBe('hello ');
+		expect(doc.children[1]!.type).toBe('heading');
+		expect(doc.children[1]!.text![0]!.text).toBe('Big');
+		expect(doc.children[2]!.text![0]!.text).toBe('world');
+	});
+});
+
+describe('paste pipeline — HTML clipboard', () => {
+	let env: ReturnType<typeof setup> | null = null;
+	afterEach(() => {
+		env?.cleanup();
+		env = null;
+	});
+
+	it('preserves heading + paragraph structure', () => {
+		env = setup();
+		firePaste(getRoot(env.container), {
+			html: '<h1>Title</h1><p>Body text</p>',
+			text: 'Title\n\nBody text', // browsers always provide both; HTML wins
+		});
+		const doc = env.editor.getState().doc;
+		expect(doc.children).toHaveLength(2);
+		expect(doc.children[0]!.type).toBe('heading');
+		expect(doc.children[0]!.attrs?.level).toBe(1);
+		expect(doc.children[0]!.text![0]!.text).toBe('Title');
+		expect(doc.children[1]!.type).toBe('paragraph');
+		expect(doc.children[1]!.text![0]!.text).toBe('Body text');
+	});
+
+	it('clamps H4-H6 to level 3 (plim only supports 1-3)', () => {
+		env = setup();
+		firePaste(getRoot(env.container), { html: '<h5>deep</h5>', text: 'deep' });
+		const doc = env.editor.getState().doc;
+		expect(doc.children[0]!.type).toBe('heading');
+		expect(doc.children[0]!.attrs?.level).toBe(3);
+	});
+
+	it('preserves inline marks (bold, italic, code, link)', () => {
+		env = setup();
+		firePaste(getRoot(env.container), {
+			html: '<p>plain <strong>bold</strong> <em>italic</em> <code>code</code> <a href="https://example.com">link</a></p>',
+			text: 'plain bold italic code link',
+		});
+		const doc = env.editor.getState().doc;
+		const spans = doc.children[0]!.text!;
+		const findSpan = (text: string) => spans.find((s) => s.text === text);
+		expect(findSpan('bold')!.marks?.[0]?.type).toBe('bold');
+		expect(findSpan('italic')!.marks?.[0]?.type).toBe('italic');
+		expect(findSpan('code')!.marks?.[0]?.type).toBe('code');
+		const link = findSpan('link');
+		expect(link!.marks?.[0]?.type).toBe('link');
+		expect(link!.marks?.[0]?.attrs?.href).toBe('https://example.com');
+	});
+
+	it('handles nested marks (bold inside italic)', () => {
+		env = setup();
+		firePaste(getRoot(env.container), {
+			html: '<p><em>start <strong>both</strong> end</em></p>',
+			text: 'start both end',
+		});
+		const spans = env.editor.getState().doc.children[0]!.text!;
+		const both = spans.find((s) => s.text === 'both')!;
+		const types = (both.marks ?? []).map((m) => m.type).sort();
+		expect(types).toEqual(['bold', 'italic']);
+	});
+
+	it('parses unordered lists into bulleted_list_item blocks', () => {
+		env = setup();
+		firePaste(getRoot(env.container), {
+			html: '<ul><li>one</li><li>two</li><li>three</li></ul>',
+			text: '',
+		});
+		const doc = env.editor.getState().doc;
+		expect(doc.children).toHaveLength(3);
+		expect(doc.children.every((b) => b.type === 'bulleted_list_item')).toBe(true);
+		expect(doc.children.map((b) => b.text![0]!.text)).toEqual(['one', 'two', 'three']);
+	});
+
+	it('parses ordered lists into numbered_list_item blocks', () => {
+		env = setup();
+		firePaste(getRoot(env.container), {
+			html: '<ol><li>first</li><li>second</li></ol>',
+			text: '',
+		});
+		const doc = env.editor.getState().doc;
+		expect(doc.children).toHaveLength(2);
+		expect(doc.children.every((b) => b.type === 'numbered_list_item')).toBe(true);
+	});
+
+	it('parses pre/code with language class', () => {
+		env = setup();
+		firePaste(getRoot(env.container), {
+			html: '<pre><code class="language-ts">const x = 1;</code></pre>',
+			text: 'const x = 1;',
+		});
+		const doc = env.editor.getState().doc;
+		expect(doc.children[0]!.type).toBe('code');
+		expect(doc.children[0]!.attrs?.language).toBe('ts');
+		expect(doc.children[0]!.text![0]!.text).toBe('const x = 1;');
+	});
+
+	it('strips <script> tags via the sanitiser', () => {
+		env = setup();
+		firePaste(getRoot(env.container), {
+			html: '<p>safe</p><script>window.x = 1</script><p>also safe</p>',
+			text: 'safe also safe',
+		});
+		const doc = env.editor.getState().doc;
+		expect(doc.children).toHaveLength(2);
+		// Confirm the script payload didn't leak into any block's text.
+		for (const b of doc.children) {
+			for (const s of b.text ?? []) {
+				expect(s.text).not.toContain('window.x');
+			}
+		}
+		// And — paranoia — the sanitiser shouldn't have left a script in the DOM either.
+		expect(env.container.querySelector('script')).toBeNull();
+	});
+
+	it('drops `javascript:` link hrefs', () => {
+		env = setup();
+		firePaste(getRoot(env.container), {
+			html: '<p><a href="javascript:alert(1)">click</a></p>',
+			text: 'click',
+		});
+		const span = env.editor.getState().doc.children[0]!.text![0]!;
+		// The link mark should either be absent or not carry the dangerous href.
+		const linkMarkInst = (span.marks ?? []).find((m) => m.type === 'link');
+		if (linkMarkInst) {
+			expect(linkMarkInst.attrs?.href ?? '').not.toMatch(/^javascript:/i);
+		}
+	});
+
+	it('treats <br> as a soft break inside the run', () => {
+		env = setup();
+		firePaste(getRoot(env.container), {
+			html: '<p>line one<br>line two</p>',
+			text: 'line one\nline two',
+		});
+		const text = env.editor.getState().doc.children[0]!.text!.map((s) => s.text).join('');
+		expect(text).toBe('line one\nline two');
+	});
+
+	it('parses <hr> into a divider block', () => {
+		env = setup();
+		firePaste(getRoot(env.container), {
+			html: '<p>before</p><hr><p>after</p>',
+			text: 'before\n\nafter',
+		});
+		const doc = env.editor.getState().doc;
+		expect(doc.children.map((b) => b.type)).toEqual(['paragraph', 'divider', 'paragraph']);
+	});
+
+	it('parses <blockquote> into quote block', () => {
+		env = setup();
+		firePaste(getRoot(env.container), {
+			html: '<blockquote>famous words</blockquote>',
+			text: 'famous words',
+		});
+		expect(env.editor.getState().doc.children[0]!.type).toBe('quote');
+	});
+});
+
+describe('paste pipeline — extension hook (transformPaste)', () => {
+	let cleanup: (() => void) | null = null;
+	afterEach(() => {
+		cleanup?.();
+		cleanup = null;
+	});
+
+	function setupWithExtension(transformPaste: (data: { text: string; html: string; files: File[] }, ctx: unknown) => boolean | undefined | void) {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({
+			registeredBlocks: [paragraphBlock, headingBlock],
+			registeredMarks: [boldMark],
+			extensions: [
+				() => ({
+					name: 'test-paste',
+					transformPaste,
+				}),
+			],
+		});
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: { type: 'doc', children: [{ id: newId(), type: 'paragraph', text: [] }] },
+			autoFocus: false,
+		});
+		editor.mount();
+		cleanup = () => {
+			editor.destroy();
+			container.remove();
+		};
+		return { editor, container };
+	}
+
+	it('runs before the built-in pipeline; returning true prevents default behaviour', () => {
+		const seen: Array<{ text: string; html: string; files: number }> = [];
+		const env = setupWithExtension((data) => {
+			seen.push({ text: data.text, html: data.html, files: data.files.length });
+			return true; // claim ownership: built-in pipeline must NOT run
+		});
+		firePaste(getRoot(env.container), { text: 'hello', html: '<p>hello</p>' });
+		// Doc should be unchanged (single empty paragraph) — extension owned the paste.
+		expect(env.editor.getState().doc.children).toHaveLength(1);
+		expect(env.editor.getState().doc.children[0]!.text ?? []).toEqual([]);
+		expect(seen).toHaveLength(1);
+		expect(seen[0]).toEqual({ text: 'hello', html: '<p>hello</p>', files: 0 });
+	});
+
+	it('falls through to built-in pipeline when the extension returns falsy', () => {
+		const env = setupWithExtension(() => undefined);
+		firePaste(getRoot(env.container), { text: 'hello\n\nworld' });
+		// Built-in plain-text path should have run since the extension declined.
+		expect(env.editor.getState().doc.children).toHaveLength(2);
+	});
+
+	it('exposes clipboard files (Phase 5) via the same payload', () => {
+		let captured: File[] | null = null;
+		const env = setupWithExtension((data) => {
+			captured = data.files;
+			return true;
+		});
+		// Synthesise a paste with a file attachment. DataTransfer.items can
+		// hold File objects as of recent Chromium; wrap a small text blob as
+		// a "fake image" for the test.
+		const dt = new DataTransfer();
+		const fakeImage = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'pic.png', { type: 'image/png' });
+		dt.items.add(fakeImage);
+		const ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+		getRoot(env.container).dispatchEvent(ev);
+		expect(captured).not.toBeNull();
+		expect(captured!.length).toBe(1);
+		expect(captured![0]!.name).toBe('pic.png');
+		expect(captured![0]!.type).toBe('image/png');
+	});
+});
+

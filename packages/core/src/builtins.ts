@@ -1,49 +1,38 @@
 import { type BlockDescriptor, type MarkDescriptor, defineBlock, defineMark } from './blocks.js';
 
 // Marks ---------------------------------------------------------------------
+//
+// Mark `toDOM` returns an *empty wrapper* element. The editor inserts the
+// span's text (and any nested mark wrappers) inside it. Descriptors must NOT
+// set `textContent` themselves — doing so would clobber nested marks like
+// bold-inside-link. Use `payload.attrs` to read mark-level attributes
+// (`href`, `id`, etc.) and emit them as DOM attributes / classes only.
 
 export const boldMark = defineMark({
 	name: 'bold',
-	toDOM: (p) => {
-		const el = document.createElement('strong');
-		el.textContent = p.text;
-		return el;
-	},
+	toDOM: () => document.createElement('strong'),
 });
 
 export const italicMark = defineMark({
 	name: 'italic',
-	toDOM: (p) => {
-		const el = document.createElement('em');
-		el.textContent = p.text;
-		return el;
-	},
+	toDOM: () => document.createElement('em'),
 });
 
 export const underlineMark = defineMark({
 	name: 'underline',
-	toDOM: (p) => {
-		const el = document.createElement('u');
-		el.textContent = p.text;
-		return el;
-	},
+	toDOM: () => document.createElement('u'),
 });
 
 export const strikethroughMark = defineMark({
 	name: 'strikethrough',
-	toDOM: (p) => {
-		const el = document.createElement('s');
-		el.textContent = p.text;
-		return el;
-	},
+	toDOM: () => document.createElement('s'),
 });
 
 export const codeMark = defineMark({
 	name: 'code',
-	toDOM: (p) => {
+	toDOM: () => {
 		const el = document.createElement('code');
 		el.className = 'plim-inline-code';
-		el.textContent = p.text;
 		return el;
 	},
 });
@@ -52,7 +41,6 @@ export const linkMark = defineMark({
 	name: 'link',
 	toDOM: (p) => {
 		const el = document.createElement('a');
-		el.textContent = p.text;
 		const href = (p.attrs?.href as string | undefined) ?? '#';
 		el.setAttribute('href', href);
 		el.setAttribute('rel', 'noreferrer');
@@ -63,11 +51,7 @@ export const linkMark = defineMark({
 
 export const highlightMark = defineMark({
 	name: 'highlight',
-	toDOM: (p) => {
-		const el = document.createElement('mark');
-		el.textContent = p.text;
-		return el;
-	},
+	toDOM: () => document.createElement('mark'),
 });
 
 // Mention mark — atomic inline reference to an entity (user, page, etc.).
@@ -75,17 +59,18 @@ export const highlightMark = defineMark({
 // pill, and exposes its identifier via `data-mention-id` for downstream
 // hooks (analytics, click handlers, etc.). The presence of this mark on a
 // span signals to the editor that the span should behave as an atomic unit
-// (a single Backspace deletes the whole run rather than one character).
+// (a single Backspace deletes the whole run rather than one character) —
+// surfaced via `data-atomic="true"` for view-layer consumers.
 export const mentionMark = defineMark({
 	name: 'mention',
 	toDOM: (p) => {
 		const el = document.createElement('span');
 		el.className = 'plim-mention';
-		el.textContent = p.text;
 		const id = (p.attrs?.id as string | undefined) ?? '';
 		const href = p.attrs?.href as string | undefined;
 		if (id) el.setAttribute('data-mention-id', id);
 		if (href) el.setAttribute('data-mention-href', href);
+		el.setAttribute('data-atomic', 'true');
 		return el;
 	},
 });

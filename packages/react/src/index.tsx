@@ -1,5 +1,6 @@
 import * as React from 'react';
-import type { ActionContext, EditorState, PlimDriver, Snapshot, Transaction } from '@plim/core';
+import { createRoot, type Root } from 'react-dom/client';
+import type { ActionContext, BlockDescriptor, BlockPayload, EditorState, PlimDriver, Snapshot, Transaction } from '@plim/core';
 import { type AgnosticEditor, attachContainer, deriveEditor } from '@plim/editor';
 
 export type AsyncEventHandler<T = unknown> = (
@@ -74,25 +75,66 @@ export function PlimEditor(props: PlimEditorProps): React.ReactElement {
 
 	React.useEffect(() => {
 		if (!containerRef.current) return;
+		// Track React roots mounted into custom-block hosts. Keyed by the
+		// host element itself so we can detect removed blocks via
+		// `host.isConnected` after each transaction and unmount their roots
+		// to prevent leaks. The view re-uses block wrappers across renders
+		// but creates a fresh host element on every render of a custom
+		// block, so we also unmount roots whose host has been replaced.
+		const roots = new Map<HTMLElement, Root>();
+		const renderReactBlock = (host: HTMLElement, payload: BlockPayload, desc: BlockDescriptor) => {
+			let root = roots.get(host);
+			if (!root) {
+				root = createRoot(host);
+				roots.set(host, root);
+			}
+			const node = desc.toComponent?.(payload) as React.ReactNode;
+			root.render(<>{node}</>);
+		};
 		const editor = deriveEditor(props.plim, {
 			containerAdapter: attachContainer(() => containerRef.current),
 			...(props.initialContent ? { initialContent: props.initialContent } : {}),
 			readonly: props.readonly ?? false,
 			autoFocus: props.autoFocus ?? false,
+			renderReactBlock,
 		});
 		editorRef.current = editor;
 		if (props.handle) (props.handle as unknown as { __set: (e: AgnosticEditor | null) => void }).__set(editor);
 		const offTx = props.onTransaction ? editor.onTransaction(props.onTransaction) : undefined;
 		const offReady = props.whenReady ? (editor.whenReady(props.whenReady), undefined) : undefined;
+		// Reap roots whose host is no longer in the DOM after each tx. Run
+		// the reap on a microtask so the view's update has settled and any
+		// re-rendered hosts have been re-attached. Unmount must be deferred
+		// out of React's render cycle to avoid the "synchronously unmount
+		// during render" warning.
+		const offReap = editor.onTransaction(() => {
+			queueMicrotask(() => {
+				for (const [host, root] of roots) {
+					if (!host.isConnected) {
+						root.unmount();
+						roots.delete(host);
+					}
+				}
+			});
+		});
 		const offs: Array<() => void> = [];
 		for (const reg of props.asyncEventListeners ?? []) {
 			offs.push(editor.onAsyncEvent(reg.name, reg.handler));
 		}
 		return () => {
 			offTx?.();
+			offReap();
 			void offReady;
 			for (const off of offs) off();
 			editor.destroy();
+			// Unmount any remaining roots. Defer to a microtask for the same
+			// reason as above (createRoot's unmount cannot run synchronously
+			// inside another React commit).
+			const pending = Array.from(roots.values());
+			roots.clear();
+			queueMicrotask(() => {
+				for (const r of pending) r.unmount();
+			});
 			editorRef.current = null;
 			if (props.handle) (props.handle as unknown as { __set: (e: AgnosticEditor | null) => void }).__set(null);
 		};
@@ -309,6 +351,28 @@ export function HoverMenu(props: HoverMenuProps): React.ReactElement | null {
 }
 
 export { type AgnosticEditor, type Snapshot };
+
+// Mounts an editor-owned `[data-block-content]` element inside an editable
+// React block's DOM tree. The view passes the slot element via
+// `payload.content[0]`; the component renders `<ContentSlot el={payload.content[0]} />`
+// wherever it wants the editable text to live. The slot is appended to a thin
+// host span on every commit; if it's already a child the ref callback no-ops,
+// so React reconciliation never fights the editor's in-place text updates.
+// `display: contents` keeps the wrapper visually transparent so the slot
+// inherits whatever block-level styling the consumer applies to its own
+// chrome.
+export function ContentSlot(props: { el: HTMLElement | undefined }): React.ReactElement {
+	const { el } = props;
+	const setRef = React.useCallback(
+		(node: HTMLSpanElement | null) => {
+			if (!node || !el) return;
+			if (el.parentNode === node) return;
+			node.appendChild(el);
+		},
+		[el],
+	);
+	return <span ref={setRef} style={{ display: 'contents' }} />;
+}
 
 export {
 	slashCommandExtension,

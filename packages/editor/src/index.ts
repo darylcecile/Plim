@@ -2,6 +2,7 @@ import {
 	type ActionContext,
 	type ActionDescriptor,
 	type BlockDescriptor,
+	type BlockPayload,
 	type DocumentNode,
 	type EditorState,
 	type ExtensionShape,
@@ -21,6 +22,7 @@ import {
 } from '@plim/core';
 import { mountView, type View, type ViewOptions } from './view.js';
 import { runBuiltInBeforeAction, runBuiltInKey } from './builtin-actions.js';
+import { pastePlainText, pasteMarkdown, pasteHtml, looksLikeMarkdown, type PasteData } from './paste.js';
 
 export type ContainerAdapter = {
 	resolve(): HTMLElement | null;
@@ -35,6 +37,11 @@ export type DeriveEditorOptions = {
 	initialContent?: DocumentNode;
 	readonly?: boolean;
 	autoFocus?: boolean;
+	// Bridge for `BlockDescriptor.toComponent`: called with the host element
+	// the editor created inside a custom block's wrapper, the current payload,
+	// and the descriptor. The implementation is expected to mount/update its
+	// component tree into `host` (e.g., via `react-dom`'s `createRoot`).
+	renderReactBlock?: (host: HTMLElement, payload: BlockPayload, desc: BlockDescriptor) => void;
 };
 
 export type AgnosticEditor = {
@@ -218,6 +225,8 @@ export function deriveEditor(plim: PlimDriver, options: DeriveEditorOptions): Ag
 				onKeyboardEvent: handleKeyboardEvent,
 				onClipboardEvent: handleClipboardEvent,
 				onBeforeInput: handleBeforeInput,
+				onPaste: handlePaste,
+				...(options.renderReactBlock ? { renderReactBlock: options.renderReactBlock } : {}),
 			};
 			view = mountView(viewOptions);
 			view.update(state);
@@ -361,6 +370,35 @@ export function deriveEditor(plim: PlimDriver, options: DeriveEditorOptions): Ag
 			}
 		}
 		runBuiltInBeforeAction(text, state, ctx);
+	}
+
+	/**
+	 * Paste pipeline entry point. Returns true if it fully handled the paste
+	 * (caller skips its plain-text fallback), false to fall through. Phases
+	 * are added incrementally; the present phase covers plain text with
+	 * Notion-style block splitting on blank lines.
+	 */
+	function handlePaste(data: PasteData): boolean {
+		// Phase 4 — extension hook. Each extension that registered a
+		// `transformPaste` gets first crack at the payload, in registration
+		// order. The first to return `true` is treated as authoritative;
+		// later extensions and the built-in pipeline don't run.
+		for (const ext of extensionShapes) {
+			if (!ext.transformPaste) continue;
+			const handled = ext.transformPaste(data, ctx);
+			if (handled === true) return true;
+		}
+		// Phase 3 — HTML clipboard.
+		if (data.html && pasteHtml(data.html, ctx)) return true;
+		// Phase 2 — markdown auto-detect on plain text.
+		if (data.text && looksLikeMarkdown(data.text)) {
+			if (pasteMarkdown(data.text, ctx)) return true;
+		}
+		// Phase 1 — plain text with paragraph splitting.
+		if (data.text) {
+			return pastePlainText(data.text, ctx);
+		}
+		return false;
 	}
 
 	queueMicrotask(() => editor.mount());

@@ -633,3 +633,107 @@ a[data-mark-type="link"] {
 	background: rgba(55, 53, 47, 0.06);
 	color: var(--text);
 }
+
+/* ──────────────────────────────────────────────────────────────────────── */
+/* Custom block: Callout (toDOM example)                                    */
+/* ──────────────────────────────────────────────────────────────────────── */
+
+.plim-block-callout {
+	margin: 6px 0;
+}
+.plim-block-callout .plim-callout {
+	display: flex;
+	align-items: flex-start;
+	gap: 12px;
+	padding: 14px 16px;
+	border-radius: 6px;
+	background: rgba(241, 241, 239, 0.6);
+	border: 1px solid rgba(55, 53, 47, 0.08);
+	line-height: 1.5;
+}
+.plim-block-callout .plim-callout-icon {
+	flex: 0 0 auto;
+	user-select: none;
+	font-size: 20px;
+	line-height: 1.4;
+}
+.plim-block-callout .plim-callout > [data-block-content] {
+	flex: 1 1 auto;
+	min-width: 0;
+	outline: none;
+}
+.plim-block-callout .plim-callout[data-tone='info'] {
+	background: rgba(231, 243, 248, 0.7);
+	border-color: rgba(50, 113, 145, 0.18);
+}
+.plim-block-callout .plim-callout[data-tone='success'] {
+	background: rgba(228, 242, 232, 0.7);
+	border-color: rgba(57, 119, 73, 0.2);
+}
+.plim-block-callout .plim-callout[data-tone='warn'] {
+	background: rgba(251, 240, 217, 0.8);
+	border-color: rgba(176, 132, 25, 0.25);
+}
+.plim-block-callout .plim-callout[data-tone='danger'] {
+	background: rgba(251, 230, 230, 0.8);
+	border-color: rgba(180, 50, 50, 0.25);
+}
+
+/* ──────────────────────────────────────────────────────────────────────── */
+/* Custom block: Counter (toComponent example)                              */
+/* ──────────────────────────────────────────────────────────────────────── */
+
+.plim-block-counter {
+	margin: 6px 0;
+}
+.plim-block-counter .plim-counter {
+	display: inline-flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 14px 18px;
+	border-radius: 8px;
+	background: linear-gradient(135deg, #eef4ff 0%, #f9eef6 100%);
+	border: 1px solid rgba(55, 53, 47, 0.08);
+	min-width: 200px;
+}
+.plim-counter-title {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+.plim-counter-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+.plim-counter-value {
+	flex: 1 1 auto;
+	text-align: center;
+	font-size: 28px;
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+	color: var(--text);
+}
+.plim-counter-btn {
+	all: unset;
+	cursor: pointer;
+	width: 32px;
+	height: 32px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 6px;
+	background: rgba(255, 255, 255, 0.7);
+	border: 1px solid rgba(55, 53, 47, 0.1);
+	font-size: 18px;
+	color: var(--text);
+	transition: background 80ms ease;
+}
+.plim-counter-btn:hover {
+	background: rgba(255, 255, 255, 1);
+}
+.plim-counter-btn:active {
+	background: rgba(55, 53, 47, 0.06);
+}

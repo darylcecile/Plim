@@ -2,8 +2,10 @@ import {
 	type ActionContext,
 	type BlockDescriptor,
 	type BlockNode,
+	type BlockPayload,
 	type EditorState,
 	type MarkDescriptor,
+	type MarkPayload,
 	type Selection as PSelection,
 	type TextSpan,
 	type Transaction,
@@ -24,6 +26,21 @@ export type ViewOptions = {
 	onKeyboardEvent: (ev: KeyboardEvent) => void;
 	onClipboardEvent: (action: 'cut' | 'copy' | 'paste', ev: ClipboardEvent) => void;
 	onBeforeInput: (text: string) => void;
+	// Paste pipeline. Called for every paste event after `preventDefault`.
+	// Receives the normalised payload extracted from the native event.
+	// Returning `true` means the caller has fully handled the paste; the
+	// view will skip its legacy plain-text fallback. Returning `false`
+	// means "fall back" — the view will pass the plain text through
+	// `onBeforeInput` as before. The native event continues to fire
+	// `onClipboardEvent('paste', ev)` either way so action triggers keyed
+	// to the clipboard channel still run.
+	onPaste?: (data: { text: string; html: string; files: File[] }) => boolean;
+	// Optional bridge to render a custom block whose `BlockDescriptor.toComponent`
+	// is defined (e.g., a React component). The view creates a stable host
+	// element inside the block wrapper and hands it to this hook on every
+	// render so the consumer can mount/update its component tree. The view
+	// itself remains framework-agnostic.
+	renderReactBlock?: (host: HTMLElement, payload: BlockPayload, desc: BlockDescriptor) => void;
 };
 
 export type View = {
@@ -36,6 +53,26 @@ export type View = {
 const DATA_BLOCK_ID = 'data-block-id';
 const DATA_BLOCK_TYPE = 'data-block-type';
 const DATA_BLOCK_CONTENT = 'data-block-content';
+
+// Find this block's editable text container. Built-in / `toDOM` blocks place
+// `[data-block-content]` as a direct child of the wrapper, so the fast path
+// matches today's behavior. Editable React blocks render the slot inside their
+// React tree (one or more elements deep), so we fall back to a descendant
+// search that excludes anything inside a nested `[data-block-id]` (those
+// belong to child blocks and are reachable via path recursion). Returns null
+// for atomic / non-text blocks.
+function findBlockContent(blockEl: HTMLElement): HTMLElement | null {
+	const direct = blockEl.querySelector(`:scope > [${DATA_BLOCK_CONTENT}]`) as HTMLElement | null;
+	if (direct) return direct;
+	const candidates = blockEl.querySelectorAll(`[${DATA_BLOCK_CONTENT}]`);
+	for (const c of Array.from(candidates)) {
+		// Reject any candidate whose nearest block ancestor isn't this block —
+		// that would mean it lives inside a nested child block.
+		const ownerBlock = c.parentElement?.closest(`[${DATA_BLOCK_ID}]`);
+		if (ownerBlock === blockEl) return c as HTMLElement;
+	}
+	return null;
+}
 
 export function mountView(opts: ViewOptions): View {
 	const root = document.createElement('div');
@@ -243,8 +280,19 @@ export function mountView(opts: ViewOptions): View {
 	const onCopy = (ev: ClipboardEvent) => opts.onClipboardEvent('copy', ev);
 	const onCut = (ev: ClipboardEvent) => opts.onClipboardEvent('cut', ev);
 	const onPaste = (ev: ClipboardEvent) => {
-		const text = ev.clipboardData?.getData('text/plain');
-		if (text) {
+		const data = ev.clipboardData;
+		const text = data?.getData('text/plain') ?? '';
+		const html = data?.getData('text/html') ?? '';
+		const files = data?.files ? Array.from(data.files) : [];
+		// New pipeline first: if the consumer's handler reports it owned the
+		// paste, we're done (preventDefault already covered). Otherwise the
+		// legacy text-only path handles plain text (unchanged behaviour for
+		// any code path that hasn't opted into the new hook yet).
+		if (opts.onPaste) {
+			ev.preventDefault();
+			const handled = opts.onPaste({ text, html, files });
+			if (!handled && text) opts.onBeforeInput(text);
+		} else if (text) {
 			ev.preventDefault();
 			opts.onBeforeInput(text);
 		}
@@ -669,7 +717,7 @@ function updateBlockElement(el: HTMLElement, node: BlockNode, opts: ViewOptions,
 			}
 			const code = document.createElement('code');
 			code.setAttribute(DATA_BLOCK_CONTENT, 'true');
-			renderTextSpans(code, node.text ?? []);
+			renderTextSpans(code, node.text ?? [], opts.marks);
 			el.appendChild(code);
 			return;
 		}
@@ -710,14 +758,22 @@ function updateBlockElement(el: HTMLElement, node: BlockNode, opts: ViewOptions,
 			return;
 		}
 		default: {
+			// Custom block descriptor with `toDOM` or `toComponent` — delegate
+			// rendering. `toDOM` wins if both are defined (lets a descriptor
+			// supply a DOM fallback for SSR / non-React hosts).
+			const desc = opts.blocks.find((b) => b.name === node.type);
+			if (desc?.toDOM || (desc?.toComponent && opts.renderReactBlock)) {
+				renderCustomBlock(el, node, opts, desc);
+				return;
+			}
 			// generic text block (paragraph, heading)
-			ensureContentChild(el, node);
+			ensureContentChild(el, node, opts);
 			renderChildBlocks(el, node, opts, depth);
 		}
 	}
 }
 
-function ensureContentChild(el: HTMLElement, node: BlockNode) {
+function ensureContentChild(el: HTMLElement, node: BlockNode, opts: ViewOptions) {
 	let content = el.querySelector(`:scope > [${DATA_BLOCK_CONTENT}]`) as HTMLElement | null;
 	if (!content) {
 		content = document.createElement('span');
@@ -727,12 +783,112 @@ function ensureContentChild(el: HTMLElement, node: BlockNode) {
 		if (childContainer) el.insertBefore(content, childContainer);
 		else el.appendChild(content);
 	}
-	renderTextSpans(content, node.text ?? []);
+	renderTextSpans(content, node.text ?? [], opts.marks);
 	if (!node.text || node.text.length === 0) {
 		el.setAttribute('data-empty', 'true');
 	} else {
 		el.removeAttribute('data-empty');
 	}
+}
+
+// Custom-block render path: the descriptor's `toDOM` returns the entire
+// content tree for the block (everything that lives inside the wrapper's
+// drag/handles affordance group). The editor pre-renders the block's text
+// spans into a `<div data-block-content>` element using the registered mark
+// descriptors and exposes it via `payload.content` as `[contentEl]`. The
+// descriptor is responsible for placing that content element somewhere in
+// its returned tree if it wants the block to be editable; if the block has
+// no text (atomic blocks), `payload.content` is an empty array.
+//
+// If the descriptor instead defines `toComponent` (and the host has provided
+// `opts.renderReactBlock`), the view creates a stable host element inside
+// the wrapper and hands it to the bridge on every render. React-rendered
+// blocks are treated as atomic from the editor's perspective: caret entry
+// is disabled (`contenteditable=false`) and the component owns its DOM.
+// Editable React blocks are a follow-up; they would require the component
+// to render a `[data-block-content]` element that the editor can map text
+// into, and the bridge would need to coordinate that.
+function renderCustomBlock(el: HTMLElement, node: BlockNode, opts: ViewOptions, desc: BlockDescriptor) {
+	// Wipe non-handle children so we can re-render from scratch. Keeping the
+	// handle group avoids re-binding pointer/keyboard listeners on every tx.
+	for (const child of Array.from(el.childNodes)) {
+		if (child instanceof HTMLElement && child.classList.contains('plim-block-handles')) continue;
+		child.remove();
+	}
+	const isEmpty = !node.text || node.text.length === 0;
+	const textContent = (node.text ?? []).map((s) => s.text).join('');
+	if (desc.toDOM) {
+		let contentEl: HTMLElement | null = null;
+		if (node.text !== undefined) {
+			contentEl = document.createElement('div');
+			contentEl.setAttribute(DATA_BLOCK_CONTENT, 'true');
+			renderTextSpans(contentEl, node.text, opts.marks);
+		}
+		const payload: BlockPayload = {
+			id: node.id,
+			type: node.type,
+			attrs: node.attrs ?? {},
+			content: contentEl ? [contentEl] : [],
+			textContent,
+			isEmpty,
+		};
+		const result = desc.toDOM(payload);
+		el.appendChild(result);
+	} else if (desc.toComponent && opts.renderReactBlock) {
+		// Stable host so React reconciliation matches across renders. We
+		// reuse an existing host inside the wrapper (keyed by the block
+		// id) instead of recreating it on every render — otherwise
+		// component-local state would be torn down on every transaction
+		// because the bridge sees a fresh element and creates a new root.
+		// We wiped non-handle children at the top, so re-attach the host
+		// element if we previously stashed it on the wrapper.
+		const stash = el as unknown as { __plimReactHost?: HTMLElement; __plimReactContentEl?: HTMLElement };
+		let host: HTMLElement;
+		if (stash.__plimReactHost && stash.__plimReactHost.getAttribute('data-plim-react-block-id') === node.id) {
+			host = stash.__plimReactHost;
+		} else {
+			host = document.createElement('div');
+			host.setAttribute('data-plim-react-block-id', node.id);
+			host.setAttribute('contenteditable', 'false');
+			stash.__plimReactHost = host;
+		}
+		el.appendChild(host);
+		// Editable React blocks: when the descriptor's block has text we
+		// build (or reuse) a `[data-block-content]` element that the
+		// component is expected to mount somewhere in its tree via the
+		// React-side `<ContentSlot>` helper. The element is owned by the
+		// editor: we update its spans in-place via `renderTextSpans` and
+		// hand the *same* reference back to the component on every render
+		// so React's ref callback is a no-op after the initial stitch-in.
+		// `contenteditable=true` overrides the host's `false` so the user
+		// can type into the slot while the surrounding chrome stays inert.
+		let contentEl: HTMLElement | null = null;
+		if (node.text !== undefined) {
+			if (stash.__plimReactContentEl && stash.__plimReactContentEl.isConnected && host.contains(stash.__plimReactContentEl)) {
+				contentEl = stash.__plimReactContentEl;
+			} else {
+				contentEl = document.createElement('div');
+				contentEl.setAttribute(DATA_BLOCK_CONTENT, 'true');
+				contentEl.setAttribute('contenteditable', 'true');
+				stash.__plimReactContentEl = contentEl;
+			}
+			renderTextSpans(contentEl, node.text, opts.marks);
+		} else {
+			stash.__plimReactContentEl = undefined as unknown as HTMLElement;
+			delete (stash as Partial<typeof stash>).__plimReactContentEl;
+		}
+		const payload: BlockPayload = {
+			id: node.id,
+			type: node.type,
+			attrs: node.attrs ?? {},
+			content: contentEl ? [contentEl] : [],
+			textContent,
+			isEmpty,
+		};
+		opts.renderReactBlock(host, payload, desc);
+	}
+	if (isEmpty) el.setAttribute('data-empty', 'true');
+	else el.removeAttribute('data-empty');
 }
 
 function renderChildBlocks(el: HTMLElement, node: BlockNode, opts: ViewOptions, depth: number) {
@@ -758,7 +914,7 @@ function renderListItem(el: HTMLElement, node: BlockNode, opts: ViewOptions, dep
 		el.insertBefore(bullet, el.firstChild);
 	}
 	bullet.textContent = kind === 'bullet' ? '•' : `${listIndex}.`;
-	ensureContentChild(el, node);
+	ensureContentChild(el, node, opts);
 	renderChildBlocks(el, node, opts, depth);
 }
 
@@ -783,7 +939,7 @@ function renderTodo(el: HTMLElement, node: BlockNode, opts: ViewOptions, depth: 
 		el.insertBefore(chk, el.firstChild);
 	}
 	chk.checked = !!node.attrs?.checked;
-	ensureContentChild(el, node);
+	ensureContentChild(el, node, opts);
 	if (node.attrs?.checked) el.setAttribute('data-checked', 'true');
 	else el.removeAttribute('data-checked');
 	renderChildBlocks(el, node, opts, depth);
@@ -816,12 +972,12 @@ function renderToggle(el: HTMLElement, node: BlockNode, opts: ViewOptions, depth
 		trig.classList.remove('open');
 		el.removeAttribute('data-open');
 	}
-	ensureContentChild(el, node);
+	ensureContentChild(el, node, opts);
 	renderChildBlocks(el, node, opts, depth);
 }
 
 function renderQuote(el: HTMLElement, node: BlockNode, opts: ViewOptions, depth: number) {
-	ensureContentChild(el, node);
+	ensureContentChild(el, node, opts);
 	renderChildBlocks(el, node, opts, depth);
 }
 
@@ -1090,7 +1246,7 @@ function blockAtPath(blocks: BlockNode[], path: number[]): BlockNode | null {
 	return node;
 }
 
-function renderTextSpans(parent: HTMLElement, spans: TextSpan[]) {
+function renderTextSpans(parent: HTMLElement, spans: TextSpan[], marks: MarkDescriptor[]) {
 	parent.innerHTML = '';
 	if (spans.length === 0) {
 		// Use a zero-width br so the line is selectable
@@ -1099,7 +1255,7 @@ function renderTextSpans(parent: HTMLElement, spans: TextSpan[]) {
 	}
 	let lastText = '';
 	for (const span of spans) {
-		const node = renderSpan(span);
+		const node = renderSpan(span, marks);
 		parent.appendChild(node);
 		lastText = span.text;
 	}
@@ -1118,13 +1274,13 @@ function renderTextSpans(parent: HTMLElement, spans: TextSpan[]) {
 	}
 }
 
-function renderSpan(span: TextSpan): Node {
+function renderSpan(span: TextSpan, marks: MarkDescriptor[]): Node {
 	const text = document.createTextNode(span.text);
 	if (!span.marks || span.marks.length === 0) return text;
 	let outer: HTMLElement | null = null;
 	let inner: HTMLElement | null = null;
 	for (const mark of span.marks) {
-		const wrap = wrapForMark(mark.type, mark.attrs);
+		const wrap = wrapForMark(mark.type, mark.attrs, marks);
 		if (!outer) {
 			outer = wrap;
 			inner = wrap;
@@ -1137,7 +1293,20 @@ function renderSpan(span: TextSpan): Node {
 	return outer!;
 }
 
-function wrapForMark(type: string, attrs?: Record<string, unknown>): HTMLElement {
+// Look up a registered MarkDescriptor first; if it provides `toDOM`, delegate
+// fully and just stamp `data-mark-type` on the result for selection/CSS hooks.
+// Custom marks therefore have full control over their DOM. If no descriptor
+// (or no `toDOM`) is registered, fall back to a hardcoded mapping for the
+// historical built-ins so the editor still renders sensibly with an empty
+// `marks` registry (e.g., during partial setup or in tests).
+function wrapForMark(type: string, attrs: Record<string, unknown> | undefined, marks: MarkDescriptor[]): HTMLElement {
+	const desc = marks.find((m) => m.name === type);
+	if (desc?.toDOM) {
+		const payload: MarkPayload = { type, attrs: attrs ?? {}, text: '', content: null };
+		const el = desc.toDOM(payload);
+		el.setAttribute('data-mark-type', type);
+		return el;
+	}
 	let el: HTMLElement;
 	switch (type) {
 		case 'bold':
@@ -1164,18 +1333,6 @@ function wrapForMark(type: string, attrs?: Record<string, unknown>): HTMLElement
 		case 'highlight':
 			el = document.createElement('mark');
 			break;
-		case 'mention':
-			el = document.createElement('span');
-			el.className = 'plim-mention';
-			if (attrs?.id) el.setAttribute('data-mention-id', String(attrs.id));
-			if (attrs?.href) el.setAttribute('data-mention-href', String(attrs.href));
-			// Mentions are atomic — selecting/typing inside the pill should be
-			// treated as selecting the whole thing. `contenteditable=false`
-			// would block the cursor entirely; keeping it editable but marking
-			// it `data-atomic` lets us extend deletion behavior in the editor
-			// while leaving normal selection paint intact.
-			el.setAttribute('data-atomic', 'true');
-			break;
 		default:
 			el = document.createElement('span');
 			el.setAttribute('data-mark', type);
@@ -1201,7 +1358,7 @@ function pathOfBlockId(blocks: BlockNode[], id: string, parentPath: number[]): n
 function locateOffsetInDOM(rootEl: HTMLElement, path: number[], offset: number): { node: Node; offset: number } | null {
 	const blockEl = blockElementAtPath(rootEl, path);
 	if (!blockEl) return null;
-	const content = blockEl.querySelector(`:scope > [${DATA_BLOCK_CONTENT}]`) as HTMLElement | null;
+	const content = findBlockContent(blockEl);
 	if (!content) {
 		// non-text block — place caret in block element
 		return { node: blockEl, offset: 0 };
@@ -1253,7 +1410,7 @@ function locatePathOffsetFromNode(rootEl: HTMLElement, node: Node, offset: numbe
 	const blockEl = el;
 	const path = computePathOf(rootEl, blockEl);
 	if (!path) return null;
-	const content = blockEl.querySelector(`:scope > [${DATA_BLOCK_CONTENT}]`) as HTMLElement | null;
+	const content = findBlockContent(blockEl);
 	if (!content) return { path, offset: 0 };
 	const off = computeTextOffset(content, node, offset);
 	return { path, offset: off };

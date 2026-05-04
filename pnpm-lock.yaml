@@ -65,9 +65,15 @@ importers:
 
   packages/editor:
     dependencies:
+      '@darylcecile/sanitizer':
+        specifier: ^0.0.2
+        version: 0.0.2(typescript@5.9.3)
       '@plim/core':
         specifier: workspace:*
         version: link:../core
+      '@plim/markdown':
+        specifier: workspace:*
+        version: link:../markdown
 
   packages/markdown:
     dependencies:
@@ -185,6 +191,11 @@ packages:
   '@babel/types@7.29.0':
     resolution: {integrity: sha512-LwdZHpScM4Qz8Xw2iKSzS+cfglZzJGvofQICy7W7v4caru4EaAmyUuO6BGrbyQ2mYV11W0U8j5mBhd14dd3B0A==}
     engines: {node: '>=6.9.0'}
+
+  '@darylcecile/sanitizer@0.0.2':
+    resolution: {integrity: sha512-SIw6oH0BWIw1R0FCcZ7RZk0BnLzqtVRaMtVID+DvLHWKPJochLECwwAkj0hvWlpvEmmtBZCWPhIhiKSc3Uy4Eg==}
+    peerDependencies:
+      typescript: ^5.0.0
 
   '@esbuild/aix-ppc64@0.21.5':
     resolution: {integrity: sha512-1SDgH6ZSPTlggy1yI6+Dbkiz8xzpHJEVAlF/AM1tHPLsf5STom9rwtjE4hKAF20FfXXNTFqEYXyJNWh1GiZedQ==}
@@ -1271,6 +1282,10 @@ snapshots:
     dependencies:
       '@babel/helper-string-parser': 7.27.1
       '@babel/helper-validator-identifier': 7.28.5
+
+  '@darylcecile/sanitizer@0.0.2(typescript@5.9.3)':
+    dependencies:
+      typescript: 5.9.3
 
   '@esbuild/aix-ppc64@0.21.5':
     optional: true
