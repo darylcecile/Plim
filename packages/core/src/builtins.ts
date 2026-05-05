@@ -173,6 +173,26 @@ function headingTransform(level: 1 | 2 | 3): ToolbarItem {
 			b.and([
 				b.blockTypeIs('heading'),
 				b.predicate((ctx) => {
+					// Block-selection mode: every selected block must be a
+					// heading at this level. The companion `blockTypeIs`
+					// already enforced "all selected blocks are headings",
+					// so we only need to check the level here.
+					if (ctx.blockSelection && ctx.blockSelection.size > 0) {
+						const ids = ctx.blockSelection;
+						const stack = [...ctx.state.doc.children];
+						let seen = 0;
+						while (stack.length) {
+							const blk = stack.shift()!;
+							if (ids.has(blk.id)) {
+								if (blk.type !== 'heading') return false;
+								if ((blk.attrs?.level as number | undefined) !== level) return false;
+								seen++;
+								if (seen === ids.size) return true;
+							}
+							if (blk.children) stack.unshift(...blk.children);
+						}
+						return seen === ids.size && seen > 0;
+					}
 					const blk = getBlockAt(ctx.state.doc, ctx.state.selection.head.path);
 					return !!blk && blk.type === 'heading' && (blk.attrs?.level as number | undefined) === level;
 				}, `headingLevel${level}`),

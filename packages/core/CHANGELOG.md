@@ -1,5 +1,11 @@
 # @plim/core
 
+## 0.0.4
+
+### Patch Changes
+
+- Fixed bug with handle affordances and selection replacement
+
 ## 0.0.3
 
 ### Patch Changes

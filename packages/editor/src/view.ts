@@ -328,16 +328,19 @@ export function mountView(opts: ViewOptions): View {
 		return a.length - b.length;
 	}
 	function adjustPathAfterRemovals(target: readonly number[], removed: readonly (readonly number[])[]): number[] {
-		// For each removed path, if it shares the same parent as `target`
-		// at the same depth, and its index is less than target's at that
-		// depth, the target's index drops by one.
+		// For each removed path that shares the same parent prefix as
+		// `target` at the same depth, drop target's index by one. Crucially
+		// the comparison uses the ORIGINAL target index throughout the loop;
+		// mutating `result` during iteration would let a later (larger)
+		// removed path silently fail the shifted comparison and undercount
+		// the shifts.
 		const result = target.slice();
 		for (const r of removed) {
-			if (r.length > result.length) continue;
+			if (r.length > target.length) continue;
 			const parentDepth = r.length - 1;
-			const sameParent = r.slice(0, parentDepth).every((seg, i) => seg === result[i]);
+			const sameParent = r.slice(0, parentDepth).every((seg, i) => seg === target[i]);
 			if (!sameParent) continue;
-			if (r[parentDepth]! < result[parentDepth]!) result[parentDepth] = result[parentDepth]! - 1;
+			if (r[parentDepth]! < target[parentDepth]!) result[parentDepth] = result[parentDepth]! - 1;
 		}
 		return result;
 	}
@@ -2961,7 +2964,21 @@ function handleInsertParagraph(opts: ViewOptions) {
 	const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
 	const continueAs = desc?.continueAs;
 	if (!pathsEqual(sel.anchor.path, sel.head.path) || sel.anchor.offset !== sel.head.offset) {
-		// delete selection then split
+		// Cross-block range: delete first via the shared helper (it
+		// joins the end into the start), then split at the resulting
+		// caret position. We don't reuse `tx` for that step because the
+		// helper commits its own transaction; afterwards a fresh state
+		// read tells us where to split.
+		if (!pathsEqual(sel.anchor.path, sel.head.path)) {
+			deleteRangeAcrossBlocks(opts, sel.anchor.path, sel.anchor.offset, sel.head.path, sel.head.offset);
+			const after = opts.getState().selection;
+			const tx2 = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
+			if (continueAs) tx2.splitBlock(after.head.path, after.head.offset, continueAs);
+			else tx2.splitBlock(after.head.path, after.head.offset);
+			tx2.commit();
+			return;
+		}
+		// Same-block range: trim then split in one transaction.
 		const fromOff = Math.min(sel.anchor.offset, sel.head.offset);
 		const toOff = Math.max(sel.anchor.offset, sel.head.offset);
 		tx.replaceRange(sel.head.path, fromOff, toOff, []);
@@ -2992,10 +3009,14 @@ function handleDeleteBackward(opts: ViewOptions) {
 	const sel = state.selection;
 	const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
 	if (!pathsEqual(sel.anchor.path, sel.head.path) || sel.anchor.offset !== sel.head.offset) {
-		const fromOff = Math.min(sel.anchor.offset, sel.head.offset);
-		const toOff = Math.max(sel.anchor.offset, sel.head.offset);
-		tx.replaceRange(sel.head.path, fromOff, toOff, []);
-		tx.commit();
+		if (pathsEqual(sel.anchor.path, sel.head.path)) {
+			const fromOff = Math.min(sel.anchor.offset, sel.head.offset);
+			const toOff = Math.max(sel.anchor.offset, sel.head.offset);
+			tx.replaceRange(sel.head.path, fromOff, toOff, []);
+			tx.commit();
+			return;
+		}
+		deleteRangeAcrossBlocks(opts, sel.anchor.path, sel.anchor.offset, sel.head.path, sel.head.offset);
 		return;
 	}
 	if (sel.head.offset === 0) {
@@ -3020,10 +3041,17 @@ function handleDeleteForward(opts: ViewOptions) {
 	const block = blockAt(state.doc.children, sel.head.path);
 	const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
 	if (!pathsEqual(sel.anchor.path, sel.head.path) || sel.anchor.offset !== sel.head.offset) {
-		const fromOff = Math.min(sel.anchor.offset, sel.head.offset);
-		const toOff = Math.max(sel.anchor.offset, sel.head.offset);
-		tx.replaceRange(sel.head.path, fromOff, toOff, []);
-		tx.commit();
+		// Single-block range stays here (cheaper, doesn't pay the
+		// flattenBlocks cost). Cross-block ranges route through the
+		// shared helper that trims start/end and joins what's left.
+		if (pathsEqual(sel.anchor.path, sel.head.path)) {
+			const fromOff = Math.min(sel.anchor.offset, sel.head.offset);
+			const toOff = Math.max(sel.anchor.offset, sel.head.offset);
+			tx.replaceRange(sel.head.path, fromOff, toOff, []);
+			tx.commit();
+			return;
+		}
+		deleteRangeAcrossBlocks(opts, sel.anchor.path, sel.anchor.offset, sel.head.path, sel.head.offset);
 		return;
 	}
 	if (block && sel.head.offset >= blockTextLength(block)) {
@@ -3069,15 +3097,110 @@ function wordBoundaryForward(text: string, offset: number): number {
 	return i;
 }
 
+function comparePathsTopLevel(a: readonly number[], b: readonly number[]): number {
+	const min = Math.min(a.length, b.length);
+	for (let i = 0; i < min; i++) {
+		if (a[i]! !== b[i]!) return a[i]! - b[i]!;
+	}
+	return a.length - b.length;
+}
+
+function adjustPathAfterRemovalsTopLevel(
+	target: readonly number[],
+	removed: readonly (readonly number[])[],
+): number[] {
+	// Count, per ancestor depth, how many removed siblings sat strictly
+	// before the *original* target index at that depth (using the ORIGINAL
+	// target — not the running result — as the comparison anchor; otherwise
+	// each shift swallows a removal that should still count, leaving the
+	// adjusted path one short of where it actually lives now).
+	const result = target.slice();
+	for (const r of removed) {
+		if (r.length > target.length) continue;
+		const parentDepth = r.length - 1;
+		const sameParent = r.slice(0, parentDepth).every((seg, i) => seg === target[i]);
+		if (!sameParent) continue;
+		if (r[parentDepth]! < target[parentDepth]!) result[parentDepth] = result[parentDepth]! - 1;
+	}
+	return result;
+}
+
+// Removes content from `(startPath, startOffset)` through `(endPath, endOffset)`
+// in document order. Handles both intra-block (single replaceRange) and
+// cross-block (trim start tail, trim end head, drop middles, joinBackward end
+// into start) cases. Mirrors the closure-local `deleteCrossBlockRange` used by
+// the cut handler so Backspace/Delete/word/line variants behave consistently
+// when the user has selected text spanning multiple blocks. Caret lands at
+// `(startPath, startOffset)` regardless.
+function deleteRangeAcrossBlocks(
+	opts: ViewOptions,
+	startPathIn: readonly number[],
+	startOffset: number,
+	endPathIn: readonly number[],
+	endOffset: number,
+): void {
+	const startPath = startPathIn as number[];
+	const endPath = endPathIn as number[];
+	const state = opts.getState();
+	const flat = flattenBlocks(state.doc);
+	const startIdx = flat.findIndex((e) => pathsEqual(e.path, startPath));
+	const endIdx = flat.findIndex((e) => pathsEqual(e.path, endPath));
+	const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
+	if (startIdx < 0 || endIdx < 0) return;
+	if (pathsEqual(startPath, endPath)) {
+		const fromOff = Math.min(startOffset, endOffset);
+		const toOff = Math.max(startOffset, endOffset);
+		if (fromOff !== toOff) {
+			tx.replaceRange(startPath as number[], fromOff, toOff, []);
+			tx.setSelection({
+				anchor: { path: startPath as number[], offset: fromOff },
+				head: { path: startPath as number[], offset: fromOff },
+			});
+			tx.commit();
+		}
+		return;
+	}
+	// Normalise so start precedes end in doc order.
+	let s = { path: startPath as number[], offset: startOffset, idx: startIdx };
+	let e = { path: endPath as number[], offset: endOffset, idx: endIdx };
+	if (s.idx > e.idx) {
+		const tmp = s;
+		s = e;
+		e = tmp;
+	}
+	const startBlock = flat[s.idx]!.block;
+	const startLen = startBlock.text !== undefined ? blockTextLength(startBlock) : 0;
+	const middleEntries = flat.slice(s.idx + 1, e.idx);
+	const middles: number[][] = [];
+	for (const m of middleEntries) {
+		const isUnderAnother = middleEntries.some(
+			(o) => o !== m && o.path.length < m.path.length && o.path.every((seg, i) => seg === m.path[i]),
+		);
+		if (!isUnderAnother) middles.push(m.path.slice());
+	}
+	if (startBlock.text !== undefined && s.offset < startLen) {
+		tx.replaceRange(s.path, s.offset, startLen, []);
+	}
+	const endBlock = flat[e.idx]!.block;
+	if (endBlock.text !== undefined && e.offset > 0) {
+		tx.replaceRange(e.path, 0, e.offset, []);
+	}
+	const removeOrder = [...middles].sort((a, b) => comparePathsTopLevel(b, a));
+	for (const p of removeOrder) tx.removeBlock(p);
+	const adjustedEndPath = adjustPathAfterRemovalsTopLevel(e.path, middles);
+	tx.joinBackward(adjustedEndPath);
+	tx.setSelection({
+		anchor: { path: s.path, offset: s.offset },
+		head: { path: s.path, offset: s.offset },
+	});
+	tx.commit();
+}
+
 function deleteSelectionIfAny(opts: ViewOptions): boolean {
 	const state = opts.getState();
 	const sel = state.selection;
 	if (pathsEqual(sel.anchor.path, sel.head.path) && sel.anchor.offset === sel.head.offset) return false;
-	const tx = (opts as unknown as { editor: { createTransaction(): Transaction } }).editor.createTransaction();
-	const fromOff = Math.min(sel.anchor.offset, sel.head.offset);
-	const toOff = Math.max(sel.anchor.offset, sel.head.offset);
-	tx.replaceRange(sel.head.path, fromOff, toOff, []);
-	tx.commit();
+	deleteRangeAcrossBlocks(opts, sel.anchor.path, sel.anchor.offset, sel.head.path, sel.head.offset);
 	return true;
 }
 

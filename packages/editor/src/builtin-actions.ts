@@ -152,7 +152,7 @@ function outdent(state: EditorState, ctx: ActionContext, path: number[]): void {
 
 const LINE_RULES: Array<{ re: RegExp; when?: (block: BlockNode) => boolean; apply: (m: RegExpMatchArray, ctx: ActionContext, path: number[]) => void }> = [
 	{
-		re: /^(#{1,3}) $/,
+		re: /^(#{1,3}) /,
 		apply: (m, ctx, path) => {
 			const level = m[1]!.length;
 			const tx = ctx.createTransaction();
@@ -163,7 +163,7 @@ const LINE_RULES: Array<{ re: RegExp; when?: (block: BlockNode) => boolean; appl
 		},
 	},
 	{
-		re: /^[-*+] $/,
+		re: /^[-*+] /,
 		apply: (_m, ctx, path) => {
 			const tx = ctx.createTransaction();
 			tx.replaceRange(path, 0, 2, []);
@@ -173,7 +173,7 @@ const LINE_RULES: Array<{ re: RegExp; when?: (block: BlockNode) => boolean; appl
 		},
 	},
 	{
-		re: /^1\. $/,
+		re: /^1\. /,
 		apply: (_m, ctx, path) => {
 			const tx = ctx.createTransaction();
 			tx.replaceRange(path, 0, 3, []);
@@ -186,7 +186,7 @@ const LINE_RULES: Array<{ re: RegExp; when?: (block: BlockNode) => boolean; appl
 		// `[ ] ` or `[x] ` — only upgrade an empty bulleted_list_item to a to_do.
 		// Rejects `[ ] ` typed in a fresh paragraph (and any non-bullet block)
 		// so we don't surprise users who actually want literal brackets.
-		re: /^\[([ xX]?)\] $/,
+		re: /^\[([ xX]?)\] /,
 		when: (b) => b.type === 'bulleted_list_item',
 		apply: (m, ctx, path) => {
 			const checked = (m[1] ?? '').toLowerCase() === 'x';
@@ -198,7 +198,7 @@ const LINE_RULES: Array<{ re: RegExp; when?: (block: BlockNode) => boolean; appl
 		},
 	},
 	{
-		re: /^> $/,
+		re: /^> /,
 		apply: (_m, ctx, path) => {
 			const tx = ctx.createTransaction();
 			tx.replaceRange(path, 0, 2, []);
@@ -208,7 +208,7 @@ const LINE_RULES: Array<{ re: RegExp; when?: (block: BlockNode) => boolean; appl
 		},
 	},
 	{
-		re: /^>>> $/,
+		re: /^>>> /,
 		apply: (_m, ctx, path) => {
 			const tx = ctx.createTransaction();
 			tx.replaceRange(path, 0, 4, []);
@@ -293,10 +293,98 @@ function applyAsteriskItalic(m: RegExpMatchArray, ctx: ActionContext, path: numb
  * Insert text at caret; then run input rules over the resulting text.
  * Returns true if any rule fired (caller should not insert again).
  */
+function comparePaths(a: readonly number[], b: readonly number[]): number {
+	const min = Math.min(a.length, b.length);
+	for (let i = 0; i < min; i++) {
+		if (a[i]! !== b[i]!) return a[i]! - b[i]!;
+	}
+	return a.length - b.length;
+}
+
+function adjustPathAfterRemovals(
+	target: readonly number[],
+	removed: readonly (readonly number[])[],
+): number[] {
+	const result = target.slice();
+	for (const r of removed) {
+		if (r.length > target.length) continue;
+		const parentDepth = r.length - 1;
+		const sameParent = r.slice(0, parentDepth).every((seg, i) => seg === target[i]);
+		if (!sameParent) continue;
+		if (r[parentDepth]! < target[parentDepth]!) result[parentDepth] = result[parentDepth]! - 1;
+	}
+	return result;
+}
+
+// Deletes a range that spans multiple blocks. Trims the start block's tail,
+// trims the end block's head, removes outermost middle blocks in reverse
+// doc-order, then joins the (now-adjacent) end block back into the start —
+// matching `deleteRangeAcrossBlocks` in view.ts. Caller commits ctx's
+// next transaction; this function commits its own internal transaction so
+// the caller can read fresh state immediately afterwards.
+function deleteCrossBlockRangeViaCtx(
+	state: EditorState,
+	ctx: ActionContext,
+	start: { path: number[]; offset: number },
+	end: { path: number[]; offset: number },
+): { path: number[]; offset: number } | null {
+	const flat = flattenBlocks(state.doc);
+	let startIdx = flat.findIndex((e) => pathsEqual(e.path, start.path));
+	let endIdx = flat.findIndex((e) => pathsEqual(e.path, end.path));
+	if (startIdx < 0 || endIdx < 0) return null;
+	let s = { path: start.path.slice(), offset: start.offset, idx: startIdx };
+	let e = { path: end.path.slice(), offset: end.offset, idx: endIdx };
+	if (s.idx > e.idx) {
+		const tmp = s;
+		s = e;
+		e = tmp;
+	}
+	const startBlock = flat[s.idx]!.block;
+	const startLen = startBlock.text !== undefined ? blockTextLength(startBlock) : 0;
+	const middleEntries = flat.slice(s.idx + 1, e.idx);
+	const middles: number[][] = [];
+	for (const m of middleEntries) {
+		const isUnderAnother = middleEntries.some(
+			(o) => o !== m && o.path.length < m.path.length && o.path.every((seg, i) => seg === m.path[i]),
+		);
+		if (!isUnderAnother) middles.push(m.path.slice());
+	}
+	const tx = ctx.createTransaction();
+	if (startBlock.text !== undefined && s.offset < startLen) {
+		tx.replaceRange(s.path, s.offset, startLen, []);
+	}
+	const endBlock = flat[e.idx]!.block;
+	if (endBlock.text !== undefined && e.offset > 0) {
+		tx.replaceRange(e.path, 0, e.offset, []);
+	}
+	const removeOrder = [...middles].sort((a, b) => comparePaths(b, a));
+	for (const p of removeOrder) tx.removeBlock(p);
+	const adjustedEndPath = adjustPathAfterRemovals(e.path, middles);
+	tx.joinBackward(adjustedEndPath);
+	tx.setSelection({
+		anchor: { path: s.path, offset: s.offset },
+		head: { path: s.path, offset: s.offset },
+	});
+	tx.commit();
+	return { path: s.path, offset: s.offset };
+}
+
 export function runBuiltInBeforeAction(text: string, state: EditorState, ctx: ActionContext): boolean {
-	const sel = state.selection;
+	let sel = state.selection;
+	let activeState = state;
+	// Cross-block selection: collapse it first by deleting the range, then
+	// proceed with the regular insert path against the joined block. We
+	// commit the delete in its own transaction so we can read the merged
+	// state from ctx.state and let the rest of the function operate on
+	// what the user will visually see typing into.
+	if (!pathsEqual(sel.anchor.path, sel.head.path)) {
+		const collapsed = deleteCrossBlockRangeViaCtx(state, ctx, sel.anchor, sel.head);
+		if (!collapsed) return false;
+		activeState = ctx.state;
+		sel = activeState.selection;
+	}
 	const path = sel.head.path;
-	const block = getBlockAt(state.doc, path);
+	const block = getBlockAt(activeState.doc, path);
 	if (!block) return false;
 
 	// Insert text first into the doc. New chars inherit the marks at the
@@ -332,12 +420,17 @@ export function runBuiltInBeforeAction(text: string, state: EditorState, ctx: Ac
 	if (!nextBlock) return false;
 	const txt = plainText(nextBlock);
 
-	// Line rules: only when caret is at end-of-line and text is exactly one line
+	// Line rules: fire when the typed character completes a known prefix at
+	// the very start of the block. Most rules accept trailing text and only
+	// replace the prefix range — but only if the caret is parked immediately
+	// after the prefix, so typing inside an existing line that happens to
+	// begin with `- ` / `> ` / etc. doesn't accidentally re-trigger.
 	if (text === ' ' || text === '`' || text === '-') {
+		const caret = next.selection.head.offset;
 		for (const rule of LINE_RULES) {
 			if (rule.when && !rule.when(nextBlock)) continue;
 			const m = txt.match(rule.re);
-			if (m) {
+			if (m && caret === m[0].length) {
 				rule.apply(m, ctx, path);
 				return true;
 			}

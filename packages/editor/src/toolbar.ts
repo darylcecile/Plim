@@ -139,7 +139,15 @@ export function mountToolbar(opts: ToolbarMountOptions): ToolbarMount {
 	});
 
 	function valCtx(): ValidationContext {
-		return { state: opts.getState(), supportsDecoration: opts.supportsDecoration };
+		// Pass the block-selection through so rules like `blockTypeIs`
+		// answer about the actively-selected blocks, not the previous
+		// text caret position. Only attach the field when there's a
+		// non-empty selection so default text-mode evaluations stay on
+		// their existing path.
+		const blockSel = opts.getBlockSelection();
+		const ctx: ValidationContext = { state: opts.getState(), supportsDecoration: opts.supportsDecoration };
+		if (blockSel.size > 0) ctx.blockSelection = blockSel;
+		return ctx;
 	}
 
 	function isVisible(resolved: ResolvedItem, ctx: ValidationContext): boolean {
