@@ -1,0 +1,32 @@
+{
+  "name": "plim",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.32.1",
+  "license": "SEE LICENSE IN LICENSE",
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:browser": "vitest run --config vitest.browser.config.ts",
+    "dev:notion": "pnpm --filter @plim/example-notion-clone dev",
+    "build:notion": "pnpm --filter @plim/example-notion-clone build",
+    "changeset": "changeset",
+    "version": "changeset version",
+    "release": "pnpm -r --filter='@plim/*' --filter='!@plim/example-*' build && changeset publish"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.31.0",
+    "@vitest/browser": "^2.1.9",
+    "@vitest/ui": "^2.1.9",
+    "playwright": "^1.59.1",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.9"
+  }
+}

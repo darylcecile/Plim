@@ -1,0 +1,192 @@
+Dazza Public License 1.0
+
+Copyright (c) 2026 Daryl Cecile
+
+This License applies to the library package that includes this
+License, except for files or materials that clearly state a different license.
+
+Documentation, examples, starter templates, logos, names, mascots, screenshots,
+and other brand assets are not licensed under this License unless expressly
+stated otherwise.
+
+1. Definitions
+
+"Library" means the source code, object code, build output, and other software
+files of the library package covered by this License.
+
+"Modified Library" means any version of the Library that has been changed,
+adapted, translated, rearranged, transformed, or otherwise modified.
+
+"Application" means software, a website, service, product, plugin, adapter,
+theme, extension, or other work that imports, links to, bundles, depends on, or
+uses the Library without modifying the Library itself.
+
+"Source Code" means the preferred form of the Library for making modifications,
+including build scripts, configuration files, and other files reasonably needed
+to build, inspect, and modify the Library.
+
+"Distribute" means to provide, transfer, publish, sell, sublicense, make
+available, or otherwise give a copy to another person or entity.
+
+2. Grant of Rights
+
+Subject to this License, you may use, copy, modify, build, compile, publish,
+distribute, sell, and otherwise deal in the Library for any purpose, including
+personal, academic, internal, commercial, and production use.
+
+You may use the Library in open-source, source-available, private, or
+closed-source Applications.
+
+3. Applications Using the Library
+
+Merely importing, linking to, bundling, depending on, or using the Library does
+not make an Application a Modified Library.
+
+Applications may be licensed under any terms, including proprietary terms,
+provided that the Library itself and any Modified Library remain subject to this
+License.
+
+Plugins, adapters, themes, extensions, and similar works that use the Library
+without copying or modifying the Library may be licensed under any terms.
+
+4. Modified Libraries
+
+If you Distribute a Modified Library, you must:
+
+(a) license the Modified Library under this License only;
+(b) make the Source Code of the Modified Library reasonably available under this
+    License;
+(c) include this License;
+(d) preserve all copyright notices, license notices, warranty disclaimers,
+    liability limitations, and third-party notices included with the Library;
+(e) clearly state that you modified the Library; and
+(f) include a brief description, date, changelog, commit history, or other
+    reasonable reference identifying the material modifications.
+
+You may Distribute minified, bundled, compiled, or otherwise transformed copies
+of a Modified Library, provided that the corresponding readable Source Code of
+the Modified Library is also reasonably available.
+
+Source Code may be made reasonably available by including it with the
+distribution, publishing it in a public repository, providing a download link,
+publishing it as a source package, or providing another practical method of
+access.
+
+The Source Code for a Modified Library must remain available for as long as you
+Distribute that Modified Library.
+
+5. Private Modifications
+
+You may make private or internal modifications to the Library without publishing
+or sharing those modifications, provided that you do not Distribute the Modified
+Library.
+
+Use of a Modified Library in a private, internal, or hosted environment does not
+by itself require publication of Source Code.
+
+6. No Sublicensing
+
+You may not sublicense the Library or any Modified Library under different
+terms.
+
+Each recipient receives rights directly under this License from the copyright
+holders and contributors.
+
+7. No Additional Restrictions
+
+You may not impose legal terms, technical measures, license fees, access
+controls, or other restrictions that prevent recipients from exercising the
+rights granted by this License.
+
+You may add your own notices, attribution, warranty statements, or service terms
+for your own separate work, provided they do not restrict the Library or any
+Modified Library in a way that conflicts with this License.
+
+8. Compatibility with Other Software
+
+You may combine the Library with third-party software, including open-source or
+proprietary software, provided that you comply with this License and with all
+applicable third-party licenses.
+
+Third-party code included in or distributed with the Library remains subject to
+its own license terms.
+
+9. Technical Restrictions
+
+This License does not require the preservation of license checks, telemetry,
+attribution mechanisms, analytics, update checks, or similar technical features.
+
+You may remove or disable such mechanisms in a Modified Library, provided that
+you continue to comply with this License.
+
+10. Patents
+
+Each contributor grants you a perpetual, worldwide, royalty-free,
+non-exclusive, irrevocable patent license to make, use, sell, offer for sale,
+import, and otherwise run, modify, and distribute the Library and that
+contributor's contributions.
+
+This patent license applies only to patent claims that the contributor could
+license and that are necessarily infringed by their contribution alone or by
+combination of their contribution with the Library.
+
+If you initiate a patent claim alleging that the Library, a Modified Library, or
+a contributor's contribution infringes a patent, then any patent rights granted
+to you under this License terminate as of the date the claim is filed.
+
+11. Trademarks and Branding
+
+This License does not grant rights to use any names, logos, mascots, trade
+marks, service marks, screenshots, or other brand assets of the copyright
+holder or the project, except as necessary to truthfully identify the origin of
+the Library.
+
+You may describe a Modified Library as a modified version or fork of the
+Library, but you must not imply that it is official, endorsed, sponsored, or
+approved by the original project unless you have separate written permission.
+
+12. Selling Copies
+
+You may sell copies of the Library or a Modified Library, provided that you
+comply with this License.
+
+Selling a copy does not allow you to restrict recipients from exercising the
+rights granted by this License.
+
+13. Termination and Reinstatement
+
+If you violate this License, your rights under this License terminate
+automatically.
+
+If this is your first violation of this License and you cure the violation
+within 30 days after becoming aware of it, your rights are automatically
+reinstated.
+
+For repeated, uncured, or intentional violations, reinstatement requires written
+permission from the copyright holder.
+
+14. No Warranty
+
+THE LIBRARY IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR
+A PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT, ACCURACY, RELIABILITY, OR
+AVAILABILITY.
+
+15. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE AUTHORS, COPYRIGHT HOLDERS, AND
+CONTRIBUTORS SHALL NOT BE LIABLE FOR ANY CLAIM, DAMAGES, LOSSES, COSTS, OR
+OTHER LIABILITY, WHETHER IN CONTRACT, TORT, NEGLIGENCE, STRICT LIABILITY, OR
+OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE LIBRARY OR THE USE
+OF OR OTHER DEALINGS IN THE LIBRARY.
+
+IF LIABILITY CANNOT BE FULLY EXCLUDED, THEN THE TOTAL LIABILITY OF THE AUTHORS,
+COPYRIGHT HOLDERS, AND CONTRIBUTORS IS LIMITED TO THE AMOUNT YOU PAID FOR THE
+LIBRARY, IF ANY.
+
+16. Version
+
+This License grants rights only under Daz Public License 1.0.
+
+No later version of this License applies unless the copyright holder expressly
+states otherwise.

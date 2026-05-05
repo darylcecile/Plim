@@ -1,0 +1,48 @@
+{
+  "name": "@plim/markdown",
+  "version": "0.0.3",
+  "description": "Plim markdown: parse Markdown into Plim documents and serialize Plim back to Markdown.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "Daryl Cecile <darylcecile@gmail.com>",
+  "homepage": "https://github.com/darylcecile/plim#readme",
+  "bugs": {
+    "url": "https://github.com/darylcecile/plim/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/darylcecile/plim.git",
+    "directory": "packages/markdown"
+  },
+  "keywords": [
+    "plim",
+    "markdown",
+    "block-editor",
+    "parser",
+    "serializer"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@plim/core": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "prepublishOnly": "pnpm build"
+  }
+}

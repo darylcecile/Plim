@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/editor" },
+    { "path": "./packages/markdown" },
+    { "path": "./packages/react" }
+  ]
+}

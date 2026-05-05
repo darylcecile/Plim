@@ -1,0 +1,59 @@
+{
+  "name": "@plim/react",
+  "version": "0.0.3",
+  "description": "Plim React bindings: define block descriptors with React components and host them inside a Plim editor.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "Daryl Cecile <darylcecile@gmail.com>",
+  "homepage": "https://github.com/darylcecile/plim#readme",
+  "bugs": {
+    "url": "https://github.com/darylcecile/plim/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/darylcecile/plim.git",
+    "directory": "packages/react"
+  },
+  "keywords": [
+    "plim",
+    "react",
+    "block-editor",
+    "rich-text",
+    "notion"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@plim/core": "workspace:*",
+    "@plim/editor": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "prepublishOnly": "pnpm build"
+  }
+}

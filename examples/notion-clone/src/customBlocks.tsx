@@ -1,0 +1,211 @@
+import * as React from 'react';
+import { defineBlock, type EditorHandle } from '@plim/core';
+
+// ──────────────────────────────────────────────────────────────────────────
+// Callout (toDOM example)
+// ──────────────────────────────────────────────────────────────────────────
+//
+// A custom block defined entirely with a DOM `toDOM` function. The editor
+// pre-renders the block's text spans into a `[data-block-content]` element
+// (using the registered marks) and exposes it via `payload.content`. The
+// descriptor wraps that content with a tone-coloured pill on the left and
+// stamps a `data-callout-tone` attribute on the wrapper so CSS can style
+// each tone independently. Enter splits the callout the same way it splits
+// a paragraph, Backspace at the start joins it with the previous block —
+// all the standard editing behaviour Just Works because the descriptor
+// opted into the same `[data-block-content]` contract built-in blocks use.
+
+export type CalloutTone = 'info' | 'success' | 'warn' | 'danger';
+
+const CALLOUT_ICONS: Record<CalloutTone, string> = {
+	info: '💡',
+	success: '✅',
+	warn: '⚠️',
+	danger: '🛑',
+};
+
+export const calloutBlock = defineBlock({
+	name: 'callout',
+	type: 'standalone',
+	supportsDecoration: true,
+	// Notion-style: Enter at the end of a callout starts a fresh paragraph
+	// rather than cloning the callout. The callout is "structural" — its
+	// chrome (icon + tone background) is opt-in per-block, so propagating
+	// it on every Enter feels surprising. The descriptor opts in via
+	// `continueAs`; the editor's split handler reads it and passes the
+	// type to `tx.splitBlock(path, offset, newType)`.
+	continueAs: 'paragraph',
+	// Markdown serialization: emit as a blockquote with a tone-prefixed
+	// inline marker so we can round-trip through commonmark hosts that
+	// don't know about callouts. The `> [!info]` GFM-style alert syntax
+	// is recognized by GitHub / Obsidian / many Notion exporters.
+	toMarkdown: (payload, ctx) => {
+		const tone = String(payload.attrs.tone ?? 'info').toUpperCase();
+		// Use `ctx.spans` (raw text spans with marks) + `ctx.serializeInline`
+		// so bold/italic/code/links inside the callout round-trip through
+		// markdown cleanly. The GFM-style `> [!INFO]` alert syntax is
+		// recognized by GitHub, Obsidian, and most markdown parsers that
+		// support callouts; consumers that don't will fall back to a
+		// regular blockquote with an `[!INFO]` prefix.
+		const inline = ctx.serializeInline(ctx.spans);
+		return [`> [!${tone}]\n> ${inline}`];
+	},
+	// Inverse of `toMarkdown`: when pasting from a markdown source (e.g.
+	// another editor, or a plain-text channel that doesn't carry the
+	// `application/x-plim` envelope) we still want `> [!INFO]\n> body`
+	// to land as a callout — not as a blockquote. The hook returns
+	// `null` for any line that isn't our shape, letting the parser fall
+	// through to the built-in blockquote handler.
+	fromMarkdown: ({ lines, index, parseInline }) => {
+		const head = lines[index] ?? '';
+		const m = /^>\s*\[!(\w+)\]\s*$/.exec(head);
+		if (!m) return null;
+		const tone = m[1]!.toLowerCase();
+		const next = lines[index + 1] ?? '';
+		const body = /^>\s?(.*)$/.exec(next);
+		const text = body ? body[1]! : '';
+		return {
+			block: { id: 'tmp', type: 'callout', attrs: { tone }, text: parseInline(text) },
+			consumed: body ? 2 : 1,
+		};
+	},
+	toDOM: (payload) => {
+		const tone = (payload.attrs.tone as CalloutTone | undefined) ?? 'info';
+		const wrap = document.createElement('div');
+		wrap.className = 'plim-callout';
+		wrap.setAttribute('data-tone', tone);
+
+		const icon = document.createElement('span');
+		icon.className = 'plim-callout-icon';
+		icon.setAttribute('contenteditable', 'false');
+		icon.textContent = CALLOUT_ICONS[tone];
+		wrap.appendChild(icon);
+
+		// `payload.content` is a `[contentEl]` array containing the editor's
+		// pre-rendered `<div data-block-content>` with all the text spans
+		// (and any nested mark wrappers) already mounted. Place it where
+		// the editable text should appear inside the callout.
+		for (const node of payload.content as HTMLElement[]) wrap.appendChild(node);
+		return wrap;
+	},
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// Counter (toComponent example)
+// ──────────────────────────────────────────────────────────────────────────
+//
+// A custom block defined with a React `toComponent`. The view layer is
+// framework-agnostic so it can't import React directly; instead `<PlimEditor>`
+// bridges by mounting a React root into a stable host element the editor
+// places inside the block wrapper. The bridge re-renders the component on
+// every transaction (passing fresh props from `payload.attrs`) but keeps
+// the same host element so component-local state (`useState`, refs, etc.)
+// survives across edits. Component-driven blocks are atomic from the
+// editor's perspective: the caret can't enter them and `payload.content`
+// is empty — the React tree owns its DOM entirely.
+//
+// Demonstrated capabilities:
+//  - `payload.attrs` flows in as props on every render.
+//  - `useState` survives transactions on other blocks (component identity
+//    is preserved by the stable host).
+//  - The component can commit transactions itself by closing over the
+//    editor handle, e.g. to persist data into `attrs` so the count
+//    survives a reload / undo.
+
+function CounterCard(props: {
+	editor: EditorHandle;
+	id: string;
+	title: string;
+	persistedCount: number;
+}) {
+	// Local UI state. Kept in `useState` so we can show optimistic updates
+	// without round-tripping every click through a transaction. The
+	// persisted count flows in via props from `attrs.count` so the value
+	// survives reloads / undo / serialization.
+	const [optimistic, setOptimistic] = React.useState(props.persistedCount);
+	// If the canonical value changes (e.g. via undo), re-sync the optimistic
+	// counter so the two don't drift.
+	React.useEffect(() => {
+		setOptimistic(props.persistedCount);
+	}, [props.persistedCount]);
+
+	const persist = (next: number) => {
+		setOptimistic(next);
+		const editor = props.editor;
+		const path = findPathForBlockId(editor, props.id);
+		if (!path) return;
+		const tx = editor.createTransaction();
+		tx.setBlockAttrs(path, { count: next });
+		tx.commit();
+	};
+
+	return (
+		<div className="plim-counter">
+			<div className="plim-counter-title">{props.title}</div>
+			<div className="plim-counter-row">
+				<button
+					type="button"
+					className="plim-counter-btn"
+					onMouseDown={(e) => e.preventDefault()}
+					onClick={() => persist(optimistic - 1)}
+					aria-label="Decrement"
+				>
+					−
+				</button>
+				<span className="plim-counter-value" aria-live="polite">
+					{optimistic}
+				</span>
+				<button
+					type="button"
+					className="plim-counter-btn"
+					onMouseDown={(e) => e.preventDefault()}
+					onClick={() => persist(optimistic + 1)}
+					aria-label="Increment"
+				>
+					+
+				</button>
+			</div>
+		</div>
+	);
+}
+
+// Walk the editor's current doc to find the path of a given block id. The
+// custom block doesn't have direct access to its own path because the doc
+// can be re-arranged (drag, splits) between renders, so we look it up at
+// commit time rather than caching.
+function findPathForBlockId(editor: EditorHandle, id: string): number[] | null {
+	const walk = (children: { id: string; children?: { id: string }[] }[], parent: number[]): number[] | null => {
+		for (let i = 0; i < children.length; i++) {
+			const c = children[i];
+			if (!c) continue;
+			if (c.id === id) return [...parent, i];
+			if (c.children) {
+				const found = walk(c.children as { id: string; children?: { id: string }[] }[], [...parent, i]);
+				if (found) return found;
+			}
+		}
+		return null;
+	};
+	return walk(editor.getState().doc.children as { id: string; children?: { id: string }[] }[], []);
+}
+
+// `toComponent` returns a React element built from the descriptor payload.
+// `defineBlock` accepts an `(editor) => descriptor` factory form: the driver
+// invokes it at resolution time inside `deriveEditor`, after the editor
+// handle exists, so the descriptor can close over `editor` directly. This
+// supersedes the previous closure-injection dance (passing a `() =>
+// editorAccess` getter from App.tsx and populating it from a useEffect).
+export const counterBlock = defineBlock((editor) => ({
+	name: 'counter',
+	type: 'standalone',
+	atomic: true,
+	supportsDecoration: false,
+	toComponent: (payload) => (
+		<CounterCard
+			editor={editor}
+			id={payload.id}
+			title={String(payload.attrs.title ?? 'Counter')}
+			persistedCount={Number(payload.attrs.count ?? 0)}
+		/>
+	),
+}));

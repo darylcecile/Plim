@@ -1,0 +1,401 @@
+@import url("@plim/editor/styles.css");
+
+:root {
+	--page-bg: #ffffff;
+	--text: rgb(55, 53, 47);
+	--text-muted: rgba(55, 53, 47, 0.5);
+	--text-faint: rgba(55, 53, 47, 0.3);
+	--divider: rgba(55, 53, 47, 0.16);
+	--code-bg: rgba(135, 131, 120, 0.15);
+	--quote-border: rgba(55, 53, 47, 0.86);
+	--menu-bg: #ffffff;
+	--menu-shadow: rgba(15, 15, 15, 0.05) 0px 0px 0px 1px,
+		rgba(15, 15, 15, 0.1) 0px 3px 6px,
+		rgba(15, 15, 15, 0.2) 0px 9px 24px;
+	--accent: rgb(35, 131, 226);
+	--mark-bg: rgb(250, 222, 201);
+	--font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+
+html, body {
+	margin: 0;
+	padding: 0;
+	background: var(--page-bg);
+	color: var(--text);
+	font-family: var(--font);
+	font-size: 16px;
+	line-height: 1.5;
+	-webkit-font-smoothing: antialiased;
+}
+
+#root {
+	min-height: 100vh;
+	display: flex;
+	justify-content: center;
+}
+
+.page {
+	width: 100%;
+	max-width: 740px;
+	padding: 96px 96px 240px;
+	box-sizing: border-box;
+}
+
+.page-header {
+	margin-bottom: 24px;
+}
+
+.page-header .emoji {
+	font-size: 78px;
+	line-height: 1;
+	margin-bottom: 8px;
+	user-select: none;
+}
+
+.page-title {
+	font-size: 40px;
+	font-weight: 700;
+	line-height: 1.2;
+	margin: 0;
+	outline: none;
+	color: var(--text);
+}
+.page-title:empty:before {
+	content: "Untitled";
+	color: var(--text-faint);
+}
+
+/* ──────────────────────────────────────────────────────────────────────── */
+/* Custom block: Callout (toDOM example)                                    */
+/* ──────────────────────────────────────────────────────────────────────── */
+
+.plim-block-callout {
+	margin: 6px 0;
+}
+.plim-block-callout .plim-callout {
+	display: flex;
+	align-items: flex-start;
+	gap: 12px;
+	padding: 14px 16px;
+	border-radius: 6px;
+	background: rgba(241, 241, 239, 0.6);
+	border: 1px solid rgba(55, 53, 47, 0.08);
+	line-height: 1.5;
+}
+.plim-block-callout .plim-callout-icon {
+	flex: 0 0 auto;
+	user-select: none;
+	font-size: 20px;
+	line-height: 1.4;
+}
+.plim-block-callout .plim-callout > [data-block-content] {
+	flex: 1 1 auto;
+	min-width: 0;
+	outline: none;
+}
+.plim-block-callout .plim-callout[data-tone='info'] {
+	background: rgba(231, 243, 248, 0.7);
+	border-color: rgba(50, 113, 145, 0.18);
+}
+.plim-block-callout .plim-callout[data-tone='success'] {
+	background: rgba(228, 242, 232, 0.7);
+	border-color: rgba(57, 119, 73, 0.2);
+}
+.plim-block-callout .plim-callout[data-tone='warn'] {
+	background: rgba(251, 240, 217, 0.8);
+	border-color: rgba(176, 132, 25, 0.25);
+}
+.plim-block-callout .plim-callout[data-tone='danger'] {
+	background: rgba(251, 230, 230, 0.8);
+	border-color: rgba(180, 50, 50, 0.25);
+}
+
+/* ──────────────────────────────────────────────────────────────────────── */
+/* Custom block: Counter (toComponent example)                              */
+/* ──────────────────────────────────────────────────────────────────────── */
+
+.plim-block-counter {
+	margin: 6px 0;
+}
+.plim-block-counter .plim-counter {
+	display: inline-flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 14px 18px;
+	border-radius: 8px;
+	background: linear-gradient(135deg, #eef4ff 0%, #f9eef6 100%);
+	border: 1px solid rgba(55, 53, 47, 0.08);
+	min-width: 200px;
+}
+.plim-counter-title {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+.plim-counter-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+.plim-counter-value {
+	flex: 1 1 auto;
+	text-align: center;
+	font-size: 28px;
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+	color: var(--text);
+}
+.plim-counter-btn {
+	all: unset;
+	cursor: pointer;
+	width: 32px;
+	height: 32px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 6px;
+	background: rgba(255, 255, 255, 0.7);
+	border: 1px solid rgba(55, 53, 47, 0.1);
+	font-size: 18px;
+	color: var(--text);
+	transition: background 80ms ease;
+}
+.plim-counter-btn:hover {
+	background: rgba(255, 255, 255, 1);
+}
+.plim-counter-btn:active {
+	background: rgba(55, 53, 47, 0.06);
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   Inline status badge — atomic mark rendered as a pill. Three colour
+   themes (ready/pending/cancelled) plus a focus ring when the caret
+   sits at one of its edges (`data-plim-atom-active`, stamped by the
+   editor for any `[data-atomic="true"]` descendant of a block-content
+   element when the caret lands adjacent to it).
+   ──────────────────────────────────────────────────────────────────── */
+.plim-status {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 1px 8px 1px 6px;
+	border-radius: 999px;
+	font-size: 12px;
+	font-weight: 500;
+	line-height: 18px;
+	letter-spacing: 0.01em;
+	white-space: nowrap;
+	cursor: pointer;
+	user-select: none;
+	transition: filter 80ms ease, box-shadow 80ms ease;
+	vertical-align: 1px;
+	border: 1px solid transparent;
+}
+.plim-status::before {
+	content: '';
+	display: inline-block;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: currentColor;
+	flex: 0 0 auto;
+}
+.plim-status[data-status='ready'] {
+	background: #e7f5ec;
+	color: #28774d;
+}
+.plim-status[data-status='pending'] {
+	background: #fff4d6;
+	color: #8a6300;
+}
+.plim-status[data-status='cancelled'] {
+	background: #fbe5e5;
+	color: #b3261e;
+}
+.plim-status:hover {
+	filter: brightness(0.97);
+}
+.plim-status[data-plim-atom-active='true'] {
+	box-shadow: 0 0 0 2px rgba(35, 131, 226, 0.45);
+	border-color: rgba(35, 131, 226, 0.55);
+}
+/* When the caret is parked at the edge of any atomic mark wrapper, hide
+   the native blinking I-beam — the focus ring on the atom is the active
+   indicator. Generic across all atoms (mentions, status, future). */
+[data-block-content]:has([data-plim-atom-active='true']) {
+	caret-color: transparent;
+}
+
+/* Status menu — opens on pill click or Enter at trailing edge. The
+   action panel handles positioning + outside-click dismissal; we just
+   style the menu shell + items. */
+.plim-status-menu {
+	display: flex;
+	flex-direction: column;
+	min-width: 168px;
+	padding: 4px;
+	background: #ffffff;
+	border-radius: 8px;
+	border: 1px solid rgba(55, 53, 47, 0.1);
+	box-shadow: rgba(15, 15, 15, 0.05) 0 0 0 1px, rgba(15, 15, 15, 0.1) 0 3px 6px,
+		rgba(15, 15, 15, 0.2) 0 9px 24px;
+}
+.plim-status-menu-item {
+	all: unset;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 6px 8px;
+	border-radius: 6px;
+	cursor: pointer;
+	font-size: 13px;
+	color: var(--text);
+}
+.plim-status-menu-item:hover,
+.plim-status-menu-item:focus-visible {
+	background: rgba(55, 53, 47, 0.06);
+}
+.plim-status-menu-item[data-active='true'] {
+	font-weight: 600;
+}
+.plim-status-menu-item[data-active='true']::after {
+	content: '✓';
+	margin-left: auto;
+	color: rgba(55, 53, 47, 0.6);
+}
+.plim-status-menu-dot {
+	display: inline-block;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	flex: 0 0 auto;
+}
+.plim-status-menu-item[data-status='ready'] .plim-status-menu-dot {
+	background: #28774d;
+}
+.plim-status-menu-item[data-status='pending'] .plim-status-menu-dot {
+	background: #8a6300;
+}
+.plim-status-menu-item[data-status='cancelled'] .plim-status-menu-dot {
+	background: #b3261e;
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   Custom code block — overrides the editor's built-in `code` rendering
+   with a sugar-high tokenized variant + a top-right language picker.
+   ────────────────────────────────────────────────────────────────────── */
+
+/* Sugar-high theme (tokens reference these custom properties via
+   inline `style="color:var(--sh-*)"`). Tuned to read against the soft
+   grey block background. */
+.plim-code-shell {
+	--sh-class: #4f7bb6;
+	--sh-identifier: #2c2c2c;
+	--sh-sign: #8b8b8b;
+	--sh-property: #2c8a8a;
+	--sh-entity: #277f8a;
+	--sh-jsxliterals: #8a558d;
+	--sh-string: #b66437;
+	--sh-keyword: #b35aa8;
+	--sh-comment: #8a8a8a;
+	--sh-space: transparent;
+}
+
+.plim-block-code .plim-code-shell {
+	position: relative;
+}
+
+.plim-block-code .plim-code-pre {
+	background: var(--code-bg);
+	border-radius: 4px;
+	padding: 16px;
+	padding-right: 140px; /* room for the picker so long lines don't slide under it */
+	font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+	font-size: 0.85em;
+	line-height: 1.4;
+	overflow-x: auto;
+	white-space: pre-wrap;
+	margin: 0;
+}
+
+.plim-block-code .plim-code-pre [data-block-content] {
+	display: block;
+	outline: none;
+}
+
+/* Sugar-high renders each logical line as `<span class="sh__line">` with
+   raw "\n" text nodes between them. Under `white-space: pre-wrap` (set on
+   `.plim-code-pre`) the `\n`s already produce the line breaks, so the
+   line spans stay inline — adding `display: block` here would double up
+   the breaks. We keep them inline for layout but they still serve as a
+   semantic grouping in the DOM. */
+
+/* Language picker — top-right of the block. `contenteditable=false` is
+   set on the wrapper element so the editor never tries to map a caret
+   into it; the button `mousedown` handlers also `preventDefault` so
+   clicks never steal focus from the code content. */
+.plim-code-lang {
+	position: absolute;
+	top: 6px;
+	right: 6px;
+	z-index: 1;
+	user-select: none;
+}
+
+.plim-code-lang-button {
+	all: unset;
+	cursor: pointer;
+	padding: 3px 10px;
+	font-size: 12px;
+	font-family: var(--font);
+	color: var(--text-muted);
+	background: rgba(255, 255, 255, 0.6);
+	border: 1px solid rgba(55, 53, 47, 0.08);
+	border-radius: 4px;
+	transition: background 80ms ease, color 80ms ease;
+}
+
+.plim-code-lang-button:hover {
+	background: #ffffff;
+	color: var(--text);
+}
+
+.plim-code-lang-menu {
+	position: absolute;
+	top: calc(100% + 4px);
+	right: 0;
+	margin: 0;
+	padding: 4px;
+	list-style: none;
+	min-width: 160px;
+	max-height: 320px;
+	overflow-y: auto;
+	background: var(--menu-bg);
+	border-radius: 6px;
+	border: 1px solid rgba(55, 53, 47, 0.1);
+	box-shadow: var(--menu-shadow);
+	font-size: 13px;
+}
+
+.plim-code-lang-menu li {
+	padding: 5px 10px;
+	border-radius: 4px;
+	cursor: pointer;
+	color: var(--text);
+}
+
+.plim-code-lang-menu li:hover {
+	background: rgba(55, 53, 47, 0.06);
+}
+
+.plim-code-lang-menu li[aria-current='true'] {
+	font-weight: 600;
+}
+
+.plim-code-lang-menu li[aria-current='true']::after {
+	content: '✓';
+	float: right;
+	color: var(--text-muted);
+}

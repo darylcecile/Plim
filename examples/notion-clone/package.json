@@ -1,0 +1,27 @@
+{
+  "name": "@plim/example-notion-clone",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173"
+  },
+  "dependencies": {
+    "@plim/core": "workspace:*",
+    "@plim/editor": "workspace:*",
+    "@plim/markdown": "workspace:*",
+    "@plim/react": "workspace:*",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "sugar-high": "^1.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "typescript": "^5.7.3",
+    "vite": "^5.4.0"
+  }
+}
