@@ -24,7 +24,7 @@ import {
 	underlineMark,
 	boldMark,
 } from '@plim/core';
-import { contentFromMarkdown } from '@plim/markdown';
+import { contentFromMarkdown, contentToMarkdown } from '@plim/markdown';
 import {
 	DEFAULT_SLASH_ITEMS,
 	MentionMenu,
@@ -32,6 +32,7 @@ import {
 	SlashCommandMenu,
 	mentionExtension,
 	slashCommandExtension,
+	useAsyncEventListener,
 	useEditorHandle,
 	type MentionUser,
 	type SlashCommandItem,
@@ -124,6 +125,20 @@ const plim = new PlimDriver({
 			trigger: [triggers.keyboard.shortcut('Mod+Shift+z'), triggers.keyboard.shortcut('Mod+y')],
 			perform: async () => {
 				plim.getHistory().redo();
+			},
+			priority: 10,
+		}),
+		// Export the document as Markdown. The action itself does no
+		// rendering — it just fires the async event, and the React layer
+		// (App component) listens via `useAsyncEventListener`. This keeps
+		// the UI side-effect (clipboard write + toast) in React-land where
+		// it belongs, while the keyboard binding stays declarative inside
+		// the driver config. `priority: 10` matches undo/redo so this beats
+		// any other Mod+Shift+E handler.
+		defineAction('exportMarkdown', {
+			trigger: triggers.keyboard.shortcut('Ctrl+Shift+e'),
+			perform: async (_state, ctx) => {
+				return ctx.triggerAsyncEvent('exportMarkdown');
 			},
 			priority: 10,
 		}),
@@ -297,15 +312,51 @@ const slashItems: readonly SlashCommandItem[] = [...DEFAULT_SLASH_ITEMS, ...cust
 
 export function App() {
 	const handle = useEditorHandle();
+	const [toast, setToast] = React.useState<string | null>(null);
+	const toastTimer = React.useRef<number | null>(null);
+	const showToast = React.useCallback((message: string) => {
+		setToast(message);
+		if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
+		toastTimer.current = window.setTimeout(() => setToast(null), 2000);
+	}, []);
+
+	// Declarative listener for the `exportMarkdown` async event fired by
+	// the keyboard action above. `useAsyncEventListener` returns a stable
+	// registration the editor subscribes to on mount and unsubscribes from
+	// on unmount — no manual `onAsyncEvent` plumbing needed, and the
+	// closure refs are auto-refreshed each render so `showToast` always
+	// sees the latest setter. Pass the registration to `<PlimEditor>` via
+	// the `asyncEventListeners` prop (below).
+	const exportListener = useAsyncEventListener('exportMarkdown', async (_event, state) => {
+		const md = contentToMarkdown(state.doc);
+		try {
+			await navigator.clipboard.writeText(md);
+			showToast(`Copied ${md.length.toLocaleString()} chars of Markdown to clipboard`);
+		} catch {
+			// Clipboard API can reject if the document isn't focused or
+			// permissions aren't granted; surface the failure rather than
+			// silently dropping the export.
+			showToast('Could not copy to clipboard — see console');
+			console.warn('[exportMarkdown] clipboard write failed; payload:\n', md);
+		}
+	});
+
 	return (
 		<div className="page">
 			<header className="page-header">
 				<div className="emoji">📝</div>
 			</header>
-			<PlimEditor plim={plim} handle={handle} initialContent={initialContent} autoFocus />
+			<PlimEditor
+				plim={plim}
+				handle={handle}
+				initialContent={initialContent}
+				asyncEventListeners={[exportListener]}
+				autoFocus
+			/>
 			<SlashCommandMenu editor={handle} items={slashItems} />
 			<MentionMenu editor={handle} searchUsers={fakeAsyncUserSearch} />
 			<StatusBadgeMenu editor={handle} />
+			{toast !== null ? <div className="export-toast">{toast}</div> : null}
 		</div>
 	);
 }
