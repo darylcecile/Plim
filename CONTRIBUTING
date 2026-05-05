@@ -18,3 +18,31 @@ By submitting a contribution to this project, you agree that:
    assets may be licensed separately from the library code.
 
 If you do not agree to these terms, do not submit a contribution.
+
+
+# Release
+
+```bash
+# 1. Describe the release — interactive prompt:
+pnpm changeset
+#    Pick the bump type (patch / minor / major). Because all four packages
+#    are `fixed` together, picking any one bumps all four. Write a short
+#    summary — that becomes the CHANGELOG entry.
+#    This creates a markdown file in .changeset/ — commit it.
+git add .changeset && git commit -m "changeset: <summary>"
+# 2. Apply the changeset:
+pnpm version
+#    Bumps every @plim/* package.json from 0.0.1 → 0.0.2 (or whatever),
+#    rewrites the workspace deps, generates/updates CHANGELOG.md per package,
+#    and deletes the consumed .changeset/*.md file.
+git add -A && git commit -m "release: v0.0.2"
+git tag v0.0.2
+# 3. Build + publish:
+pnpm release
+#    Runs: pnpm -r --filter='@plim/*' --filter='!@plim/example-*' build
+#    Then: changeset publish → npm publish for each package whose
+#    version on disk is newer than what's on the registry.
+#    First publish per package will prompt for your 2FA OTP.
+# 4. Push everything:
+git push --follow-tags
+```
