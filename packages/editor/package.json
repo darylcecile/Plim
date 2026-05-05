@@ -1,7 +1,7 @@
 {
   "name": "@plim/editor",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.0.1",
+  "description": "Plim editor: the view layer that mounts a Plim document into a contenteditable, with paste handling, selection, drag-and-drop, and the floating toolbar.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -10,13 +10,38 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-	"./styles.css": {
-	  "import": "./dist/styles.css"
-	}
+    "./styles.css": {
+      "import": "./dist/styles.css"
+    }
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE",
+    "README.md"
   ],
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "Daryl Cecile <darylcecile@gmail.com>",
+  "homepage": "https://github.com/darylcecile/plim#readme",
+  "bugs": {
+    "url": "https://github.com/darylcecile/plim/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/darylcecile/plim.git",
+    "directory": "packages/editor"
+  },
+  "keywords": [
+    "plim",
+    "editor",
+    "block-editor",
+    "rich-text",
+    "wysiwyg",
+    "notion",
+    "contenteditable"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@darylcecile/sanitizer": "^0.0.2",
     "@plim/core": "workspace:*",
@@ -24,6 +49,7 @@
   },
   "scripts": {
     "build": "tsc -b && cp src/styles.css dist/styles.css",
-    "typecheck": "tsc -b --pretty false"
+    "typecheck": "tsc -b --pretty false",
+    "prepublishOnly": "pnpm build"
   }
 }

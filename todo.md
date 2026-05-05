@@ -4,6 +4,9 @@
 opencode -s ses_214d23b71ffeer6YhqE6jqyTem
 ```
 
+- [x] Publish prep — all four packages (`@plim/core`, `@plim/markdown`, `@plim/editor`, `@plim/react`) made publishable. Per-package: dropped `private: true`; bumped `version` to `0.0.1`; added `description`, `author`, `homepage`, `bugs`, `repository` (with `directory` per-package), `keywords`, `publishConfig: { access: "public" }`, `prepublishOnly: "pnpm build"`; `license: "SEE LICENSE IN LICENSE"` (existing custom Dazza Public License 1.0 at repo root, copied verbatim to each `packages/*/LICENSE`); `files: ["dist", "LICENSE", "README.md"]`; minimal per-package `README.md` pointing to main repo. Verified via `pnpm pack --pack-destination /tmp` per package: tarballs contain only `package.json` + `LICENSE` + `README.md` + `dist/**` (no source, tests, tsbuildinfo); `pnpm` correctly rewrites `workspace:*` deps to concrete `0.0.1` versions in the tarball's `package.json` (verified by inspecting `package/package.json` inside `plim-editor-0.0.1.tgz` — `@plim/core: "0.0.1"` and `@plim/markdown: "0.0.1"`). Changesets set up: `pnpm add -Dw @changesets/cli` + `pnpm changeset init`; `.changeset/config.json` configured for `fixed: [["@plim/core", "@plim/markdown", "@plim/editor", "@plim/react"]]` (lockstep version bumps), `access: "public"`, `ignore: ["@plim/example-notion-clone"]`. Root scripts added: `changeset` (create), `version` (apply changesets to package.jsons + CHANGELOG), `release` (`pnpm -r --filter='@plim/*' --filter='!@plim/example-*' build && changeset publish`). 77/77 node + 156/156 browser still pass; clean `pnpm -r typecheck`.
+
+
 Derived from `REQUIREMENTS.md`. Each item is a hard requirement; the implementation must allow the exact API shown in the requirements file. Items can be extended but not changed.
 
 Legend: `[ ]` pending · `[~]` in progress · `[x]` done.

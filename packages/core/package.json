@@ -1,7 +1,7 @@
 {
   "name": "@plim/core",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.0.1",
+  "description": "Plim core: schema, transactions, validation, and built-in block/mark descriptors for the Plim block editor.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -11,9 +11,36 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "Daryl Cecile <darylcecile@gmail.com>",
+  "homepage": "https://github.com/darylcecile/plim#readme",
+  "bugs": {
+    "url": "https://github.com/darylcecile/plim/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/darylcecile/plim.git",
+    "directory": "packages/core"
+  },
+  "keywords": [
+    "plim",
+    "editor",
+    "block-editor",
+    "rich-text",
+    "wysiwyg",
+    "notion"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc -b --pretty false"
+    "typecheck": "tsc -b --pretty false",
+    "prepublishOnly": "pnpm build"
   }
 }

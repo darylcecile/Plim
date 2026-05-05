@@ -1,7 +1,7 @@
 {
   "name": "@plim/react",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.0.1",
+  "description": "Plim React bindings: define block descriptors with React components and host them inside a Plim editor.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -11,7 +11,32 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "Daryl Cecile <darylcecile@gmail.com>",
+  "homepage": "https://github.com/darylcecile/plim#readme",
+  "bugs": {
+    "url": "https://github.com/darylcecile/plim/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/darylcecile/plim.git",
+    "directory": "packages/react"
+  },
+  "keywords": [
+    "plim",
+    "react",
+    "block-editor",
+    "rich-text",
+    "notion"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@plim/core": "workspace:*",
     "@plim/editor": "workspace:*"
@@ -28,6 +53,7 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc -b --pretty false"
+    "typecheck": "tsc -b --pretty false",
+    "prepublishOnly": "pnpm build"
   }
 }
