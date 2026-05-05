@@ -1,7 +1,11 @@
 # Plim
 
-A Notion-inspired block editor for the web, built as a TypeScript monorepo. Plim ships a framework-agnostic core, a DOM view layer, a Markdown parser/serializer, and React bindings — all small, composable, and designed to be embedded in your own product.
+A Notion-inspired block editor for the web, built as a TypeScript monorepo. Plim ships a framework-agnostic core, a DOM view layer, a Markdown parser/serializer, and React bindings — all small, composable, and designed to be embedded in your own product. See the [example](https://plim-editor.vercel.app/)
 
+![Screenshot of the editor in action](preview.png)
+
+
+> [!IMPORTANT]
 > **Status:** pre-1.0 (`0.0.x`). The public API is mostly stable but may shift before `1.0`.
 
 ## Packages
