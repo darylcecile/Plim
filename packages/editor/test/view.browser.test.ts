@@ -2044,6 +2044,143 @@ describe('clipboard copy/cut → markdown', () => {
 		container.remove();
 	});
 
+	it('Backspace with a cross-block selection deletes the range and joins start+end', () => {
+		// Regression: previously the non-collapsed branch only ran
+		// replaceRange against sel.head.path, leaving the anchor's block
+		// untouched and the middle blocks intact. Now it routes through
+		// deleteRangeAcrossBlocks: trim start tail, trim end head, drop
+		// middles, joinBackward end into start.
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [
+					{ id: newId(), type: 'paragraph' as const, text: [{ text: 'hello world' }] },
+					{ id: newId(), type: 'paragraph' as const, text: [{ text: 'middle line' }] },
+					{ id: newId(), type: 'paragraph' as const, text: [{ text: 'middle two' }] },
+					{ id: newId(), type: 'paragraph' as const, text: [{ text: 'goodbye now' }] },
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		const tx = editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 6 }, head: { path: [3], offset: 7 } });
+		tx.commit();
+		root.dispatchEvent(
+			new InputEvent('beforeinput', { inputType: 'deleteContentBackward', bubbles: true, cancelable: true }),
+		);
+		const state = editor.getState();
+		expect(state.doc.children).toHaveLength(1);
+		expect(state.doc.children[0]!.text?.map((s) => s.text).join('')).toBe('hello  now');
+		expect(state.selection.anchor).toEqual({ path: [0], offset: 6 });
+		expect(state.selection.head).toEqual({ path: [0], offset: 6 });
+		editor.destroy();
+		container.remove();
+	});
+
+	it('Delete (forward) with a cross-block selection behaves identically to Backspace', () => {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [
+					{ id: newId(), type: 'paragraph' as const, text: [{ text: 'aaa' }] },
+					{ id: newId(), type: 'paragraph' as const, text: [{ text: 'bbb' }] },
+					{ id: newId(), type: 'paragraph' as const, text: [{ text: 'ccc' }] },
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		const tx = editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 1 }, head: { path: [2], offset: 2 } });
+		tx.commit();
+		root.dispatchEvent(
+			new InputEvent('beforeinput', { inputType: 'deleteContentForward', bubbles: true, cancelable: true }),
+		);
+		const state = editor.getState();
+		expect(state.doc.children).toHaveLength(1);
+		expect(state.doc.children[0]!.text?.map((s) => s.text).join('')).toBe('ac');
+		editor.destroy();
+		container.remove();
+	});
+
+	it('Enter with a cross-block selection deletes the range, then splits at the merge point', () => {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [
+					{ id: newId(), type: 'paragraph' as const, text: [{ text: 'one' }] },
+					{ id: newId(), type: 'paragraph' as const, text: [{ text: 'two' }] },
+					{ id: newId(), type: 'paragraph' as const, text: [{ text: 'three' }] },
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		const tx = editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 1 }, head: { path: [2], offset: 2 } });
+		tx.commit();
+		root.dispatchEvent(
+			new InputEvent('beforeinput', { inputType: 'insertParagraph', bubbles: true, cancelable: true }),
+		);
+		const state = editor.getState();
+		// After delete: "o" + "ree" merged → "oree". Then split at offset 1 → ["o", "ree"].
+		expect(state.doc.children).toHaveLength(2);
+		expect(state.doc.children[0]!.text?.map((s) => s.text).join('')).toBe('o');
+		expect(state.doc.children[1]!.text?.map((s) => s.text).join('')).toBe('ree');
+		editor.destroy();
+		container.remove();
+	});
+
+	it('Typing a character with a cross-block selection deletes the range and inserts at the merge point', () => {
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const plim = new PlimDriver({ registeredBlocks: [paragraphBlock] });
+		const editor = deriveEditor(plim, {
+			containerAdapter: attachContainer(() => container),
+			initialContent: {
+				type: 'doc',
+				children: [
+					{ id: newId(), type: 'paragraph' as const, text: [{ text: 'hello world' }] },
+					{ id: newId(), type: 'paragraph' as const, text: [{ text: 'middle' }] },
+					{ id: newId(), type: 'paragraph' as const, text: [{ text: 'goodbye now' }] },
+				],
+			},
+			autoFocus: false,
+		});
+		editor.mount();
+		const root = container.querySelector('.plim-editor') as HTMLElement;
+		const tx = editor.createTransaction();
+		tx.setSelection({ anchor: { path: [0], offset: 6 }, head: { path: [2], offset: 7 } });
+		tx.commit();
+		root.dispatchEvent(
+			new InputEvent('beforeinput', { inputType: 'insertText', data: 'X', bubbles: true, cancelable: true }),
+		);
+		const state = editor.getState();
+		// "hello " + "X" + " now" merged into one block.
+		expect(state.doc.children).toHaveLength(1);
+		expect(state.doc.children[0]!.text?.map((s) => s.text).join('')).toBe('hello X now');
+		// Caret sits just after the inserted "X".
+		expect(state.selection.head).toEqual({ path: [0], offset: 7 });
+		editor.destroy();
+		container.remove();
+	});
+
 	it('does NOT intercept copy of a single-block text range (lets native handle inline copy)', () => {
 		const { editor, container, cleanup } = setupMulti(['hello world']);
 		const tx = editor.createTransaction();
@@ -3004,6 +3141,42 @@ describe('Floating selection toolbar', () => {
 		expect(h2.getAttribute('data-active')).toBe(null);
 	});
 
+	it("highlights the BLOCK-SELECTED block's type, not the prior caret block's", () => {
+		// Regression: caret was parked in a paragraph (block 0), then the
+		// user clicks the drag handle of a heading (block 1). The toolbar
+		// is showing for the heading, so its active-type indicator should
+		// reflect the heading — not the paragraph the caret happened to
+		// be in. Previously `blockTypeIs` always read `selection.head.path`
+		// and lit "Text" instead of "Heading 2".
+		env = setup();
+		const root = getRoot(env.container);
+		focusEditor(root);
+		const tx = env.editor.createTransaction();
+		tx.insertText([0], 0, 'paragraph text');
+		// Append a second block: a heading-2.
+		const ed = env.editor.getState();
+		const headingId = `b_${Math.random().toString(36).slice(2, 8)}`;
+		tx.insertBlock([1], { id: headingId, type: 'heading', attrs: { level: 2 }, text: [{ text: 'My Heading' }] });
+		// Place caret inside the paragraph.
+		tx.setSelection({ anchor: { path: [0], offset: 3 }, head: { path: [0], offset: 3 } });
+		tx.commit();
+		void ed;
+		// Block-select the heading via its drag handle.
+		const heading = env.container.querySelector('[data-block-type="heading"]') as HTMLElement;
+		expect(heading).toBeTruthy();
+		const handle = heading.querySelector('.plim-block-drag') as HTMLElement;
+		handle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: 0, clientY: 0 }));
+		handle.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: 0, clientY: 0 }));
+		expect(heading.getAttribute('data-plim-block-selected')).toBe('true');
+		const tb = getToolbar()!;
+		const para = tb.querySelector<HTMLButtonElement>('[data-toolbar-item="turn-into-paragraph"]')!;
+		const h1 = tb.querySelector<HTMLButtonElement>('[data-toolbar-item="turn-into-heading-1"]')!;
+		const h2 = tb.querySelector<HTMLButtonElement>('[data-toolbar-item="turn-into-heading-2"]')!;
+		expect(h2.getAttribute('data-active')).toBe('true');
+		expect(h1.getAttribute('data-active')).toBe(null);
+		expect(para.getAttribute('data-active')).toBe(null);
+	});
+
 	it('clicking the link button swaps the row for a URL input', () => {
 		env = setup({ initial: ['hello world'] });
 		const root = getRoot(env.container);
@@ -3168,5 +3341,95 @@ describe('markdown shortcut — checkbox', () => {
 		expect(block.type).toBe('bulleted_list_item');
 		const txt = (block.text ?? []).map((s) => s.text).join('');
 		expect(txt).toBe('foo [ ] ');
+	});
+});
+
+describe('markdown shortcut — prefix conversion preserves trailing text', () => {
+	let env: ReturnType<typeof setup> | null = null;
+	afterEach(() => {
+		env?.cleanup();
+		env = null;
+	});
+
+	function type(root: HTMLElement, str: string): void {
+		for (const ch of str) {
+			const ev = new InputEvent('beforeinput', { inputType: 'insertText', data: ch, bubbles: true, cancelable: true });
+			root.dispatchEvent(ev);
+		}
+	}
+
+	function placeCaret(environment: NonNullable<typeof env>, path: number[], offset: number): void {
+		const tx = environment.editor.createTransaction();
+		tx.setSelection({ anchor: { path, offset }, head: { path, offset } });
+		tx.commit();
+	}
+
+	function blockText(b: { text?: { text: string }[] }): string {
+		return (b.text ?? []).map((s) => s.text).join('');
+	}
+
+	it('typing "- " at offset 0 of a non-empty paragraph converts to a bullet and preserves trailing text', () => {
+		env = setup({ initial: ['Hello'] });
+		const root = getRoot(env.container);
+		placeCaret(env, [0], 0);
+		type(root, '- ');
+		const block = env.editor.getState().doc.children[0]!;
+		expect(block.type).toBe('bulleted_list_item');
+		expect(blockText(block)).toBe('Hello');
+		expect(env.editor.getState().selection.head).toEqual({ path: [0], offset: 0 });
+	});
+
+	it('typing "> " at offset 0 of a non-empty paragraph converts to a quote and preserves trailing text', () => {
+		env = setup({ initial: ['World'] });
+		const root = getRoot(env.container);
+		placeCaret(env, [0], 0);
+		type(root, '> ');
+		const block = env.editor.getState().doc.children[0]!;
+		expect(block.type).toBe('quote');
+		expect(blockText(block)).toBe('World');
+	});
+
+	it('typing "# " at offset 0 of a non-empty paragraph converts to a heading-1 and preserves trailing text', () => {
+		env = setup({ initial: ['Title-ish text'] });
+		const root = getRoot(env.container);
+		placeCaret(env, [0], 0);
+		type(root, '# ');
+		const block = env.editor.getState().doc.children[0]!;
+		expect(block.type).toBe('heading');
+		expect((block.attrs as { level: number }).level).toBe(1);
+		expect(blockText(block)).toBe('Title-ish text');
+	});
+
+	it('typing "1. " at offset 0 of a non-empty paragraph converts to a numbered list item', () => {
+		env = setup({ initial: ['One']});
+		const root = getRoot(env.container);
+		placeCaret(env, [0], 0);
+		type(root, '1. ');
+		const block = env.editor.getState().doc.children[0]!;
+		expect(block.type).toBe('numbered_list_item');
+		expect(blockText(block)).toBe('One');
+	});
+
+	it('typing space inside a paragraph that already begins with "- " does NOT re-trigger the bullet rule', () => {
+		// If a user has a paragraph "- abc def" (perhaps because the bullet
+		// rule didn't fire when they typed it), placing the caret at the end
+		// and typing another space must not reconvert/replace the prefix.
+		env = setup({ initial: ['- abc'] });
+		const root = getRoot(env.container);
+		placeCaret(env, [0], 5); // end of "- abc"
+		type(root, ' ');
+		const block = env.editor.getState().doc.children[0]!;
+		expect(block.type).toBe('paragraph');
+		expect(blockText(block)).toBe('- abc ');
+	});
+
+	it('typing "- " mid-paragraph (not at offset 0) does not convert', () => {
+		env = setup({ initial: ['hello world'] });
+		const root = getRoot(env.container);
+		placeCaret(env, [0], 5); // between "hello" and " world"
+		type(root, '- ');
+		const block = env.editor.getState().doc.children[0]!;
+		expect(block.type).toBe('paragraph');
+		expect(blockText(block)).toBe('hello-  world');
 	});
 });

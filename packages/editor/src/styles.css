@@ -59,7 +59,18 @@
 
 	/* Hover affordances: + and drag handle on the gutter.
  * Use `rem` so the gutter offset is identical regardless of block font-size
- * (otherwise headings push the handles much further left than paragraphs). */
+ * (otherwise headings push the handles much further left than paragraphs).
+ *
+ * Hit-zone behaviour:
+ * - The group is *always* `pointer-events: auto`, so hovering anywhere in
+ *   the gutter (even when the buttons are invisible) re-triggers the
+ *   block's `:hover` and reveals them.
+ * - `padding-right` extends the box rightward to touch the block content's
+ *   left edge, so dragging the cursor from inside the block toward the
+ *   handle never crosses a dead gap that would drop `:hover`.
+ * - Buttons themselves stay `pointer-events: none` until the group is
+ *   visible, otherwise the gutter would show a ghost pointer cursor over
+ *   empty space. */
 	.plim-block-handles {
 		position: absolute;
 		top: 0.25rem;
@@ -68,15 +79,25 @@
 		gap: 0;
 		align-items: center;
 		opacity: 0;
-		pointer-events: none;
+		pointer-events: auto;
 		transition: opacity 80ms ease;
 		user-select: none;
 		height: 1.5rem;
+		padding-right: 0.5rem;
+		box-sizing: content-box;
+	}
+
+	.plim-block-handles > button {
+		pointer-events: none;
 	}
 
 	.plim-block:hover>.plim-block-handles,
 	.plim-block:focus-within>.plim-block-handles {
 		opacity: 1;
+	}
+
+	.plim-block:hover>.plim-block-handles>button,
+	.plim-block:focus-within>.plim-block-handles>button {
 		pointer-events: auto;
 	}
 
@@ -125,11 +146,19 @@
 		z-index: 5;
 	}
 
-	/* Empty-block placeholders (Notion shows these only on the focused empty block) */
+	/* Empty-block placeholders (Notion shows these only on the focused empty block).
+   `white-space: nowrap` keeps the hint on a single line even when the
+   placeholder's containing block is the empty content element (which has
+   zero intrinsic width). Without this, block-selection mode — which
+   forces `position: relative` on `[data-block-content]` so the highlight
+   layer sits behind it — collapses the absolute ::before's containing
+   block to 0px wide and the hint wraps onto multiple lines, bleeding
+   into the next block. */
 	.plim-block[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {
 		color: var(--text-faint);
 		pointer-events: none;
 		position: absolute;
+		white-space: nowrap;
 	}
 
 	.plim-block-paragraph[data-empty="true"][data-caret-active="true"] [data-block-content="true"]::before {

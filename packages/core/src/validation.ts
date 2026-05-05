@@ -22,6 +22,19 @@ export type ValidationRule =
 export type ValidationContext = {
 	state: EditorState;
 	supportsDecoration: (blockType: string) => boolean;
+	/**
+	 * Block-level selection (set of selected block ids), if any. Present
+	 * when the user has selected whole blocks via the drag handle / shift-
+	 * click etc. — separate from the text caret in `state.selection`.
+	 *
+	 * Rules that care about "which block am I operating on?" (notably
+	 * `blockTypeIs`) prefer this over `state.selection.head.path` when
+	 * non-empty: the toolbar appears for the block selection, so its
+	 * "active" highlight should reflect those blocks, not whatever block
+	 * the text caret happened to be parked in before the user clicked
+	 * the drag handle.
+	 */
+	blockSelection?: Set<string>;
 };
 
 export type ValidationBuilders = {
@@ -102,6 +115,27 @@ function evalMarkActive(name: string, ctx: ValidationContext): boolean {
 }
 
 function evalBlockTypeIs(name: string, ctx: ValidationContext): boolean {
+	// Block-selection mode wins: the toolbar is showing because of the
+	// drag-handle selection, so its "is this block a heading?" indicator
+	// should answer about the SELECTED blocks. We require *all* selected
+	// blocks to share the type for the rule to be true — a mixed selection
+	// (paragraph + heading) lights nothing, matching Notion.
+	if (ctx.blockSelection && ctx.blockSelection.size > 0) {
+		const ids = ctx.blockSelection;
+		// Walk the doc once and check every selected block's type.
+		const seen = new Set<string>();
+		const stack = [...ctx.state.doc.children];
+		while (stack.length) {
+			const b = stack.shift()!;
+			if (ids.has(b.id)) {
+				if (b.type !== name) return false;
+				seen.add(b.id);
+				if (seen.size === ids.size) return true;
+			}
+			if (b.children) stack.unshift(...b.children);
+		}
+		return seen.size === ids.size && seen.size > 0;
+	}
 	const block = getBlockAt(ctx.state.doc, ctx.state.selection.head.path);
 	return !!block && block.type === name;
 }
