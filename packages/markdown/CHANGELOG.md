@@ -1,5 +1,13 @@
 # @plim/markdown
 
+## 0.0.3
+
+### Patch Changes
+
+- 4adc206: Fix mention ActionPanel alignment
+- Updated dependencies [4adc206]
+  - @plim/core@0.0.3
+
 ## 0.0.2
 
 ### Patch Changes
