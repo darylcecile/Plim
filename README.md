@@ -168,7 +168,32 @@ export const counterBlock = defineBlock((editor) => ({
 }));
 ```
 
-For editable React blocks (where some content lives in a React tree but the text is still editor-owned), import `ContentSlot` from `@plim/react` and render it where the `[data-block-content]` element should land.
+For editable React blocks (where some content lives in a React tree but the text is still editor-owned), import `ContentSlot` from `@plim/react` and render it where the `[data-block-content]` element should land:
+
+```tsx
+import { defineBlock, type BlockPayload } from '@plim/core';
+import { ContentSlot } from '@plim/react';
+
+export const calloutBlock = defineBlock({
+  name: 'callout',
+  type: 'standalone',
+  toComponent: (payload: BlockPayload) => {
+    const slot = (payload.content as HTMLElement[])[0];
+    const tone = String(payload.attrs.tone ?? 'info');
+    return (
+      <div className="plim-callout" data-tone={tone}>
+        <span className="plim-callout-icon" contentEditable={false}>
+          {String(payload.attrs.icon ?? '💡')}
+        </span>
+        {/* The editor owns the text inside this slot; React owns everything else. */}
+        <ContentSlot el={slot} />
+      </div>
+    );
+  },
+});
+```
+
+`ContentSlot` mounts the editor's slot element with `display: contents` so it doesn't introduce extra layout, and its ref no-ops once the slot is already attached — React's reconciliation never fights the editor's in-place text updates.
 
 See `packages/core/src/builtins.ts` for the built-in block library and `examples/notion-clone/src/customBlocks.tsx` for richer DOM- and React-based blocks (callout + counter).
 
