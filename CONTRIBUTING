@@ -31,7 +31,7 @@ pnpm changeset
 #    This creates a markdown file in .changeset/ — commit it.
 git add .changeset && git commit -m "changeset: <summary>"
 # 2. Apply the changeset:
-pnpm version
+pnpm run version
 #    Bumps every @plim/* package.json from 0.0.1 → 0.0.2 (or whatever),
 #    rewrites the workspace deps, generates/updates CHANGELOG.md per package,
 #    and deletes the consumed .changeset/*.md file.

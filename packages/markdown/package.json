@@ -1,6 +1,6 @@
 {
   "name": "@plim/markdown",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Plim markdown: parse Markdown into Plim documents and serialize Plim back to Markdown.",
   "type": "module",
   "main": "./dist/index.js",
