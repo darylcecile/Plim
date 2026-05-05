@@ -195,6 +195,15 @@ export type MentionMenuProps = {
 type MentionState = {
 	anchor: Element | null;
 	caretRect: DOMRect | null;
+	/**
+	 * Offsets from the anchor block's top-left to the caret at the moment
+	 * the menu opened. Stored once so we can synthesize a "caret-position"
+	 * rect from the live `block.getBoundingClientRect()` on every
+	 * reposition — the menu stays pinned to the `@` glyph even after the
+	 * page scrolls or the block reflows.
+	 */
+	caretOffsetX: number;
+	caretOffsetBottom: number;
 	resolve: (user: MentionUser | null) => void;
 };
 
@@ -232,7 +241,10 @@ export function MentionMenu(props: MentionMenuProps): React.ReactElement | null 
 				return await new Promise<MentionUser | null>((resolve) => {
 					const rect = currentCaretRect();
 					const anchor = currentBlockAnchor();
-					setState({ anchor, caretRect: rect, resolve });
+					const blockRect = anchor?.getBoundingClientRect() ?? null;
+					const caretOffsetX = rect && blockRect ? rect.left - blockRect.left : 0;
+					const caretOffsetBottom = rect && blockRect ? rect.bottom - blockRect.top : 0;
+					setState({ anchor, caretRect: rect, caretOffsetX, caretOffsetBottom, resolve });
 				});
 			});
 			return true;
@@ -285,11 +297,26 @@ export function MentionMenu(props: MentionMenuProps): React.ReactElement | null 
 	);
 
 	if (!state) return null;
+	// Compute a fresh "caret-position" rect on every reposition by reading
+	// the live block's `getBoundingClientRect()` and adding the offsets we
+	// captured at open time. This pins the menu under the `@` glyph even
+	// when the page scrolls — using the frozen `caretRect` directly would
+	// leave the menu stranded after a scroll. Falls back to the snapshot
+	// rect if the block element is unreachable (e.g. detached mid-flow).
+	const anchorFn = (): DOMRect | null => {
+		if (state.anchor) {
+			const r = state.anchor.getBoundingClientRect();
+			return new DOMRect(r.left + state.caretOffsetX, r.top + state.caretOffsetBottom, 0, 0);
+		}
+		return state.caretRect;
+	};
+	const boundary = state.anchor?.closest('.plim-editor') ?? null;
 	return (
 		<ActionPanel
 			open
-			anchor={() => (state.anchor ?? state.caretRect) as Element | DOMRect | null}
+			anchor={anchorFn}
 			placement="bottom-start"
+			boundary={boundary}
 			onClose={() => {
 				state.resolve(null);
 				setState(null);
