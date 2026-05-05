@@ -1,5 +1,14 @@
 # @plim/react
 
+## 0.0.4
+
+### Patch Changes
+
+- Fixed bug with handle affordances and selection replacement
+- Updated dependencies
+  - @plim/editor@0.0.4
+  - @plim/core@0.0.4
+
 ## 0.0.3
 
 ### Patch Changes
