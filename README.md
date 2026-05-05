@@ -55,3 +55,16 @@ pnpm --filter @plim/example-basic-editor dev
 - Typecheck all package references: `pnpm run typecheck`
 - Build declarations and ESM output: `pnpm run build`
 - Run tests: `pnpm test`
+
+## Licensing
+
+The published library package is licensed under Daz Public License 1.0.
+
+Documentation is licensed under Creative Commons Attribution 4.0 International
+unless stated otherwise.
+
+Examples and starter templates are licensed under the MIT License unless stated
+otherwise.
+
+Project names, logos, mascots, screenshots, and other brand assets are not
+licensed for reuse except as needed to truthfully refer to the project.
