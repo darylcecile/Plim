@@ -309,6 +309,64 @@ const deserializedSnapshot = Snapshot.deserialize(serializedSnapshot); // deseri
 A snapshot captures the entire state of the editor, including the content, selection, and any other relevant state. Restoring a snapshot will revert the editor back to the exact state it was in when the snapshot was created, allowing for powerful features like time-travel debugging or complex undo/redo functionality. To be used with caution as snapshots can consume a lot of memory if the editor's content is large, so it's recommended to use them sparingly and to always provide a way for users to manage their snapshots (e.g. delete old snapshots, etc.).
 
 
+## Ledger / Sync API
+
+Where snapshots capture _whole states_ and history captures _undoable steps_, the ledger captures the **stream of committed transactions** as a portable, replayable log. It is the foundation layer for bringing your own sync or CRDT engine: it does not impose a network model or a merge policy, it gives you the primitives (record, replay, merge, diff, conflict detection, rebase) to build one.
+
+The serialized intermediary is the `LedgerRecord` — a flat, JSON-safe snapshot of one transaction's operations stamped with an `id`, a wall-clock `timestamp`, a logical `lamport` clock, an optional `source`, and a pre-computed id-keyed `touches` conflict surface. Records carry operations, not documents, so they stay small and cheap to ship over the wire.
+
+```ts
+import { TransactionLedger } from '@plim/core';
+
+const ledger = new TransactionLedger({ source: 'clientA' });
+
+// Record every committed transaction as it is dispatched.
+const detach = ledger.attach(editor);
+
+// …or record a transaction by hand.
+ledger.record(transaction);
+
+// Replay the whole log onto any other editor seeded with the same base
+// document — a single setState, no history pollution.
+ledger.replay(otherEditor);
+const nextState = ledger.apply(otherEditor.getState()); // pure, no side effects
+
+// Ship it over the wire and rebuild it on the other side.
+const payload = ledger.serialize();
+const remote = TransactionLedger.deserialize(payload);
+```
+
+Multiple ledgers **merge** into a single chronological order (deduplicated by record id), and **diff** to discover what each side is missing:
+
+```ts
+import { mergeLedgers, diffLedgers } from '@plim/core';
+
+const merged = mergeLedgers(localLedger, remoteLedger); // chronological union
+const { onlyInA, onlyInB, common } = diffLedgers(localLedger, remoteLedger);
+```
+
+Concurrent edits are handled two ways. **Conflict resolution** picks a winner when two records touch overlapping regions ("last write wins", "first write wins", "prefer this source", or a custom strategy):
+
+```ts
+import { findConflicts, resolveConflicts, lastWriteWins, preferSource } from '@plim/core';
+
+const conflicts = findConflicts(merged.records); // every overlapping pair
+const { kept, dropped } = resolveConflicts(merged.records, preferSource(['server', 'clientA']));
+```
+
+Or, to keep _both_ sides, **rebase** transforms one record's operations so they apply cleanly on top of a concurrent change — the editor equivalent of `git rebase`:
+
+```ts
+import { rebaseRecord } from '@plim/core';
+
+const result = rebaseRecord(remoteRecord, localRecord, baseDoc);
+if (result.ok) editor.setState(applyLedgerRecord(editor.getState(), result.record));
+else /* fall back to resolveConflicts — the rebase was ambiguous */;
+```
+
+The ledger is deliberately unopinionated about transport and policy. It is honest about its limits: conflict detection is conservative (it would rather report a conflict than silently clobber), and rebase covers text edits and block insert/remove/split/move precisely while refusing — rather than guessing — when a concurrent change makes the result genuinely ambiguous.
+
+
 ## Blocks and Marks API
 
 ### Blocks API

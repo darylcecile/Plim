@@ -17,6 +17,8 @@
     "test:browser": "vitest run --config vitest.browser.config.ts",
     "dev:notion": "pnpm --filter @plim/example-notion-clone dev",
     "build:notion": "pnpm --filter @plim/example-notion-clone build",
+    "dev:ledger": "pnpm --filter @plim/example-ledger-kitchen-sink dev",
+    "build:ledger": "pnpm --filter @plim/example-ledger-kitchen-sink build",
     "changeset": "changeset",
     "version": "changeset version",
     "release": "pnpm -r --filter='@plim/*' --filter='!@plim/example-*' build && changeset publish"

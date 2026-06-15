@@ -340,6 +340,39 @@ editor.restoreSnapshot(restored);
 
 `restoreSnapshot` replaces state directly — it does not push a history entry, so undo/redo will not roll across the restore. Wrap restores in your own confirmation flow if that matters.
 
+## Ledger / sync
+
+A `TransactionLedger` is an append-only, serializable, replayable log of committed transactions — the layer you build your own sync / CRDT engine on. Snapshots ship whole states; the ledger ships the _stream of edits_. The unit of exchange is the `LedgerRecord`: a small, JSON-safe record of one transaction's ops, stamped with an `id`, a wall-clock `timestamp`, a logical `lamport` clock, an optional `source`, and a pre-computed id-keyed conflict surface (`touches`).
+
+```ts
+import { TransactionLedger, mergeLedgers, findConflicts, resolveConflicts, rebaseRecord, applyLedgerRecord, lastWriteWins } from '@plim/core';
+
+// 1. Record — subscribe a ledger to an editor, or record transactions by hand.
+const ledger = new TransactionLedger({ source: 'clientA' });
+const detach = ledger.attach(editor);          // records every forward transaction
+
+// 2. Replay — onto any editor seeded with the same base (one setState, no history noise).
+ledger.replay(otherEditor);                     // side-effecting
+const state = ledger.apply(otherEditor.getState()); // pure fold
+
+// 3. Serialize — ship the log over the wire and rebuild it.
+const remote = TransactionLedger.deserialize(ledger.serialize());
+
+// 4. Merge — chronological union, deduped by id.
+const merged = mergeLedgers(ledger, remote);
+
+// 5a. Resolve — pick a winner when records overlap…
+const { kept, dropped } = resolveConflicts(merged.records, lastWriteWins);
+
+// 5b. …or rebase — keep both sides by transforming positions (git-rebase for edits).
+const r = rebaseRecord(remote.records[0]!, ledger.records[0]!, editor.getState().doc);
+if (r.ok) editor.setState(applyLedgerRecord(editor.getState(), r.record));
+```
+
+Conflict detection is **conservative** (it would rather flag a conflict than silently clobber), works **document-free** at merge time (records carry their own id-keyed `touches`), and is **order-independent**. Rebase handles text edits and block insert/remove/split/move precisely, and returns `{ ok: false, reason }` — rather than guessing — when a concurrent change tears a range across blocks or deletes content a record depends on. Ordering is `timestamp → lamport → source → id` by default and fully overridable via `new TransactionLedger({ compare })`.
+
+See [`examples/ledger-kitchen-sink`](./examples/ledger-kitchen-sink) for two editors syncing through every one of these primitives.
+
 ## Markdown
 
 `@plim/markdown` round-trips between Markdown and Plim documents. It understands the built-in block & mark vocabulary (paragraphs, headings, quotes, bulleted/numbered/todo lists, dividers, fenced code, images, plus `**bold**`, `*italic*`, `` `code` ``, `~strike~`, `[link](href)`, `<u>underline</u>`).
@@ -370,6 +403,13 @@ Custom blocks opt in by implementing `fromMarkdown` (consulted before the built-
 ```sh
 pnpm install
 pnpm dev:notion         # opens http://localhost:5174
+```
+
+[`examples/ledger-kitchen-sink`](./examples/ledger-kitchen-sink) is a two-client sync playground: two editors branch from the same document, capture their edits in a `TransactionLedger`, then reconcile through every primitive — merge, conflict detection, drop-one-side resolution, OT rebase (keep both), diff, and a serialize round-trip. Run it with:
+
+```sh
+pnpm install
+pnpm dev:ledger         # opens http://localhost:5175
 ```
 
 ## Development

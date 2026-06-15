@@ -10,4 +10,7 @@ export * from './extension.js';
 export * from './driver.js';
 export * from './snapshot.js';
 export * from './history.js';
+export * from './ledger.js';
+export * from './ledger-conflict.js';
+export * from './ledger-rebase.js';
 export * from './builtins.js';

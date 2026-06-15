@@ -1,0 +1,395 @@
+:root {
+	--bg: #f6f7f9;
+	--panel: #ffffff;
+	--ink: #1f2430;
+	--muted: #6b7280;
+	--line: #e5e7eb;
+	--a: #2563eb;
+	--a-soft: #eff4ff;
+	--b: #d97706;
+	--b-soft: #fff7ec;
+	--ok: #15803d;
+	--danger: #b91c1c;
+	--warn-bg: #fef2f2;
+	--radius: 12px;
+	font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--ink);
+}
+
+.page {
+	max-width: 1180px;
+	margin: 0 auto;
+	padding: 28px 24px 64px;
+}
+
+.hero h1 {
+	margin: 0 0 6px;
+	font-size: 28px;
+	letter-spacing: -0.02em;
+}
+
+.hero > p {
+	margin: 0 0 16px;
+	max-width: 760px;
+	color: #374151;
+	line-height: 1.55;
+}
+
+.hint {
+	margin: 12px 0 0;
+	color: var(--muted);
+	font-size: 13px;
+}
+
+code {
+	background: #eef0f3;
+	border-radius: 5px;
+	padding: 1px 5px;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 0.9em;
+}
+
+/* Toolbar ------------------------------------------------------------------- */
+
+.toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+	padding: 14px;
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+}
+
+button {
+	font: inherit;
+	font-size: 13px;
+	border: 1px solid var(--line);
+	background: #fff;
+	color: var(--ink);
+	padding: 8px 12px;
+	border-radius: 8px;
+	cursor: pointer;
+	transition: background 0.12s, border-color 0.12s, transform 0.05s;
+}
+
+button:hover {
+	background: #f3f4f6;
+}
+
+button:active {
+	transform: translateY(1px);
+}
+
+button.primary {
+	background: var(--ink);
+	color: #fff;
+	border-color: var(--ink);
+}
+
+button.primary:hover {
+	background: #000;
+}
+
+button.ghost {
+	margin-left: auto;
+	color: var(--muted);
+}
+
+.strategy {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	color: var(--muted);
+}
+
+.strategy select {
+	font: inherit;
+	font-size: 13px;
+	padding: 6px 8px;
+	border-radius: 8px;
+	border: 1px solid var(--line);
+	background: #fff;
+	color: var(--ink);
+}
+
+/* Editors ------------------------------------------------------------------- */
+
+.grid {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 16px;
+	margin-top: 16px;
+}
+
+.card {
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	overflow: hidden;
+}
+
+.card-head {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	padding: 12px 14px;
+	border-bottom: 1px solid var(--line);
+}
+
+.card-head h3 {
+	margin: 0;
+	font-size: 15px;
+}
+
+.accent-a .card-head {
+	background: var(--a-soft);
+}
+
+.accent-b .card-head {
+	background: var(--b-soft);
+}
+
+.badge {
+	font-size: 12px;
+	color: var(--muted);
+	font-family: ui-monospace, monospace;
+}
+
+.editor {
+	min-height: 150px;
+	padding: 14px 16px;
+	outline: none;
+	line-height: 1.6;
+}
+
+.editor h2 {
+	font-size: 17px;
+	margin: 0 0 8px;
+}
+
+.editor p {
+	margin: 0 0 8px;
+}
+
+/* Ledger log ---------------------------------------------------------------- */
+
+.log {
+	border-top: 1px solid var(--line);
+	background: #fbfbfc;
+	padding: 10px 12px 12px;
+}
+
+.log-head {
+	display: flex;
+	justify-content: space-between;
+	font-size: 12px;
+	font-weight: 600;
+	color: #374151;
+	margin-bottom: 6px;
+}
+
+.muted {
+	color: var(--muted);
+	font-weight: 400;
+}
+
+.log .empty {
+	margin: 4px 0;
+	font-size: 13px;
+	color: var(--muted);
+}
+
+.log ul {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.log li {
+	display: grid;
+	grid-template-columns: 64px 34px 1fr auto;
+	gap: 8px;
+	align-items: center;
+	font-size: 12px;
+	padding: 4px 6px;
+	background: #fff;
+	border: 1px solid var(--line);
+	border-radius: 7px;
+}
+
+.rid {
+	font-size: 11px;
+	background: #eef0f3;
+}
+
+.lamport {
+	font-family: ui-monospace, monospace;
+	color: var(--muted);
+}
+
+.ops {
+	font-family: ui-monospace, monospace;
+}
+
+.touch {
+	font-family: ui-monospace, monospace;
+	color: var(--muted);
+	font-size: 11px;
+}
+
+/* Reconciliation ------------------------------------------------------------ */
+
+.recon {
+	display: grid;
+	grid-template-columns: 1.15fr 0.85fr;
+	gap: 16px;
+	margin-top: 16px;
+	align-items: start;
+}
+
+.recon-report {
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	padding: 16px 18px;
+	min-height: 220px;
+}
+
+.recon-report h2 {
+	margin: 0 0 10px;
+	font-size: 16px;
+}
+
+.recon-report p {
+	line-height: 1.5;
+}
+
+.result .editor {
+	min-height: 200px;
+	background: #fcfcfd;
+}
+
+.empty {
+	color: var(--muted);
+}
+
+.ok {
+	color: var(--ok);
+}
+
+.danger {
+	color: var(--danger);
+}
+
+.timeline {
+	margin: 8px 0;
+	padding-left: 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+}
+
+.timeline li {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.timeline li.conflict {
+	background: var(--warn-bg);
+	border-radius: 6px;
+	padding: 2px 6px;
+	margin-left: -6px;
+}
+
+.tag {
+	font-size: 11px;
+	color: var(--danger);
+	font-weight: 600;
+}
+
+.chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	background: #f3f4f6;
+	border: 1px solid var(--line);
+	border-radius: 999px;
+	padding: 3px 10px;
+}
+
+.chip.warn {
+	background: var(--warn-bg);
+	border-color: #fecaca;
+}
+
+.chip code {
+	background: transparent;
+	padding: 0;
+}
+
+.cols {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 16px;
+	margin-top: 8px;
+}
+
+.cols h4 {
+	margin: 0 0 6px;
+	font-size: 13px;
+}
+
+ul.plain {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+}
+
+ul.plain li {
+	font-size: 12px;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 5px;
+}
+
+.sample {
+	margin: 8px 0 0;
+	background: #0f172a;
+	color: #c7d2fe;
+	padding: 12px;
+	border-radius: 8px;
+	font-size: 11px;
+	line-height: 1.5;
+	overflow-x: auto;
+	white-space: pre-wrap;
+	word-break: break-all;
+}
+
+@media (max-width: 900px) {
+	.grid,
+	.recon,
+	.cols {
+		grid-template-columns: 1fr;
+	}
+}
