@@ -15,11 +15,13 @@ A Notion-inspired block editor for the web, built as a TypeScript monorepo. Plim
 | Package | Description |
 | --- | --- |
 | [`@plim/core`](./packages/core) | Schema, document model, transactions, validation rules, action/extension/trigger system, history, and the built-in block & mark descriptors. Runtime-agnostic — no DOM. |
+| [`@plim/ledger`](./packages/ledger) | Record, replay, merge, diff, and rebase transactions (`TransactionLedger`, `LedgerRecord`) plus conflict resolution — the bring-your-own sync / CRDT layer. Runtime-agnostic. |
+| [`@plim/collaboration`](./packages/collaboration) | Real-time multi-peer editing on top of the ledger: `Collaborator` (optimistic OT), `CollabHub` (transport-agnostic server half), presence/awareness, and version vectors. |
 | [`@plim/markdown`](./packages/markdown) | Parse Markdown into a Plim document (`contentFromMarkdown`, `parseMarkdown`) and serialize back (`contentToMarkdown`). |
 | [`@plim/editor`](./packages/editor) | The view layer. Mounts a Plim document into a `contenteditable`, owns the floating toolbar, the block-handle gutter, paste/clipboard handling, drag-and-drop, and the keyboard pipeline. Ships its own stylesheet. |
 | [`@plim/react`](./packages/react) | React bindings: `<PlimEditor>`, `useEditorHandle()`, slash-command and mention extensions with first-class React components, and a bridge for defining blocks with `toComponent` (real React components persisted into the doc). |
 
-`examples/notion-clone` is a full Vite + React app exercising all four packages — it's the litmus test the whole repo is built against.
+`examples/notion-clone` is a full Vite + React app exercising the four editor-stack packages above — it's the litmus test the whole repo is built against.
 
 ## Install
 
