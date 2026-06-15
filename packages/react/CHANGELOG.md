@@ -1,5 +1,13 @@
 # @plim/react
 
+## 0.1.1
+
+### Patch Changes
+
+- Updated dependencies [8016478]
+  - @plim/core@0.1.1
+  - @plim/editor@0.1.1
+
 ## 0.1.0
 
 ### Patch Changes
