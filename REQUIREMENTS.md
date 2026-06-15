@@ -367,7 +367,63 @@ else /* fall back to resolveConflicts — the rebase was ambiguous */;
 The ledger is deliberately unopinionated about transport and policy. It is honest about its limits: conflict detection is conservative (it would rather report a conflict than silently clobber), and rebase covers text edits and block insert/remove/split/move precisely while refusing — rather than guessing — when a concurrent change makes the result genuinely ambiguous.
 
 
-## Blocks and Marks API
+## Collaboration API
+
+The ledger gives you the primitives; the **collaboration layer** assembles them into a drop-in, real-time, multi-peer editing experience. A `Collaborator` wraps one editor and a `Transport` and gives you live optimistic editing, automatic convergence, presence/awareness, and late-join delta sync — without you writing a single line of merge logic.
+
+The model is **server-authoritative optimistic OT** (the same shape ProseMirror's `collab` module uses). An **authority** owns the one canonical, ordered log and the canonical document. Each client edits optimistically against its local copy, sends records to the authority, and the authority assigns a canonical order and broadcasts records _already in canonical position_. Because every peer applies confirmed records raw — in the same order — **every peer's confirmed document is identical by construction**; convergence does not depend on the quality of any client-side rebase.
+
+```ts
+import { Collaborator, createMemoryNetwork } from '@plim/core';
+
+// One in-process hub with an embedded authority (swap for your own Transport in production).
+const net = createMemoryNetwork({ origin: baseDoc });
+
+const alice = new Collaborator({ peer: { id: 'alice', name: 'Alice' }, editor, transport: net.connect() });
+
+alice.onChange((status) => render(status)); // { head, pending, inflight }
+// Local edits flow automatically: every committed transaction becomes a record,
+// applies instantly (optimistic), and is reconciled when the authority confirms it.
+```
+
+Local edits apply **instantly** and are held as `pending` until the authority confirms them. Exactly one record is in flight at a time, so every authority-side rebase is the simple single-record case. When confirmations arrive, the `Collaborator` acks its own record, rebases the rest of `pending` over any concurrent remote batch (dropping any record that can no longer be placed — canonical wins, deterministically), and rebuilds the editor as `confirmedDoc + pending`. The **local caret is always preserved or shifted to track remote inserts — never replaced by a remote selection**, and a record coming back as your own ack never rebuilds the document under your cursor.
+
+**Presence / awareness** rides on the same transport but is entirely ephemeral — it is never written to the ledger, so cursors and status are fast and disposable:
+
+```ts
+alice.setPresence({ status: 'editing' });        // replace awareness state + broadcast
+alice.patchPresence({ status: 'idle' });          // shallow-merge a patch + broadcast
+alice.peers;                                       // PeerPresence[] — render these as remote cursors
+```
+
+Selection changes broadcast automatically as you move the caret. `peers` returns each remote peer's `{ peer, state, clock, lastSeen }`. A graceful `destroy()` announces departure (`bye`) so others drop that cursor **immediately**. To also reclaim cursors left behind by an _ungraceful_ disconnect (a crash or closed tab that never sent `bye`), opt into a liveness heartbeat: pass `heartbeatMs` (and tune `ttlMs`, default `30_000`). Each tick re-announces your presence — so peers keep you alive — and prunes any peer you have not heard from within `ttlMs`. Heartbeats are liveness-only: an unchanged-state heartbeat refreshes `lastSeen` without emitting a change event, so it never triggers a re-render. Heartbeating is **off by default** (no timers, no overhead) — without it, `ttlMs` pruning never runs and ghost cursors persist until that peer reconnects or the page reloads.
+
+**Late join and reconnect** are a single call. The authority replies with every canonical record the client is missing and the client fast-forwards to the head:
+
+```ts
+const dave = new Collaborator({ peer: { id: 'dave' }, editor: daveEditor, transport: net.connect() });
+dave.sync(); // pull the full backlog; converges to the authority's head
+```
+
+**Version vectors** summarize "how much of each source have I seen" (highest `seq` per source) for diffing progress or driving your own delta protocol:
+
+```ts
+alice.versionVector();   // e.g. { alice: 12, bob: 7 }
+net.authority.head;      // the one true canonical version count
+```
+
+### Convergence guarantee and honest limits
+
+At quiescence (no pending edits anywhere) **every peer's confirmed document equals the authority's canonical document** — this is provable (confirmed records are applied raw in one global order) and is locked in by a fuzz test that drives four peers through random concurrent schedules and asserts identical documents. The optimistic `pending` chain is a self-healing UX layer on top: if a pending rebase ever bails, that record is dropped deterministically (confirmed wins) so convergence still holds.
+
+It is honest about its edges:
+
+- **Multi-record offline flush.** A client that authored several edits while disconnected flushes them one at a time; each is rebased independently over the gap. They converge identically on every peer, but a long offline batch interleaved with heavy concurrent remote edits may not preserve the author's _intent_ as faithfully as a live edit would. Convergence is guaranteed; intent-preservation is best-effort — exactly the same trade-off the underlying `rebaseRecord` documents.
+- **`seq` semantics.** Version vectors key off each record's per-source `seq`. Records authored without a `seq` (e.g. hand-built ledger records replayed into a collaborator) are treated as `seq` 0 for that source. Stamp `record.seq` if you mint records yourself and rely on version vectors.
+- **Transport contract.** Correctness assumes **per-endpoint FIFO delivery** of the canonical `confirm` stream (the bundled `createMemoryNetwork` guarantees this even under random latency). A custom `Transport` must preserve order per connection; it may drop/duplicate freely across a reconnect because `sync()` reconciles from the head.
+
+
+
 
 ### Blocks API
 

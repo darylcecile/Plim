@@ -7,5 +7,5 @@
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": ["@plim/example-notion-clone", "@plim/example-ledger-kitchen-sink"]
+  "ignore": ["@plim/example-notion-clone", "@plim/example-ledger-kitchen-sink", "@plim/example-collab-kitchen-sink"]
 }

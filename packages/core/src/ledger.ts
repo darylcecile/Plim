@@ -31,6 +31,8 @@ export type LedgerRecord = {
 	lamport: number;
 	/** Origin of the edit (client/editor/site id), if known. */
 	source?: string;
+	/** Per-source monotonic counter. Powers version vectors for delta sync; optional. */
+	seq?: number;
 	/** Carried-through transaction metadata (e.g. `nextSelection`). Best-effort serializable. */
 	meta?: TransactionMeta;
 	/** Id-keyed conflict surface, resolved against the base doc at record time. */

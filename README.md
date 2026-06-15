@@ -373,6 +373,32 @@ Conflict detection is **conservative** (it would rather flag a conflict than sil
 
 See [`examples/ledger-kitchen-sink`](./examples/ledger-kitchen-sink) for two editors syncing through every one of these primitives.
 
+## Collaboration
+
+A `Collaborator` turns the ledger primitives into a drop-in, real-time, multi-peer editing experience: optimistic local edits, automatic convergence, live presence/cursors, and late-join delta sync — no merge code on your side. The model is **server-authoritative optimistic OT** (the shape ProseMirror's `collab` uses): an authority owns the one canonical ordered log and broadcasts records already in canonical position, so **every peer's confirmed document is identical by construction**.
+
+```ts
+import { Collaborator, createMemoryNetwork } from '@plim/core';
+
+// In-process hub with an embedded authority (swap for your own Transport in production).
+const net = createMemoryNetwork({ origin: baseDoc });
+
+const alice = new Collaborator({ peer: { id: 'alice', name: 'Alice' }, editor, transport: net.connect() });
+alice.onChange((s) => render(s));          // { head, pending, inflight }
+alice.setPresence({ status: 'editing' });  // ephemeral awareness (never logged to the ledger)
+alice.peers;                                // remote cursors to render
+
+// Local edits flow automatically: each committed transaction applies instantly
+// (optimistic) and reconciles when the authority confirms it.
+
+const dave = new Collaborator({ peer: { id: 'dave' }, editor: daveEditor, transport: net.connect() });
+dave.sync();                                // late join: pull the backlog, fast-forward to head
+```
+
+Local edits apply **instantly** and sit in `pending` until confirmed; the **local caret is always preserved** (shifted to track remote inserts, never replaced by a remote cursor, never disturbed when your own edit is acked). At quiescence every peer's confirmed document equals the authority's — provable, and locked in by a four-peer randomized fuzz convergence test. It is honest about its edges (multi-record offline flush is convergent but only best-effort intent-preserving; version vectors key off per-source `seq`; a custom `Transport` must keep per-connection FIFO). See the [Collaboration API](./REQUIREMENTS.md#collaboration-api) for the full contract.
+
+See [`examples/collab-kitchen-sink`](./examples/collab-kitchen-sink) for three live editors sharing one document through a simulated network.
+
 ## Markdown
 
 `@plim/markdown` round-trips between Markdown and Plim documents. It understands the built-in block & mark vocabulary (paragraphs, headings, quotes, bulleted/numbered/todo lists, dividers, fenced code, images, plus `**bold**`, `*italic*`, `` `code` ``, `~strike~`, `[link](href)`, `<u>underline</u>`).
@@ -410,6 +436,13 @@ pnpm dev:notion         # opens http://localhost:5174
 ```sh
 pnpm install
 pnpm dev:ledger         # opens http://localhost:5175
+```
+
+[`examples/collab-kitchen-sink`](./examples/collab-kitchen-sink) is a live collaboration playground: three real `Collaborator` editors share one document through an in-process `createMemoryNetwork()` hub. Type in any pane and watch edits converge; fire a concurrent burst (all three editing the same spot at once), drag the latency slider to see the optimistic UI lead the confirmed state, watch a fourth peer join late and delta-sync the backlog, and inspect per-peer presence and version vectors. Run it with:
+
+```sh
+pnpm install
+pnpm dev:collab         # opens http://localhost:5176
 ```
 
 ## Development

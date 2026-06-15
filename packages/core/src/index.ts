@@ -13,4 +13,7 @@ export * from './history.js';
 export * from './ledger.js';
 export * from './ledger-conflict.js';
 export * from './ledger-rebase.js';
+export * from './collab-presence.js';
+export * from './collab-transport.js';
+export * from './collab.js';
 export * from './builtins.js';
