@@ -1,5 +1,11 @@
 # @plim/ledger
 
+## 0.1.1
+
+### Patch Changes
+
+- Align versions with the rest of the @plim packages (0.1.1).
+
 ## 0.1.0
 
 ### Minor Changes
