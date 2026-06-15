@@ -397,7 +397,20 @@ dave.sync();                                // late join: pull the backlog, fast
 
 Local edits apply **instantly** and sit in `pending` until confirmed; the **local caret is always preserved** (shifted to track remote inserts, never replaced by a remote cursor, never disturbed when your own edit is acked). At quiescence every peer's confirmed document equals the authority's — provable, and locked in by a four-peer randomized fuzz convergence test. It is honest about its edges (multi-record offline flush is convergent but only best-effort intent-preserving; version vectors key off per-source `seq`; a custom `Transport` must keep per-connection FIFO). See the [Collaboration API](./REQUIREMENTS.md#collaboration-api) for the full contract.
 
-See [`examples/collab-kitchen-sink`](./examples/collab-kitchen-sink) for three live editors sharing one document through a simulated network.
+For a **real** server, drop the in-process `createMemoryNetwork` and reach for `CollabHub` — the transport-agnostic server half of the protocol. Wrap any socket as a `HubClient` and it linearizes submissions and broadcasts canonical records for you:
+
+```ts
+import { CollabHub, type HubClient } from '@plim/core';
+
+const hub = new CollabHub(baseDoc);
+// per connection:
+const client: HubClient = { send: (m) => socket.send(JSON.stringify(m)) };
+hub.add(client);
+socket.on('message', (raw) => hub.receive(client, JSON.parse(raw)));
+socket.on('close', () => hub.remove(client));
+```
+
+See [`examples/collab-kitchen-sink`](./examples/collab-kitchen-sink) for one shared document served over a real WebSocket by a tiny Hono + `CollabHub` backend — open it in two tabs and edit together.
 
 ## Markdown
 
@@ -438,11 +451,11 @@ pnpm install
 pnpm dev:ledger         # opens http://localhost:5175
 ```
 
-[`examples/collab-kitchen-sink`](./examples/collab-kitchen-sink) is a live collaboration playground: three real `Collaborator` editors share one document through an in-process `createMemoryNetwork()` hub. Type in any pane and watch edits converge; fire a concurrent burst (all three editing the same spot at once), drag the latency slider to see the optimistic UI lead the confirmed state, watch a fourth peer join late and delta-sync the backlog, and inspect per-peer presence and version vectors. Run it with:
+[`examples/collab-kitchen-sink`](./examples/collab-kitchen-sink) is **one** collaborative document you open in **multiple browser tabs, windows, or devices** — real cross-tab collaboration, not a simulation. A tiny [Hono](https://hono.dev) + `ws` backend (≈40 lines) wraps `CollabHub` from `@plim/core` and serves the document over a real WebSocket; each tab is a distinct peer with its own colour. Type in any tab and edits converge live in the others, with inline remote carets, a presence roster, and a sync inspector (canonical version, optimistic `pending`, version vector). Edit while offline and watch `pending` build up, then drain and reconverge on reconnect. `pnpm dev:collab` runs the server and the Vite app together:
 
 ```sh
 pnpm install
-pnpm dev:collab         # opens http://localhost:5176
+pnpm dev:collab         # server on :8787, app on http://localhost:5176
 ```
 
 ## Development

@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
 	type CollabMessage,
 	type EditorState,
+	type HubClient,
 	type LedgerRecord,
 	type Peer,
+	CollabHub,
 	InMemoryAuthority,
 	Transaction,
 	blockPlainText,
@@ -204,4 +206,63 @@ describe('createMemoryNetwork', () => {
 		tb.send({ type: 'hello', peer: { id: 'b' }, head: 0 });
 		expect(inboxB.some((m) => m.type === 'presence' && m.peer.id === 'a')).toBe(true);
 	});
+});
+
+describe('CollabHub (transport-agnostic server)', () => {
+function client(inbox: CollabMessage[]): HubClient {
+return { send: (m) => inbox.push(m) };
+}
+
+it('handshake replies with welcome + backlog, replays cached presence, and linearizes submits to all', () => {
+const base = doc('seed');
+const hub = new CollabHub(base.doc);
+const inboxA: CollabMessage[] = [];
+const inboxB: CollabMessage[] = [];
+const a = client(inboxA);
+const b = client(inboxB);
+
+hub.add(a);
+hub.receive(a, { type: 'hello', peer: { id: 'a' }, head: 0 });
+expect(inboxA.find((m) => m.type === 'welcome')).toMatchObject({ head: 0 });
+expect(inboxA.find((m) => m.type === 'confirm')).toMatchObject({ order: 0 });
+expect(hub.peers()).toEqual(['a']);
+
+// A announces presence; B joins late and must see A's cursor in its handshake replay.
+hub.receive(a, { type: 'presence', peer: { id: 'a' }, state: { selection: null }, clock: 1 });
+hub.add(b);
+hub.receive(b, { type: 'hello', peer: { id: 'b' }, head: 0 });
+expect(inboxB.some((m) => m.type === 'presence' && m.peer.id === 'a')).toBe(true);
+
+// A submit is broadcast to BOTH peers (sender included) in canonical position.
+const r = rec('a', 1, 1, (tx) => tx.insertText([0], 4, '!'), base);
+inboxA.length = 0;
+inboxB.length = 0;
+hub.receive(a, { type: 'submit', from: 'a', base: 0, records: [r] });
+expect(inboxA.at(-1)).toMatchObject({ type: 'confirm', order: 0 });
+expect(inboxB.at(-1)).toMatchObject({ type: 'confirm', order: 0 });
+expect(hub.authority.head).toBe(1);
+});
+
+it('remove announces bye to the rest and forgets the departed peer cached presence', () => {
+const hub = new CollabHub();
+const inboxB: CollabMessage[] = [];
+const a = client([]);
+const b = client(inboxB);
+hub.add(a);
+hub.add(b);
+hub.receive(a, { type: 'hello', peer: { id: 'a' }, head: 0 });
+hub.receive(b, { type: 'hello', peer: { id: 'b' }, head: 0 });
+hub.receive(a, { type: 'presence', peer: { id: 'a' }, state: { selection: null }, clock: 1 });
+
+hub.remove(a);
+expect(inboxB.some((m) => m.type === 'bye' && m.peerId === 'a')).toBe(true);
+expect(hub.peers()).toEqual(['b']);
+
+// A fresh late joiner must NOT inherit the removed peer's stale cursor.
+const inboxC: CollabMessage[] = [];
+const c = client(inboxC);
+hub.add(c);
+hub.receive(c, { type: 'hello', peer: { id: 'c' }, head: 0 });
+expect(inboxC.some((m) => m.type === 'presence' && m.peer.id === 'a')).toBe(false);
+});
 });

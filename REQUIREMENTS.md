@@ -422,8 +422,29 @@ It is honest about its edges:
 - **`seq` semantics.** Version vectors key off each record's per-source `seq`. Records authored without a `seq` (e.g. hand-built ledger records replayed into a collaborator) are treated as `seq` 0 for that source. Stamp `record.seq` if you mint records yourself and rely on version vectors.
 - **Transport contract.** Correctness assumes **per-endpoint FIFO delivery** of the canonical `confirm` stream (the bundled `createMemoryNetwork` guarantees this even under random latency). A custom `Transport` must preserve order per connection; it may drop/duplicate freely across a reconnect because `sync()` reconciles from the head.
 
+### Bring your own server: `CollabHub`
 
+`createMemoryNetwork` is the client-and-server-in-one-process convenience. To run a **real** server you only need the server half, and that is exactly what `CollabHub` is: the entire wire protocol (handshake, `submit` → linearize → broadcast `confirm`, delta `sync`, `presence`/`bye` relay) with **no transport baked in**. It owns an `InMemoryAuthority` and talks to each connection through a one-method `HubClient` sink, so you can wrap any duplex channel — a WebSocket, a worker port, a queue — in a dozen lines.
 
+```ts
+import { CollabHub, type CollabMessage, type HubClient } from '@plim/core';
+
+const hub = new CollabHub(baseDoc); // one hub = one shared document
+
+// For each connected socket:
+function onConnection(socket: MyDuplex): void {
+  const client: HubClient = {
+    send: (message) => socket.write(JSON.stringify(message)), // hub → wire
+  };
+  hub.add(client);                                            // register
+  socket.on('message', (raw) => hub.receive(client, JSON.parse(raw) as CollabMessage)); // wire → hub
+  socket.on('close', () => hub.remove(client));               // announces `bye` to the rest
+}
+```
+
+The hub calls `client.send` in canonical order per client, so your transport only has to preserve **per-connection FIFO** (TCP and WebSocket already do). `hub.authority.head` is the canonical version and `hub.peers()` lists the handshaked peers — handy for a health endpoint. Swap the in-memory authority's backing store for Postgres, Redis, a CRDT engine, or Durable Objects and the same seam becomes a production server. The bundled `createMemoryNetwork` is itself just a `CollabHub` wired to loopback transports.
+
+The [`examples/collab-kitchen-sink`](./examples/collab-kitchen-sink) server is precisely this: a ~40-line [Hono](https://hono.dev) + `ws` adapter around one `CollabHub`, serving a single document that any number of browser tabs edit together live.
 
 ### Blocks API
 

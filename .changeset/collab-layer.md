@@ -24,9 +24,12 @@ construction — convergence never depends on client-side rebase quality.
   `patchPresence` / `peers` share ephemeral cursor and status state on the same
   transport. Presence is never written to the ledger (throwaway and fast),
   lamport-guarded against stale updates, and TTL-pruned.
-- **Transport & authority** — `createMemoryNetwork` provides an in-process hub
-  (`InMemoryAuthority`) and loopback `Transport`s with optional (possibly
-  dynamic) latency for demos and tests. `VersionVector` helpers
+- **Transport & authority** — `CollabHub` is the transport-agnostic server half
+  of the protocol (handshake, submit→linearize→broadcast, delta `sync`, presence
+  relay); wrap any socket as a one-method `HubClient` and it linearizes every
+  peer's edits into one canonical order. `createMemoryNetwork` provides an
+  in-process hub (`InMemoryAuthority`) and loopback `Transport`s with optional
+  (possibly dynamic) latency for demos and tests. `VersionVector` helpers
   (`versionVectorOf`, `recordsAfter`, `coversRecord`, `mergeVersionVectors`)
   summarize per-source progress, and the `CollabMessage` wire DSL is a small
   JSON-safe discriminated union.
@@ -37,6 +40,7 @@ construction — convergence never depends on client-side rebase quality.
 
 Convergence is proved by construction and locked in by a four-peer randomized
 fuzz test; a benchmark suite guards author/integrate/rebase/presence throughput
-against regressions. See the new `examples/collab-kitchen-sink` for three live
-editors sharing one document — concurrent bursts, a latency slider, late-join
-delta sync, and presence/version-vector inspectors.
+against regressions. See the new `examples/collab-kitchen-sink` for one shared
+document served over a real WebSocket by a tiny Hono + `CollabHub` backend — open
+it in two browser tabs to edit together live, with inline remote carets, a
+presence roster, a version-vector inspector, and offline-then-reconnect resync.

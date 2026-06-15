@@ -16,6 +16,7 @@ import {
 	blockPlainText,
 	createMemoryNetwork,
 	newId,
+	recordFromTransaction,
 } from '@plim/core';
 
 // ---- harness ----------------------------------------------------------------
@@ -394,14 +395,9 @@ describe('Collaborator — presence liveness (opt-in heartbeat + TTL)', () => {
 	});
 });
 
-describe('Collaborator — confirmed-batch integrity guard', () => {
-	it('throws loudly if a confirmed batch ever mixes our own record with foreign records', () => {
-		// A confirm that acks our pending is, by construction, single-record (the
-		// authority confirms one in-flight record at a time) and `sync` replies never
-		// echo our own un-acked pending — so a batch can NEVER legitimately contain
-		// both our record and a foreign one. If that invariant is ever violated we
-		// must fail loudly rather than silently advance the canonical doc past remote
-		// ops without rebasing pending (which would corrupt the editor).
+describe('Collaborator — reconnect / backlog replay', () => {
+	// A controllable transport: capture what the Collaborator sends, and hand-deliver inbound messages.
+	function mockTransport() {
 		let handler: ((m: CollabMessage) => void) | null = null;
 		const sent: CollabMessage[] = [];
 		const transport: Transport = {
@@ -414,20 +410,90 @@ describe('Collaborator — confirmed-batch integrity guard', () => {
 			},
 			close: () => {},
 		};
+		return { transport, sent, deliver: (m: CollabMessage) => handler?.(m) };
+	}
 
-		const editor = makeEditor(cloneDoc(baseDoc()));
+	// Mint a genuine remote record authored by another peer against `origin`.
+	function remoteRecord(origin: DocumentNode, build: (tx: TransactionType) => void, source: string, seq: number): LedgerRecord {
+		const tx = new Transaction(stateFrom(cloneDoc(origin)));
+		build(tx);
+		tx.commit();
+		const rec = recordFromTransaction(tx, { source, lamport: seq });
+		rec.seq = seq;
+		return rec;
+	}
+
+	const lastSubmit = (sent: CollabMessage[]): Extract<CollabMessage, { type: 'submit' }> | undefined =>
+		[...sent].reverse().find((m): m is Extract<CollabMessage, { type: 'submit' }> => m.type === 'submit');
+
+	it('converges when a reconnect backlog mixes our own canonical record with an unseen remote record', () => {
+		// Regression: the hub answers a (re)`hello`/`sync` with the WHOLE canonical backlog from our
+		// confirmed head in one `confirm`. If our socket dropped after a record we authored was appended
+		// canonically but before its confirm arrived, that backlog legitimately interleaves our own
+		// now-canonical record with remote edits made while we were away. The Collaborator must fold the
+		// batch and converge — it used to throw on this "mixed" batch and wedge the tab on every reconnect.
+		const origin = baseDoc();
+		const { transport, sent, deliver } = mockTransport();
+		const editor = makeEditor(cloneDoc(origin));
 		const me = new Collaborator({ peer: { id: 'a', name: 'a' }, editor: editor.handle, transport });
 
-		// Author one local edit → it becomes our single in-flight pending record.
-		editor.emit((tx) => tx.insertText([0], 0, 'X'));
-		const submit = sent.find((m): m is Extract<CollabMessage, { type: 'submit' }> => m.type === 'submit');
-		expect(submit).toBeDefined();
-		const ourRecord = submit!.records[0]!;
+		// We author P and it reaches the authority (it is in flight), but its confirm never comes back.
+		editor.emit((tx) => tx.insertText([0], 0, 'X')); // 'alpha' -> 'Xalpha'
+		const P = lastSubmit(sent)!.records[0]!;
+		expect(me.status.pending).toBe(1);
+		expect(me.status.inflight).toBe(true);
 
-		// Forge an illegal confirm: a foreign record AND our own record in one batch.
-		const foreign: LedgerRecord = { ...ourRecord, id: 'foreign-1' };
-		expect(handler).not.toBeNull();
-		expect(() => handler!({ type: 'confirm', order: 0, records: [foreign, ourRecord] })).toThrow(/mix/i);
+		// While we were disconnected, peer 'b' inserted into a different block; canonical order is [P, R].
+		const R = remoteRecord(origin, (tx) => tx.insertText([1], 0, 'Z'), 'b', 1); // 'bravo' -> 'Zbravo'
+
+		// Reconnect: the hub replays the full backlog from order 0 in one batch.
+		expect(() => deliver({ type: 'confirm', order: 0, records: [P, R] })).not.toThrow();
+
+		// Converged: our record acked (pending drained), remote folded, canonical doc == origin + P + R.
+		expect(me.status.pending).toBe(0);
+		expect(me.status.inflight).toBe(false);
+		expect(me.status.head).toBe(2);
+		expect(blockPlainText(me.confirmedDocument.children[0]!)).toBe('Xalpha');
+		expect(blockPlainText(me.confirmedDocument.children[1]!)).toBe('Zbravo');
+		// The visible editor equals the confirmed doc (no pending left).
+		expect(project(me.document)).toEqual(project(me.confirmedDocument));
+
+		me.destroy();
+	});
+
+	it('keeps and resubmits a surviving pending edit when the reconnect backlog also acks our in-flight record', () => {
+		// Two local edits: P is in flight, Q is queued behind it. The reconnect backlog acks P and also
+		// carries a remote record R. P must be acked, R folded, and Q must SURVIVE — rebased over R only
+		// (not over P, which was already part of Q's optimistic base) — then flushed as the next submit.
+		const origin = baseDoc();
+		const { transport, sent, deliver } = mockTransport();
+		const editor = makeEditor(cloneDoc(origin));
+		const me = new Collaborator({ peer: { id: 'a', name: 'a' }, editor: editor.handle, transport });
+
+		editor.emit((tx) => tx.insertText([0], 0, 'X')); // P: 'alpha' -> 'Xalpha'
+		editor.emit((tx) => tx.insertText([0], 1, 'Y')); // Q: 'Xalpha' -> 'XYalpha'
+		const P = lastSubmit(sent)!.records[0]!;
+		expect(me.status.pending).toBe(2);
+
+		const R = remoteRecord(origin, (tx) => tx.insertText([1], 0, 'Z'), 'b', 1); // 'bravo' -> 'Zbravo'
+
+		// Reconnect backlog: [P (ack), R (remote)] — Q is still pending and not in the batch.
+		deliver({ type: 'confirm', order: 0, records: [P, R] });
+
+		// P acked + R folded → head 2; Q survives and is flushed as the next in-flight submit.
+		expect(me.status.head).toBe(2);
+		expect(me.status.pending).toBe(1);
+		expect(me.status.inflight).toBe(true);
+		const Q = lastSubmit(sent)!.records[0]!;
+		expect(Q.id).not.toBe(P.id);
+		// Optimistic editor shows confirmed (Xalpha / Zbravo) + Q (the 'Y') => 'XYalpha' / 'Zbravo'.
+		expect(blockPlainText(me.document.children[0]!)).toBe('XYalpha');
+		expect(blockPlainText(me.document.children[1]!)).toBe('Zbravo');
+
+		// Finally the authority confirms Q → fully drained and converged.
+		deliver({ type: 'confirm', order: 2, records: [Q] });
+		expect(me.status.pending).toBe(0);
+		expect(blockPlainText(me.confirmedDocument.children[0]!)).toBe('XYalpha');
 
 		me.destroy();
 	});

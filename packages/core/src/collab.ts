@@ -353,48 +353,49 @@ export class Collaborator {
 		if (records.length === 0) return;
 		const prevConfirmed = this.confirmedDoc;
 		const pendingIds = new Set(this.pending.map((p) => p.id));
-		const ourAck = records.filter((r) => pendingIds.has(r.id));
-		const isOurs = ourAck.length > 0;
-
-		// Invariant: a confirm batch that acks any of our pending is HOMOGENEOUS — it contains only our
-		// own records. The authority confirms one in-flight record at a time (so live confirms are
-		// single-record), and `sync`/backlog replies only ever carry canonical records we are missing,
-		// never our own un-acked pending. The `isOurs` fast path below relies on this to skip rebasing
-		// and the editor rebuild. If a future non-FIFO transport or multi-in-flight authority ever mixes
-		// our ack with unseen remote records in one batch, fail loudly here rather than silently advance
-		// the canonical doc past remote ops without rebasing pending (which would corrupt the editor).
-		if (isOurs && ourAck.length !== records.length) {
-			throw new Error(
-				'Collaborator: received a confirm batch mixing our own records with unseen remote records; ' +
-					'the transport must deliver canonical confirms in per-endpoint FIFO order.',
-			);
-		}
+		// Partition the canonical batch: records that ack our own pending vs. genuinely remote records we
+		// have not seen. A live confirm is purely one or the other (the authority confirms one in-flight
+		// record at a time). A reconnect or `sync` backlog can legitimately carry BOTH at once — our own
+		// record that landed canonically while our socket was down (its confirm was lost) interleaved with
+		// remote edits made in the meantime — because the hub replies with the whole backlog from our
+		// confirmed head in one batch. Handling both partitions below lets a mixed batch CONVERGE instead
+		// of corrupting the editor (or, as it once did, throwing and wedging the client on every reconnect).
+		const acked = records.filter((r) => pendingIds.has(r.id));
+		const remote = records.filter((r) => !pendingIds.has(r.id));
 
 		// Advance the canonical doc by folding records RAW (they are already in canonical position),
 		// and grow the confirmed ledger — the shared source of truth that converges across peers.
+		// (Convergence holds regardless of how pending is rebased below: confirmedDoc is always the
+		// authority's exact canonical fold.)
 		for (const rec of records) {
 			this.confirmedDoc = foldRecord(this.confirmedDoc, rec);
 			this.ledger.append(rec);
 		}
 		this.confirmedHead += records.length;
 
-		if (isOurs) {
-			// Our own record(s) coming back canonical. The remaining pending were authored ON TOP of
-			// them (optimistic chain) and our local copy was rebased over the same prior remote confirms
-			// the authority used (per-endpoint FIFO guarantees we saw that gap first). So the editor
-			// ALREADY shows exactly `confirmedDoc + pending` — re-setting state would rebuild the doc
-			// under the user's caret for zero visible change. We leave the editor untouched, which is
-			// what keeps the caret rock-steady while you type. (Invariant editor.doc === confirmedDoc +
-			// pending is preserved: confirmedDoc grew by the acked records, pending shrank by the same.)
-			const ackedIds = new Set(ourAck.map((r) => r.id));
+		// Ack our own now-canonical records: drop them from the optimistic pending chain.
+		if (acked.length > 0) {
+			const ackedIds = new Set(acked.map((r) => r.id));
 			this.pending = this.pending.filter((p) => !ackedIds.has(p.id));
 			if (this.inflightId && ackedIds.has(this.inflightId)) this.inflightId = null;
+		}
+
+		if (remote.length === 0) {
+			// Pure self-ack. The remaining pending were authored ON TOP of the acked records (optimistic
+			// chain) and our local copy was rebased over the same prior remote confirms the authority used
+			// (per-endpoint FIFO guarantees we saw that gap first). So the editor ALREADY shows exactly
+			// `confirmedDoc + pending` — re-setting state would rebuild the doc under the user's caret for
+			// zero visible change. We leave the editor untouched, which keeps the caret rock-steady while
+			// you type. (Invariant editor.doc === confirmedDoc + pending is preserved: confirmedDoc grew by
+			// the acked records, pending shrank by the same.)
 		} else {
-			// A remote batch we hadn't seen: our pending is concurrent with it. Rebase pending over the
-			// batch (dropping any that can no longer be placed — canonical wins, deterministically) and
-			// shift the local caret over the remote ops.
-			this.rebasePendingOver(records, prevConfirmed);
-			this.recomputeEditor(records.flatMap((r) => r.ops));
+			// We saw remote records we had not confirmed — either a purely concurrent batch, or (after a
+			// reconnect) a backlog that also carried our own now-acked record. Our surviving pending is
+			// concurrent with the REMOTE ops only — our own acked records were already part of its
+			// optimistic base — so rebase pending over just `remote` (dropping any that can no longer be
+			// placed — canonical wins, deterministically) and shift the local caret over the remote ops.
+			this.rebasePendingOver(remote, prevConfirmed);
+			this.recomputeEditor(remote.flatMap((r) => r.ops));
 		}
 
 		this.flush();

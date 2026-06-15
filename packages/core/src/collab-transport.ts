@@ -226,6 +226,108 @@ export class InMemoryAuthority {
 	}
 }
 
+// ---- hub (transport-agnostic server) ---------------------------------------
+
+/**
+ * One connected client, from the hub's perspective: a sink the hub pushes
+ * canonical and awareness messages into. Wrap any duplex channel (a WebSocket, a
+ * worker port, an in-process queue) as a `HubClient` and feed its inbound
+ * messages back to the hub via {@link CollabHub.receive}.
+ */
+export interface HubClient {
+	send(message: CollabMessage): void;
+}
+
+/**
+ * The server half of the protocol, independent of any wire. It owns an
+ * {@link InMemoryAuthority} and routes the whole `CollabMessage` stream:
+ * handshake (`hello` → `welcome` + full `confirm` backlog + a presence replay),
+ * `submit` → linearize → broadcast `confirm` (+ `reject` to the author),
+ * delta `sync`, and `presence`/`bye` relay. Pair it with any transport — the
+ * bundled {@link MemoryNetwork} uses it in-process, and a real WebSocket server
+ * is only a dozen lines around it (see `examples/collab-kitchen-sink`).
+ *
+ * Ordering contract: the hub calls `client.send` in canonical order per client;
+ * your transport MUST preserve that per-connection FIFO on the wire (TCP and
+ * WebSocket already do).
+ */
+export class CollabHub {
+	readonly authority: InMemoryAuthority;
+	private readonly clients = new Map<HubClient, { peer?: Peer }>();
+	private readonly lastPresence = new Map<PeerId, { peer: Peer; state: PresenceState; clock: number }>();
+
+	constructor(origin?: DocumentNode) {
+		this.authority = new InMemoryAuthority(origin);
+	}
+
+	/** Register a freshly connected client. Call this before routing its messages. */
+	add(client: HubClient): void {
+		this.clients.set(client, {});
+	}
+
+	/** Connected peer ids whose handshake (`hello`) has completed. */
+	peers(): PeerId[] {
+		const ids: PeerId[] = [];
+		for (const meta of this.clients.values()) if (meta.peer) ids.push(meta.peer.id);
+		return ids;
+	}
+
+	/** Route one inbound message from `client`. May reply to it and/or broadcast. */
+	receive(client: HubClient, message: CollabMessage): void {
+		const meta = this.clients.get(client);
+		if (!meta) return;
+		switch (message.type) {
+			case 'hello': {
+				meta.peer = message.peer;
+				const others: Peer[] = [];
+				for (const [c, m] of this.clients) if (c !== client && m.peer) others.push(m.peer);
+				client.send({ type: 'welcome', peers: others, head: this.authority.head });
+				client.send({ type: 'confirm', order: 0, records: this.authority.since(0) });
+				for (const p of this.lastPresence.values()) {
+					if (p.peer.id !== message.peer.id) client.send({ type: 'presence', peer: p.peer, state: p.state, clock: p.clock });
+				}
+				break;
+			}
+			case 'submit': {
+				const result = this.authority.submit(message.base, message.records);
+				if (result.records.length > 0) {
+					const confirm: CollabMessage = { type: 'confirm', order: result.order, records: result.records };
+					for (const c of this.clients.keys()) c.send(confirm);
+				}
+				if (result.dropped.length > 0) client.send({ type: 'reject', ids: result.dropped.map((d) => d.id) });
+				break;
+			}
+			case 'sync': {
+				client.send({ type: 'confirm', order: message.have, records: this.authority.since(message.have) });
+				break;
+			}
+			case 'presence': {
+				this.lastPresence.set(message.peer.id, { peer: message.peer, state: message.state, clock: message.clock });
+				for (const c of this.clients.keys()) if (c !== client) c.send(message);
+				break;
+			}
+			case 'bye': {
+				this.lastPresence.delete(message.peerId);
+				for (const c of this.clients.keys()) if (c !== client) c.send(message);
+				break;
+			}
+		}
+	}
+
+	/** Drop a client and announce its departure (`bye`) to everyone else. */
+	remove(client: HubClient): void {
+		const meta = this.clients.get(client);
+		if (!meta) return;
+		this.clients.delete(client);
+		const peerId = meta.peer?.id;
+		if (peerId) {
+			this.lastPresence.delete(peerId);
+			const bye: CollabMessage = { type: 'bye', peerId };
+			for (const c of this.clients.keys()) c.send(bye);
+		}
+	}
+}
+
 // ---- in-process network -----------------------------------------------------
 
 export interface MemoryNetworkOptions {
@@ -236,10 +338,10 @@ export interface MemoryNetworkOptions {
 }
 
 interface Endpoint {
-	peer?: Peer;
 	closed: boolean;
 	handlers: Set<(message: CollabMessage) => void>;
 	nextAt: number;
+	client?: HubClient;
 }
 
 /**
@@ -251,25 +353,32 @@ interface Endpoint {
  * canonical `confirm` stream never arrives out of order.
  */
 export class MemoryNetwork {
-	readonly authority: InMemoryAuthority;
+	private readonly hub: CollabHub;
 	private readonly latency: () => number;
 	private readonly endpoints = new Set<Endpoint>();
-	private readonly lastPresence = new Map<PeerId, { peer: Peer; state: PresenceState; clock: number }>();
 	private readonly queue: Array<() => void> = [];
 	private draining = false;
 
 	constructor(options: MemoryNetworkOptions = {}) {
-		this.authority = new InMemoryAuthority(options.origin);
+		this.hub = new CollabHub(options.origin);
 		const lat = options.latencyMs ?? 0;
 		this.latency = typeof lat === 'function' ? lat : () => lat;
+	}
+
+	/** The embedded authority — the canonical ordered log and the document it folds to. */
+	get authority(): InMemoryAuthority {
+		return this.hub.authority;
 	}
 
 	/** Open a new client transport connected to the hub. */
 	connect(): Transport {
 		const endpoint: Endpoint = { closed: false, handlers: new Set(), nextAt: 0 };
 		this.endpoints.add(endpoint);
+		const client: HubClient = { send: (message) => this.deliver(endpoint, message) };
+		endpoint.client = client;
+		this.hub.add(client);
 		return {
-			send: (message) => this.receive(endpoint, message),
+			send: (message) => this.hub.receive(client, message),
 			onMessage: (handler) => {
 				endpoint.handlers.add(handler);
 				return () => endpoint.handlers.delete(handler);
@@ -280,62 +389,14 @@ export class MemoryNetwork {
 
 	/** Peer ids currently connected (handshake completed). */
 	peers(): PeerId[] {
-		const ids: PeerId[] = [];
-		for (const ep of this.endpoints) if (ep.peer) ids.push(ep.peer.id);
-		return ids;
-	}
-
-	private receive(from: Endpoint, message: CollabMessage): void {
-		switch (message.type) {
-			case 'hello': {
-				from.peer = message.peer;
-				const others: Peer[] = [];
-				for (const ep of this.endpoints) if (ep !== from && ep.peer) others.push(ep.peer);
-				this.deliver(from, { type: 'welcome', peers: others, head: this.authority.head });
-				this.deliver(from, { type: 'confirm', order: 0, records: this.authority.since(0) });
-				for (const p of this.lastPresence.values()) {
-					if (p.peer.id !== message.peer.id) this.deliver(from, { type: 'presence', peer: p.peer, state: p.state, clock: p.clock });
-				}
-				break;
-			}
-			case 'submit': {
-				const result = this.authority.submit(message.base, message.records);
-				if (result.records.length > 0) {
-					const confirm: CollabMessage = { type: 'confirm', order: result.order, records: result.records };
-					for (const ep of this.endpoints) this.deliver(ep, confirm);
-				}
-				if (result.dropped.length > 0) {
-					this.deliver(from, { type: 'reject', ids: result.dropped.map((d) => d.id) });
-				}
-				break;
-			}
-			case 'sync': {
-				this.deliver(from, { type: 'confirm', order: message.have, records: this.authority.since(message.have) });
-				break;
-			}
-			case 'presence': {
-				this.lastPresence.set(message.peer.id, { peer: message.peer, state: message.state, clock: message.clock });
-				for (const ep of this.endpoints) if (ep !== from) this.deliver(ep, message);
-				break;
-			}
-			case 'bye': {
-				this.lastPresence.delete(message.peerId);
-				for (const ep of this.endpoints) if (ep !== from) this.deliver(ep, message);
-				break;
-			}
-		}
+		return this.hub.peers();
 	}
 
 	private disconnect(endpoint: Endpoint): void {
 		if (endpoint.closed) return;
 		endpoint.closed = true;
 		this.endpoints.delete(endpoint);
-		const peerId = endpoint.peer?.id;
-		if (peerId) {
-			this.lastPresence.delete(peerId);
-			const bye: CollabMessage = { type: 'bye', peerId };
-			for (const ep of this.endpoints) this.deliver(ep, bye);
-		}
+		if (endpoint.client) this.hub.remove(endpoint.client);
 	}
 
 	private deliver(endpoint: Endpoint, message: CollabMessage): void {
