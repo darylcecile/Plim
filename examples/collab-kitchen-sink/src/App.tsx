@@ -1,6 +1,5 @@
 import * as React from 'react';
 import {
-Collaborator,
 PlimDriver,
 boldMark,
 codeMark,
@@ -10,10 +9,9 @@ italicMark,
 paragraphBlock,
 triggers,
 type DocumentNode,
-type Peer,
 type Selection,
-type VersionVector,
 } from '@plim/core';
+import { Collaborator, type Peer, type VersionVector } from '@plim/collaboration';
 import { PlimEditor, useEditorHandle } from '@plim/react';
 import { COLLAB_PATH, COLLAB_PORT, makeBaseDoc } from './shared.js';
 import { WebSocketTransport, type ConnectionStatus } from './ws-transport.js';

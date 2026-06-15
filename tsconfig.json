@@ -2,6 +2,8 @@
   "files": [],
   "references": [
     { "path": "./packages/core" },
+    { "path": "./packages/ledger" },
+    { "path": "./packages/collaboration" },
     { "path": "./packages/editor" },
     { "path": "./packages/markdown" },
     { "path": "./packages/react" }

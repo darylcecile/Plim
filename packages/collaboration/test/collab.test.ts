@@ -1,23 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	type BlockNode,
-	type CollabEditor,
-	type CollabMessage,
 	type DocumentNode,
 	type EditorState,
-	type LedgerRecord,
-	type Peer,
 	type Transaction as TransactionType,
-	type Transport,
-	Collaborator,
-	type MemoryNetwork,
 	Transaction,
 	applyTransaction,
 	blockPlainText,
-	createMemoryNetwork,
 	newId,
-	recordFromTransaction,
 } from '@plim/core';
+import { type LedgerRecord, recordFromTransaction } from '@plim/ledger';
+import {
+	type CollabEditor,
+	type CollabMessage,
+	type MemoryNetwork,
+	type Peer,
+	type Transport,
+	Collaborator,
+	createMemoryNetwork,
+} from '@plim/collaboration';
 
 // ---- harness ----------------------------------------------------------------
 

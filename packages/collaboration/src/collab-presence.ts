@@ -14,7 +14,7 @@
 // This module is self-contained: it knows nothing about transports, ledgers, or
 // the authority. `Collaborator` (collab.ts) wires it to a `Transport`.
 
-import type { Selection } from './selection.js';
+import type { Selection } from '@plim/core';
 
 export type PeerId = string;
 

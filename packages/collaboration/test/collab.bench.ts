@@ -1,22 +1,22 @@
 import { bench, describe } from 'vitest';
 import {
 	type BlockNode,
-	type CollabEditor,
 	type DocumentNode,
 	type EditorState,
-	type LedgerRecord,
-	type Peer,
 	type Transaction as TransactionType,
+	Transaction,
+	applyTransaction,
+	newId,
+} from '@plim/core';
+import { type LedgerRecord, rebaseRecord, recordFromTransaction } from '@plim/ledger';
+import {
+	type CollabEditor,
+	type Peer,
 	Collaborator,
 	InMemoryAuthority,
 	PresenceTracker,
-	Transaction,
-	applyTransaction,
 	createMemoryNetwork,
-	newId,
-	rebaseRecord,
-	recordFromTransaction,
-} from '@plim/core';
+} from '@plim/collaboration';
 
 // ---- shared fixtures --------------------------------------------------------
 

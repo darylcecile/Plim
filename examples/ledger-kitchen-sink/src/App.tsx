@@ -1,30 +1,32 @@
 import * as React from 'react';
 import {
 	PlimDriver,
-	TransactionLedger,
-	applyLedgerRecord,
 	boldMark,
 	codeMark,
 	defineAction,
-	diffLedgers,
-	findConflicts,
-	firstWriteWins,
 	headingBlock,
 	italicMark,
-	lastWriteWins,
-	mergeLedgers,
 	paragraphBlock,
-	preferSource,
-	rebaseRecords,
-	resolveConflicts,
-	summarizeRecord,
 	triggers,
 	type BlockNode,
 	type DocumentNode,
 	type EditorState,
-	type LedgerRecord,
 	type Selection,
 } from '@plim/core';
+import {
+	TransactionLedger,
+	applyLedgerRecord,
+	diffLedgers,
+	findConflicts,
+	firstWriteWins,
+	lastWriteWins,
+	mergeLedgers,
+	preferSource,
+	rebaseRecords,
+	resolveConflicts,
+	summarizeRecord,
+	type LedgerRecord,
+} from '@plim/ledger';
 import { PlimEditor, useEditorHandle } from '@plim/react';
 
 // ──────────────────────────────────────────────────────────────────────────────

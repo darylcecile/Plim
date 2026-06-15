@@ -1,19 +1,17 @@
 import { describe, expect, it } from 'vitest';
+import { type EditorState, Transaction, newId } from '@plim/core';
 import {
-	type EditorState,
 	type LedgerRecord,
 	ROOT_ID,
-	Transaction,
 	computeTouches,
 	findConflicts,
 	firstWriteWins,
 	lastWriteWins,
-	newId,
 	preferSource,
 	recordFromTransaction,
 	recordsConflict,
 	resolveConflicts,
-} from '@plim/core';
+} from '@plim/ledger';
 
 function p(text: string): { id: string; type: 'paragraph'; text: { text: string }[] } {
 	return { id: newId(), type: 'paragraph', text: text ? [{ text }] : [] };

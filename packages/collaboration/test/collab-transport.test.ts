@@ -1,22 +1,18 @@
 import { describe, expect, it } from 'vitest';
+import { type EditorState, Transaction, blockPlainText, newId } from '@plim/core';
+import { type LedgerRecord, recordFromTransaction } from '@plim/ledger';
 import {
 	type CollabMessage,
-	type EditorState,
 	type HubClient,
-	type LedgerRecord,
 	type Peer,
 	CollabHub,
 	InMemoryAuthority,
-	Transaction,
-	blockPlainText,
 	coversRecord,
 	createMemoryNetwork,
 	mergeVersionVectors,
-	newId,
-	recordFromTransaction,
 	recordsAfter,
 	versionVectorOf,
-} from '@plim/core';
+} from '@plim/collaboration';
 
 function doc(...paras: string[]): EditorState {
 	return {

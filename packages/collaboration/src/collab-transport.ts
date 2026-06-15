@@ -24,11 +24,11 @@
 // document is identical by construction — independent of client-side rebase
 // quality.
 
-import { type DocumentNode } from './document.js';
-import type { Selection } from './selection.js';
-import { type EditorState, applyOp } from './transaction.js';
-import { type LedgerRecord } from './ledger.js';
-import { rebaseRecord } from './ledger-rebase.js';
+import { type DocumentNode } from '@plim/core';
+import type { Selection } from '@plim/core';
+import { type EditorState, applyOp } from '@plim/core';
+import { type LedgerRecord } from '@plim/ledger';
+import { rebaseRecord } from '@plim/ledger';
 import type { Peer, PeerId, PresenceState } from './collab-presence.js';
 
 // ---- version vectors --------------------------------------------------------

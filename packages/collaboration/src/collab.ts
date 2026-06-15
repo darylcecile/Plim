@@ -25,12 +25,12 @@
 // Presence (cursors/awareness) rides alongside on the same transport but never
 // touches the ledger — see `collab-presence.ts`.
 
-import { type DocumentNode, blockTextLength } from './document.js';
-import { type BlockPath, type CursorPosition, type Selection, getBlockAt } from './selection.js';
-import { type EditorState, type Transaction, type TransactionOp, applyOp } from './transaction.js';
-import type { EditorHandle } from './editor-handle.js';
-import { type LedgerRecord, TransactionLedger, recordFromTransaction } from './ledger.js';
-import { rebaseRecord, rebaseTextPoint } from './ledger-rebase.js';
+import { type DocumentNode, blockTextLength } from '@plim/core';
+import { type BlockPath, type CursorPosition, type Selection, getBlockAt } from '@plim/core';
+import { type EditorState, type Transaction, type TransactionOp, applyOp } from '@plim/core';
+import type { EditorHandle } from '@plim/core';
+import { type LedgerRecord, TransactionLedger, recordFromTransaction } from '@plim/ledger';
+import { rebaseRecord, rebaseTextPoint } from '@plim/ledger';
 import { type CollabMessage, type Transport, type VersionVector, versionVectorOf } from './collab-transport.js';
 import { type Peer, type PeerPresence, type PresenceState, PresenceTracker } from './collab-presence.js';
 

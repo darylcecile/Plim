@@ -1,5 +1,15 @@
 # @plim/core
 
+## 0.1.1
+
+### Patch Changes
+
+- 8016478: Move the transaction ledger and collaboration layers out of `@plim/core` into
+  the new `@plim/ledger` and `@plim/collaboration` packages. `@plim/core` no
+  longer re-exports those symbols — import `TransactionLedger`, `Collaborator`,
+  `CollabHub`, and friends from their dedicated packages instead. No core runtime
+  behaviour changed.
+
 ## 0.1.0
 
 ### Minor Changes

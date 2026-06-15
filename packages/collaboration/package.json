@@ -1,7 +1,7 @@
 {
-  "name": "@plim/core",
+  "name": "@plim/collaboration",
   "version": "0.1.1",
-  "description": "Plim core: schema, transactions, validation, and built-in block/mark descriptors for the Plim block editor.",
+  "description": "Plim collaboration: fast real-time multi-peer editing (Collaborator, CollabHub, presence) for the Plim block editor.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -25,18 +25,24 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/darylcecile/plim.git",
-    "directory": "packages/core"
+    "directory": "packages/collaboration"
   },
   "keywords": [
     "plim",
     "editor",
     "block-editor",
-    "rich-text",
-    "wysiwyg",
-    "notion"
+    "collaboration",
+    "realtime",
+    "presence",
+    "ot",
+    "crdt"
   ],
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "@plim/core": "workspace:*",
+    "@plim/ledger": "workspace:*"
   },
   "scripts": {
     "build": "tsc -b",

@@ -3,17 +3,19 @@ import {
 	type EditorHandle,
 	type EditorState,
 	type Transaction as TransactionType,
-	TransactionLedger,
 	Transaction,
 	applyTransaction,
 	blockPlainText,
+	newId,
+} from '@plim/core';
+import {
+	TransactionLedger,
 	compareRecords,
 	diffLedgers,
 	mergeLedgers,
-	newId,
 	recordFromTransaction,
 	summarizeRecord,
-} from '@plim/core';
+} from '@plim/ledger';
 
 function p(text: string): { id: string; type: 'paragraph'; text: { text: string }[] } {
 	return { id: newId(), type: 'paragraph', text: text ? [{ text }] : [] };

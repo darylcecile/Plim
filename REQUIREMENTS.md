@@ -316,7 +316,7 @@ Where snapshots capture _whole states_ and history captures _undoable steps_, th
 The serialized intermediary is the `LedgerRecord` — a flat, JSON-safe snapshot of one transaction's operations stamped with an `id`, a wall-clock `timestamp`, a logical `lamport` clock, an optional `source`, and a pre-computed id-keyed `touches` conflict surface. Records carry operations, not documents, so they stay small and cheap to ship over the wire.
 
 ```ts
-import { TransactionLedger } from '@plim/core';
+import { TransactionLedger } from '@plim/ledger';
 
 const ledger = new TransactionLedger({ source: 'clientA' });
 
@@ -339,7 +339,7 @@ const remote = TransactionLedger.deserialize(payload);
 Multiple ledgers **merge** into a single chronological order (deduplicated by record id), and **diff** to discover what each side is missing:
 
 ```ts
-import { mergeLedgers, diffLedgers } from '@plim/core';
+import { mergeLedgers, diffLedgers } from '@plim/ledger';
 
 const merged = mergeLedgers(localLedger, remoteLedger); // chronological union
 const { onlyInA, onlyInB, common } = diffLedgers(localLedger, remoteLedger);
@@ -348,7 +348,7 @@ const { onlyInA, onlyInB, common } = diffLedgers(localLedger, remoteLedger);
 Concurrent edits are handled two ways. **Conflict resolution** picks a winner when two records touch overlapping regions ("last write wins", "first write wins", "prefer this source", or a custom strategy):
 
 ```ts
-import { findConflicts, resolveConflicts, lastWriteWins, preferSource } from '@plim/core';
+import { findConflicts, resolveConflicts, lastWriteWins, preferSource } from '@plim/ledger';
 
 const conflicts = findConflicts(merged.records); // every overlapping pair
 const { kept, dropped } = resolveConflicts(merged.records, preferSource(['server', 'clientA']));
@@ -357,7 +357,7 @@ const { kept, dropped } = resolveConflicts(merged.records, preferSource(['server
 Or, to keep _both_ sides, **rebase** transforms one record's operations so they apply cleanly on top of a concurrent change — the editor equivalent of `git rebase`:
 
 ```ts
-import { rebaseRecord } from '@plim/core';
+import { rebaseRecord } from '@plim/ledger';
 
 const result = rebaseRecord(remoteRecord, localRecord, baseDoc);
 if (result.ok) editor.setState(applyLedgerRecord(editor.getState(), result.record));
@@ -374,7 +374,7 @@ The ledger gives you the primitives; the **collaboration layer** assembles them 
 The model is **server-authoritative optimistic OT** (the same shape ProseMirror's `collab` module uses). An **authority** owns the one canonical, ordered log and the canonical document. Each client edits optimistically against its local copy, sends records to the authority, and the authority assigns a canonical order and broadcasts records _already in canonical position_. Because every peer applies confirmed records raw — in the same order — **every peer's confirmed document is identical by construction**; convergence does not depend on the quality of any client-side rebase.
 
 ```ts
-import { Collaborator, createMemoryNetwork } from '@plim/core';
+import { Collaborator, createMemoryNetwork } from '@plim/collaboration';
 
 // One in-process hub with an embedded authority (swap for your own Transport in production).
 const net = createMemoryNetwork({ origin: baseDoc });
@@ -427,7 +427,7 @@ It is honest about its edges:
 `createMemoryNetwork` is the client-and-server-in-one-process convenience. To run a **real** server you only need the server half, and that is exactly what `CollabHub` is: the entire wire protocol (handshake, `submit` → linearize → broadcast `confirm`, delta `sync`, `presence`/`bye` relay) with **no transport baked in**. It owns an `InMemoryAuthority` and talks to each connection through a one-method `HubClient` sink, so you can wrap any duplex channel — a WebSocket, a worker port, a queue — in a dozen lines.
 
 ```ts
-import { CollabHub, type CollabMessage, type HubClient } from '@plim/core';
+import { CollabHub, type CollabMessage, type HubClient } from '@plim/collaboration';
 
 const hub = new CollabHub(baseDoc); // one hub = one shared document
 
