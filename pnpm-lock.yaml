@@ -29,6 +29,9 @@ importers:
 
   examples/collab-kitchen-sink:
     dependencies:
+      '@plim/collaboration':
+        specifier: workspace:*
+        version: link:../../packages/collaboration
       '@plim/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -90,6 +93,9 @@ importers:
       '@plim/editor':
         specifier: workspace:*
         version: link:../../packages/editor
+      '@plim/ledger':
+        specifier: workspace:*
+        version: link:../../packages/ledger
       '@plim/react':
         specifier: workspace:*
         version: link:../../packages/react
@@ -156,6 +162,15 @@ importers:
         specifier: ^5.4.0
         version: 5.4.21(@types/node@25.6.0)
 
+  packages/collaboration:
+    dependencies:
+      '@plim/core':
+        specifier: workspace:*
+        version: link:../core
+      '@plim/ledger':
+        specifier: workspace:*
+        version: link:../ledger
+
   packages/core: {}
 
   packages/editor:
@@ -169,6 +184,12 @@ importers:
       '@plim/markdown':
         specifier: workspace:*
         version: link:../markdown
+
+  packages/ledger:
+    dependencies:
+      '@plim/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/markdown:
     dependencies:

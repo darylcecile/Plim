@@ -19,9 +19,9 @@
 // All position mapping mirrors the exact semantics in `transaction.ts`'s
 // `applyOp` so a rebased record applies identically to a hand-authored one.
 
-import type { DocumentNode } from './document.js';
-import { type BlockPath, type Selection, getBlockAt, prevBlockPath, samePath } from './selection.js';
-import { type EditorState, type TransactionOp, applyOp } from './transaction.js';
+import type { DocumentNode } from '@plim/core';
+import { type BlockPath, type Selection, getBlockAt, prevBlockPath, samePath } from '@plim/core';
+import { type EditorState, type TransactionOp, applyOp } from '@plim/core';
 import { type RecordTouch, computeTouches } from './ledger-conflict.js';
 import type { LedgerRecord } from './ledger.js';
 

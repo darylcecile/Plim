@@ -13,9 +13,9 @@
 // rather than silently letting two edits clobber each other. Callers that want
 // to *transform* instead of *drop* one side reach for `ledger-rebase.ts`.
 
-import { type DocumentNode } from './document.js';
-import { type BlockPath, getBlockAt, prevBlockPath } from './selection.js';
-import type { TransactionOp } from './transaction.js';
+import { type DocumentNode } from '@plim/core';
+import { type BlockPath, getBlockAt, prevBlockPath } from '@plim/core';
+import type { TransactionOp } from '@plim/core';
 import type { LedgerRecord } from './ledger.js';
 
 /** Sentinel block id standing in for the document root in structural touches. */

@@ -1,7 +1,7 @@
 // Standalone collaboration backend for the kitchen-sink demo.
 //
 // This is the whole "server" — a real, deployable WebSocket hub in ~40 lines.
-// It is a thin adapter around `CollabHub` from @plim/core: Hono handles plain
+// It is a thin adapter around `CollabHub` from @plim/collaboration: Hono handles plain
 // HTTP (a health check + a landing blurb) and the `ws` server carries the
 // `CollabMessage` protocol. Every browser tab that connects is registered as a
 // `HubClient`; the hub linearizes their submissions into one canonical order and
@@ -14,7 +14,7 @@
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { CollabHub, type CollabMessage, type HubClient } from '@plim/core';
+import { CollabHub, type CollabMessage, type HubClient } from '@plim/collaboration';
 import { COLLAB_PATH, COLLAB_PORT, makeBaseDoc } from '../src/shared.js';
 
 // One hub = one shared document, held in memory. Restarting the process resets

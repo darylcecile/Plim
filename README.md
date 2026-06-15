@@ -345,7 +345,7 @@ editor.restoreSnapshot(restored);
 A `TransactionLedger` is an append-only, serializable, replayable log of committed transactions — the layer you build your own sync / CRDT engine on. Snapshots ship whole states; the ledger ships the _stream of edits_. The unit of exchange is the `LedgerRecord`: a small, JSON-safe record of one transaction's ops, stamped with an `id`, a wall-clock `timestamp`, a logical `lamport` clock, an optional `source`, and a pre-computed id-keyed conflict surface (`touches`).
 
 ```ts
-import { TransactionLedger, mergeLedgers, findConflicts, resolveConflicts, rebaseRecord, applyLedgerRecord, lastWriteWins } from '@plim/core';
+import { TransactionLedger, mergeLedgers, findConflicts, resolveConflicts, rebaseRecord, applyLedgerRecord, lastWriteWins } from '@plim/ledger';
 
 // 1. Record — subscribe a ledger to an editor, or record transactions by hand.
 const ledger = new TransactionLedger({ source: 'clientA' });
@@ -378,7 +378,7 @@ See [`examples/ledger-kitchen-sink`](./examples/ledger-kitchen-sink) for two edi
 A `Collaborator` turns the ledger primitives into a drop-in, real-time, multi-peer editing experience: optimistic local edits, automatic convergence, live presence/cursors, and late-join delta sync — no merge code on your side. The model is **server-authoritative optimistic OT** (the shape ProseMirror's `collab` uses): an authority owns the one canonical ordered log and broadcasts records already in canonical position, so **every peer's confirmed document is identical by construction**.
 
 ```ts
-import { Collaborator, createMemoryNetwork } from '@plim/core';
+import { Collaborator, createMemoryNetwork } from '@plim/collaboration';
 
 // In-process hub with an embedded authority (swap for your own Transport in production).
 const net = createMemoryNetwork({ origin: baseDoc });
@@ -400,7 +400,7 @@ Local edits apply **instantly** and sit in `pending` until confirmed; the **loca
 For a **real** server, drop the in-process `createMemoryNetwork` and reach for `CollabHub` — the transport-agnostic server half of the protocol. Wrap any socket as a `HubClient` and it linearizes submissions and broadcasts canonical records for you:
 
 ```ts
-import { CollabHub, type HubClient } from '@plim/core';
+import { CollabHub, type HubClient } from '@plim/collaboration';
 
 const hub = new CollabHub(baseDoc);
 // per connection:
@@ -451,7 +451,7 @@ pnpm install
 pnpm dev:ledger         # opens http://localhost:5175
 ```
 
-[`examples/collab-kitchen-sink`](./examples/collab-kitchen-sink) is **one** collaborative document you open in **multiple browser tabs, windows, or devices** — real cross-tab collaboration, not a simulation. A tiny [Hono](https://hono.dev) + `ws` backend (≈40 lines) wraps `CollabHub` from `@plim/core` and serves the document over a real WebSocket; each tab is a distinct peer with its own colour. Type in any tab and edits converge live in the others, with inline remote carets, a presence roster, and a sync inspector (canonical version, optimistic `pending`, version vector). Edit while offline and watch `pending` build up, then drain and reconverge on reconnect. `pnpm dev:collab` runs the server and the Vite app together:
+[`examples/collab-kitchen-sink`](./examples/collab-kitchen-sink) is **one** collaborative document you open in **multiple browser tabs, windows, or devices** — real cross-tab collaboration, not a simulation. A tiny [Hono](https://hono.dev) + `ws` backend (≈40 lines) wraps `CollabHub` from `@plim/collaboration` and serves the document over a real WebSocket; each tab is a distinct peer with its own colour. Type in any tab and edits converge live in the others, with inline remote carets, a presence roster, and a sync inspector (canonical version, optimistic `pending`, version vector). Edit while offline and watch `pending` build up, then drain and reconverge on reconnect. `pnpm dev:collab` runs the server and the Vite app together:
 
 ```sh
 pnpm install

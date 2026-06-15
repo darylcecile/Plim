@@ -1,18 +1,14 @@
 import { describe, expect, it } from 'vitest';
+import { type EditorState, Transaction, applyOp, blockPlainText, newId } from '@plim/core';
 import {
-	type EditorState,
 	type LedgerRecord,
-	Transaction,
 	applyLedgerRecord,
-	applyOp,
-	blockPlainText,
-	newId,
 	rebaseBlockPath,
 	rebaseRecord,
 	rebaseRecords,
 	rebaseTextPoint,
 	recordFromTransaction,
-} from '@plim/core';
+} from '@plim/ledger';
 
 function p(text: string): { id: string; type: 'paragraph'; text: { text: string }[] } {
 	return { id: newId(), type: 'paragraph', text: text ? [{ text }] : [] };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { type Peer, PresenceTracker } from '@plim/core';
+import { type Peer, PresenceTracker } from '@plim/collaboration';
 
 const alice: Peer = { id: 'alice', name: 'Alice' };
 const bob: Peer = { id: 'bob', name: 'Bob' };

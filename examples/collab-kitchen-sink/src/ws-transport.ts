@@ -18,7 +18,7 @@
 // Per-connection FIFO (guaranteed by TCP/WebSocket) is the only ordering the hub
 // requires, so the confirmed stream is always applied in canonical order.
 
-import type { CollabMessage, Transport } from '@plim/core';
+import type { CollabMessage, Transport } from '@plim/collaboration';
 
 export type ConnectionStatus = 'connecting' | 'online' | 'offline';
 

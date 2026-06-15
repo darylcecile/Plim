@@ -13,10 +13,10 @@
 // See `ledger-conflict.ts` for conflict detection/resolution and
 // `ledger-rebase.ts` for operational-transform position mapping.
 
-import { type DocumentNode, newId } from './document.js';
-import { type Selection, cloneSelection } from './selection.js';
-import { type EditorState, type Transaction, type TransactionMeta, type TransactionOp, applyOp } from './transaction.js';
-import type { EditorHandle } from './editor-handle.js';
+import { type DocumentNode, newId } from '@plim/core';
+import { type Selection, cloneSelection } from '@plim/core';
+import { type EditorState, type Transaction, type TransactionMeta, type TransactionOp, applyOp } from '@plim/core';
+import type { EditorHandle } from '@plim/core';
 import { type RecordTouch, computeTouches } from './ledger-conflict.js';
 
 /** A flat, JSON-serializable snapshot of one committed transaction. */
