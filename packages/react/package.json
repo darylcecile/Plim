@@ -1,6 +1,6 @@
 {
   "name": "@plim/react",
-  "version": "0.0.4",
+  "version": "0.1.0",
   "description": "Plim React bindings: define block descriptors with React components and host them inside a Plim editor.",
   "type": "module",
   "main": "./dist/index.js",
