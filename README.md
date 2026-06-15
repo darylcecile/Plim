@@ -340,6 +340,78 @@ editor.restoreSnapshot(restored);
 
 `restoreSnapshot` replaces state directly — it does not push a history entry, so undo/redo will not roll across the restore. Wrap restores in your own confirmation flow if that matters.
 
+## Ledger / sync
+
+A `TransactionLedger` is an append-only, serializable, replayable log of committed transactions — the layer you build your own sync / CRDT engine on. Snapshots ship whole states; the ledger ships the _stream of edits_. The unit of exchange is the `LedgerRecord`: a small, JSON-safe record of one transaction's ops, stamped with an `id`, a wall-clock `timestamp`, a logical `lamport` clock, an optional `source`, and a pre-computed id-keyed conflict surface (`touches`).
+
+```ts
+import { TransactionLedger, mergeLedgers, findConflicts, resolveConflicts, rebaseRecord, applyLedgerRecord, lastWriteWins } from '@plim/core';
+
+// 1. Record — subscribe a ledger to an editor, or record transactions by hand.
+const ledger = new TransactionLedger({ source: 'clientA' });
+const detach = ledger.attach(editor);          // records every forward transaction
+
+// 2. Replay — onto any editor seeded with the same base (one setState, no history noise).
+ledger.replay(otherEditor);                     // side-effecting
+const state = ledger.apply(otherEditor.getState()); // pure fold
+
+// 3. Serialize — ship the log over the wire and rebuild it.
+const remote = TransactionLedger.deserialize(ledger.serialize());
+
+// 4. Merge — chronological union, deduped by id.
+const merged = mergeLedgers(ledger, remote);
+
+// 5a. Resolve — pick a winner when records overlap…
+const { kept, dropped } = resolveConflicts(merged.records, lastWriteWins);
+
+// 5b. …or rebase — keep both sides by transforming positions (git-rebase for edits).
+const r = rebaseRecord(remote.records[0]!, ledger.records[0]!, editor.getState().doc);
+if (r.ok) editor.setState(applyLedgerRecord(editor.getState(), r.record));
+```
+
+Conflict detection is **conservative** (it would rather flag a conflict than silently clobber), works **document-free** at merge time (records carry their own id-keyed `touches`), and is **order-independent**. Rebase handles text edits and block insert/remove/split/move precisely, and returns `{ ok: false, reason }` — rather than guessing — when a concurrent change tears a range across blocks or deletes content a record depends on. Ordering is `timestamp → lamport → source → id` by default and fully overridable via `new TransactionLedger({ compare })`.
+
+See [`examples/ledger-kitchen-sink`](./examples/ledger-kitchen-sink) for two editors syncing through every one of these primitives.
+
+## Collaboration
+
+A `Collaborator` turns the ledger primitives into a drop-in, real-time, multi-peer editing experience: optimistic local edits, automatic convergence, live presence/cursors, and late-join delta sync — no merge code on your side. The model is **server-authoritative optimistic OT** (the shape ProseMirror's `collab` uses): an authority owns the one canonical ordered log and broadcasts records already in canonical position, so **every peer's confirmed document is identical by construction**.
+
+```ts
+import { Collaborator, createMemoryNetwork } from '@plim/core';
+
+// In-process hub with an embedded authority (swap for your own Transport in production).
+const net = createMemoryNetwork({ origin: baseDoc });
+
+const alice = new Collaborator({ peer: { id: 'alice', name: 'Alice' }, editor, transport: net.connect() });
+alice.onChange((s) => render(s));          // { head, pending, inflight }
+alice.setPresence({ status: 'editing' });  // ephemeral awareness (never logged to the ledger)
+alice.peers;                                // remote cursors to render
+
+// Local edits flow automatically: each committed transaction applies instantly
+// (optimistic) and reconciles when the authority confirms it.
+
+const dave = new Collaborator({ peer: { id: 'dave' }, editor: daveEditor, transport: net.connect() });
+dave.sync();                                // late join: pull the backlog, fast-forward to head
+```
+
+Local edits apply **instantly** and sit in `pending` until confirmed; the **local caret is always preserved** (shifted to track remote inserts, never replaced by a remote cursor, never disturbed when your own edit is acked). At quiescence every peer's confirmed document equals the authority's — provable, and locked in by a four-peer randomized fuzz convergence test. It is honest about its edges (multi-record offline flush is convergent but only best-effort intent-preserving; version vectors key off per-source `seq`; a custom `Transport` must keep per-connection FIFO). See the [Collaboration API](./REQUIREMENTS.md#collaboration-api) for the full contract.
+
+For a **real** server, drop the in-process `createMemoryNetwork` and reach for `CollabHub` — the transport-agnostic server half of the protocol. Wrap any socket as a `HubClient` and it linearizes submissions and broadcasts canonical records for you:
+
+```ts
+import { CollabHub, type HubClient } from '@plim/core';
+
+const hub = new CollabHub(baseDoc);
+// per connection:
+const client: HubClient = { send: (m) => socket.send(JSON.stringify(m)) };
+hub.add(client);
+socket.on('message', (raw) => hub.receive(client, JSON.parse(raw)));
+socket.on('close', () => hub.remove(client));
+```
+
+See [`examples/collab-kitchen-sink`](./examples/collab-kitchen-sink) for one shared document served over a real WebSocket by a tiny Hono + `CollabHub` backend — open it in two tabs and edit together.
+
 ## Markdown
 
 `@plim/markdown` round-trips between Markdown and Plim documents. It understands the built-in block & mark vocabulary (paragraphs, headings, quotes, bulleted/numbered/todo lists, dividers, fenced code, images, plus `**bold**`, `*italic*`, `` `code` ``, `~strike~`, `[link](href)`, `<u>underline</u>`).
@@ -370,6 +442,20 @@ Custom blocks opt in by implementing `fromMarkdown` (consulted before the built-
 ```sh
 pnpm install
 pnpm dev:notion         # opens http://localhost:5174
+```
+
+[`examples/ledger-kitchen-sink`](./examples/ledger-kitchen-sink) is a two-client sync playground: two editors branch from the same document, capture their edits in a `TransactionLedger`, then reconcile through every primitive — merge, conflict detection, drop-one-side resolution, OT rebase (keep both), diff, and a serialize round-trip. Run it with:
+
+```sh
+pnpm install
+pnpm dev:ledger         # opens http://localhost:5175
+```
+
+[`examples/collab-kitchen-sink`](./examples/collab-kitchen-sink) is **one** collaborative document you open in **multiple browser tabs, windows, or devices** — real cross-tab collaboration, not a simulation. A tiny [Hono](https://hono.dev) + `ws` backend (≈40 lines) wraps `CollabHub` from `@plim/core` and serves the document over a real WebSocket; each tab is a distinct peer with its own colour. Type in any tab and edits converge live in the others, with inline remote carets, a presence roster, and a sync inspector (canonical version, optimistic `pending`, version vector). Edit while offline and watch `pending` build up, then drain and reconverge on reconnect. `pnpm dev:collab` runs the server and the Vite app together:
+
+```sh
+pnpm install
+pnpm dev:collab         # server on :8787, app on http://localhost:5176
 ```
 
 ## Development

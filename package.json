@@ -15,8 +15,13 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:browser": "vitest run --config vitest.browser.config.ts",
+    "bench": "vitest bench --run",
     "dev:notion": "pnpm --filter @plim/example-notion-clone dev",
     "build:notion": "pnpm --filter @plim/example-notion-clone build",
+    "dev:ledger": "pnpm --filter @plim/example-ledger-kitchen-sink dev",
+    "build:ledger": "pnpm --filter @plim/example-ledger-kitchen-sink build",
+    "dev:collab": "pnpm --filter @plim/example-collab-kitchen-sink dev",
+    "build:collab": "pnpm --filter @plim/example-collab-kitchen-sink build",
     "changeset": "changeset",
     "version": "changeset version",
     "release": "pnpm -r --filter='@plim/*' --filter='!@plim/example-*' build && changeset publish"

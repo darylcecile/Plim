@@ -309,7 +309,142 @@ const deserializedSnapshot = Snapshot.deserialize(serializedSnapshot); // deseri
 A snapshot captures the entire state of the editor, including the content, selection, and any other relevant state. Restoring a snapshot will revert the editor back to the exact state it was in when the snapshot was created, allowing for powerful features like time-travel debugging or complex undo/redo functionality. To be used with caution as snapshots can consume a lot of memory if the editor's content is large, so it's recommended to use them sparingly and to always provide a way for users to manage their snapshots (e.g. delete old snapshots, etc.).
 
 
-## Blocks and Marks API
+## Ledger / Sync API
+
+Where snapshots capture _whole states_ and history captures _undoable steps_, the ledger captures the **stream of committed transactions** as a portable, replayable log. It is the foundation layer for bringing your own sync or CRDT engine: it does not impose a network model or a merge policy, it gives you the primitives (record, replay, merge, diff, conflict detection, rebase) to build one.
+
+The serialized intermediary is the `LedgerRecord` — a flat, JSON-safe snapshot of one transaction's operations stamped with an `id`, a wall-clock `timestamp`, a logical `lamport` clock, an optional `source`, and a pre-computed id-keyed `touches` conflict surface. Records carry operations, not documents, so they stay small and cheap to ship over the wire.
+
+```ts
+import { TransactionLedger } from '@plim/core';
+
+const ledger = new TransactionLedger({ source: 'clientA' });
+
+// Record every committed transaction as it is dispatched.
+const detach = ledger.attach(editor);
+
+// …or record a transaction by hand.
+ledger.record(transaction);
+
+// Replay the whole log onto any other editor seeded with the same base
+// document — a single setState, no history pollution.
+ledger.replay(otherEditor);
+const nextState = ledger.apply(otherEditor.getState()); // pure, no side effects
+
+// Ship it over the wire and rebuild it on the other side.
+const payload = ledger.serialize();
+const remote = TransactionLedger.deserialize(payload);
+```
+
+Multiple ledgers **merge** into a single chronological order (deduplicated by record id), and **diff** to discover what each side is missing:
+
+```ts
+import { mergeLedgers, diffLedgers } from '@plim/core';
+
+const merged = mergeLedgers(localLedger, remoteLedger); // chronological union
+const { onlyInA, onlyInB, common } = diffLedgers(localLedger, remoteLedger);
+```
+
+Concurrent edits are handled two ways. **Conflict resolution** picks a winner when two records touch overlapping regions ("last write wins", "first write wins", "prefer this source", or a custom strategy):
+
+```ts
+import { findConflicts, resolveConflicts, lastWriteWins, preferSource } from '@plim/core';
+
+const conflicts = findConflicts(merged.records); // every overlapping pair
+const { kept, dropped } = resolveConflicts(merged.records, preferSource(['server', 'clientA']));
+```
+
+Or, to keep _both_ sides, **rebase** transforms one record's operations so they apply cleanly on top of a concurrent change — the editor equivalent of `git rebase`:
+
+```ts
+import { rebaseRecord } from '@plim/core';
+
+const result = rebaseRecord(remoteRecord, localRecord, baseDoc);
+if (result.ok) editor.setState(applyLedgerRecord(editor.getState(), result.record));
+else /* fall back to resolveConflicts — the rebase was ambiguous */;
+```
+
+The ledger is deliberately unopinionated about transport and policy. It is honest about its limits: conflict detection is conservative (it would rather report a conflict than silently clobber), and rebase covers text edits and block insert/remove/split/move precisely while refusing — rather than guessing — when a concurrent change makes the result genuinely ambiguous.
+
+
+## Collaboration API
+
+The ledger gives you the primitives; the **collaboration layer** assembles them into a drop-in, real-time, multi-peer editing experience. A `Collaborator` wraps one editor and a `Transport` and gives you live optimistic editing, automatic convergence, presence/awareness, and late-join delta sync — without you writing a single line of merge logic.
+
+The model is **server-authoritative optimistic OT** (the same shape ProseMirror's `collab` module uses). An **authority** owns the one canonical, ordered log and the canonical document. Each client edits optimistically against its local copy, sends records to the authority, and the authority assigns a canonical order and broadcasts records _already in canonical position_. Because every peer applies confirmed records raw — in the same order — **every peer's confirmed document is identical by construction**; convergence does not depend on the quality of any client-side rebase.
+
+```ts
+import { Collaborator, createMemoryNetwork } from '@plim/core';
+
+// One in-process hub with an embedded authority (swap for your own Transport in production).
+const net = createMemoryNetwork({ origin: baseDoc });
+
+const alice = new Collaborator({ peer: { id: 'alice', name: 'Alice' }, editor, transport: net.connect() });
+
+alice.onChange((status) => render(status)); // { head, pending, inflight }
+// Local edits flow automatically: every committed transaction becomes a record,
+// applies instantly (optimistic), and is reconciled when the authority confirms it.
+```
+
+Local edits apply **instantly** and are held as `pending` until the authority confirms them. Exactly one record is in flight at a time, so every authority-side rebase is the simple single-record case. When confirmations arrive, the `Collaborator` acks its own record, rebases the rest of `pending` over any concurrent remote batch (dropping any record that can no longer be placed — canonical wins, deterministically), and rebuilds the editor as `confirmedDoc + pending`. The **local caret is always preserved or shifted to track remote inserts — never replaced by a remote selection**, and a record coming back as your own ack never rebuilds the document under your cursor.
+
+**Presence / awareness** rides on the same transport but is entirely ephemeral — it is never written to the ledger, so cursors and status are fast and disposable:
+
+```ts
+alice.setPresence({ status: 'editing' });        // replace awareness state + broadcast
+alice.patchPresence({ status: 'idle' });          // shallow-merge a patch + broadcast
+alice.peers;                                       // PeerPresence[] — render these as remote cursors
+```
+
+Selection changes broadcast automatically as you move the caret. `peers` returns each remote peer's `{ peer, state, clock, lastSeen }`. A graceful `destroy()` announces departure (`bye`) so others drop that cursor **immediately**. To also reclaim cursors left behind by an _ungraceful_ disconnect (a crash or closed tab that never sent `bye`), opt into a liveness heartbeat: pass `heartbeatMs` (and tune `ttlMs`, default `30_000`). Each tick re-announces your presence — so peers keep you alive — and prunes any peer you have not heard from within `ttlMs`. Heartbeats are liveness-only: an unchanged-state heartbeat refreshes `lastSeen` without emitting a change event, so it never triggers a re-render. Heartbeating is **off by default** (no timers, no overhead) — without it, `ttlMs` pruning never runs and ghost cursors persist until that peer reconnects or the page reloads.
+
+**Late join and reconnect** are a single call. The authority replies with every canonical record the client is missing and the client fast-forwards to the head:
+
+```ts
+const dave = new Collaborator({ peer: { id: 'dave' }, editor: daveEditor, transport: net.connect() });
+dave.sync(); // pull the full backlog; converges to the authority's head
+```
+
+**Version vectors** summarize "how much of each source have I seen" (highest `seq` per source) for diffing progress or driving your own delta protocol:
+
+```ts
+alice.versionVector();   // e.g. { alice: 12, bob: 7 }
+net.authority.head;      // the one true canonical version count
+```
+
+### Convergence guarantee and honest limits
+
+At quiescence (no pending edits anywhere) **every peer's confirmed document equals the authority's canonical document** — this is provable (confirmed records are applied raw in one global order) and is locked in by a fuzz test that drives four peers through random concurrent schedules and asserts identical documents. The optimistic `pending` chain is a self-healing UX layer on top: if a pending rebase ever bails, that record is dropped deterministically (confirmed wins) so convergence still holds.
+
+It is honest about its edges:
+
+- **Multi-record offline flush.** A client that authored several edits while disconnected flushes them one at a time; each is rebased independently over the gap. They converge identically on every peer, but a long offline batch interleaved with heavy concurrent remote edits may not preserve the author's _intent_ as faithfully as a live edit would. Convergence is guaranteed; intent-preservation is best-effort — exactly the same trade-off the underlying `rebaseRecord` documents.
+- **`seq` semantics.** Version vectors key off each record's per-source `seq`. Records authored without a `seq` (e.g. hand-built ledger records replayed into a collaborator) are treated as `seq` 0 for that source. Stamp `record.seq` if you mint records yourself and rely on version vectors.
+- **Transport contract.** Correctness assumes **per-endpoint FIFO delivery** of the canonical `confirm` stream (the bundled `createMemoryNetwork` guarantees this even under random latency). A custom `Transport` must preserve order per connection; it may drop/duplicate freely across a reconnect because `sync()` reconciles from the head.
+
+### Bring your own server: `CollabHub`
+
+`createMemoryNetwork` is the client-and-server-in-one-process convenience. To run a **real** server you only need the server half, and that is exactly what `CollabHub` is: the entire wire protocol (handshake, `submit` → linearize → broadcast `confirm`, delta `sync`, `presence`/`bye` relay) with **no transport baked in**. It owns an `InMemoryAuthority` and talks to each connection through a one-method `HubClient` sink, so you can wrap any duplex channel — a WebSocket, a worker port, a queue — in a dozen lines.
+
+```ts
+import { CollabHub, type CollabMessage, type HubClient } from '@plim/core';
+
+const hub = new CollabHub(baseDoc); // one hub = one shared document
+
+// For each connected socket:
+function onConnection(socket: MyDuplex): void {
+  const client: HubClient = {
+    send: (message) => socket.write(JSON.stringify(message)), // hub → wire
+  };
+  hub.add(client);                                            // register
+  socket.on('message', (raw) => hub.receive(client, JSON.parse(raw) as CollabMessage)); // wire → hub
+  socket.on('close', () => hub.remove(client));               // announces `bye` to the rest
+}
+```
+
+The hub calls `client.send` in canonical order per client, so your transport only has to preserve **per-connection FIFO** (TCP and WebSocket already do). `hub.authority.head` is the canonical version and `hub.peers()` lists the handshaked peers — handy for a health endpoint. Swap the in-memory authority's backing store for Postgres, Redis, a CRDT engine, or Durable Objects and the same seam becomes a production server. The bundled `createMemoryNetwork` is itself just a `CollabHub` wired to loopback transports.
+
+The [`examples/collab-kitchen-sink`](./examples/collab-kitchen-sink) server is precisely this: a ~40-line [Hono](https://hono.dev) + `ws` adapter around one `CollabHub`, serving a single document that any number of browser tabs edit together live.
 
 ### Blocks API
 

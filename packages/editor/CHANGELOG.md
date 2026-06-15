@@ -1,5 +1,14 @@
 # @plim/editor
 
+## 0.1.0
+
+### Patch Changes
+
+- Updated dependencies [8b5568f]
+- Updated dependencies [7e5e783]
+  - @plim/core@0.1.0
+  - @plim/markdown@0.1.0
+
 ## 0.0.4
 
 ### Patch Changes
