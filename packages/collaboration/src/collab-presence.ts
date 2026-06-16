@@ -77,6 +77,11 @@ function presenceStateEqual(a: PresenceState, b: PresenceState): boolean {
 	return JSON.stringify(a) === JSON.stringify(b);
 }
 
+/** Structural equality between two selection-field values; either side may be `null`/`undefined`. */
+function selectionFieldEqual(a: Selection | null | undefined, b: Selection | null | undefined): boolean {
+	return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+}
+
 /**
  * Tracks the local peer's presence plus every remote peer's last-known
  * presence. Pure in-memory bookkeeping with a tiny event surface; transport is
@@ -154,6 +159,38 @@ export class PresenceTracker {
 		if (existing && presenceStateEqual(existing.state, presence.state)) return false; // heartbeat: liveness only
 		this.emit(existing ? { kind: 'update', peerId: peer.id, presence } : { kind: 'join', peerId: peer.id, presence });
 		return true;
+	}
+
+	/**
+	 * Remap every remote peer's caret/selection through `mapper`. This keeps
+	 * remote cursors tracking the text as the LOCAL document mutates beneath them
+	 * — your own edits, or a third peer's confirmed ops — in between that peer's
+	 * own presence broadcasts. A stored `selection` is an absolute
+	 * `{path, offset}`; without remapping it silently drifts onto the wrong text
+	 * after any concurrent edit, then visibly jumps when the peer next broadcasts.
+	 *
+	 * `mapper` receives a peer's current selection plus its `Peer` (so the caller
+	 * can, say, skip ops that peer authored itself) and returns the transformed
+	 * selection, or `null` to drop the caret (e.g. its block was deleted) until
+	 * the peer broadcasts afresh. Peers with no selection are skipped.
+	 *
+	 * The per-peer `clock`/`lastSeen` are deliberately left untouched: this is a
+	 * local cosmetic transform, not a new update from the peer, so the peer's next
+	 * genuine broadcast (higher `clock`) still wins and re-syncs any drift. Stays
+	 * ledger-agnostic — the caller supplies the position math. Returns `true` if
+	 * any stored selection changed (so the caller can re-render).
+	 */
+	mapSelections(mapper: (selection: Selection, peer: Peer) => Selection | null): boolean {
+		let changed = false;
+		for (const presence of this.remotes.values()) {
+			const current = presence.state.selection;
+			if (!current) continue;
+			const mapped = mapper(current, presence.peer);
+			if (selectionFieldEqual(current, mapped)) continue;
+			presence.state = { ...presence.state, selection: mapped };
+			changed = true;
+		}
+		return changed;
 	}
 
 	/** Retire a remote peer (e.g. it sent `bye`). Emits `leave`. */

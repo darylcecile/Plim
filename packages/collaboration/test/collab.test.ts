@@ -267,6 +267,71 @@ describe('Collaborator — presence', () => {
 		settle();
 		expect(b.collab.peers).toHaveLength(0);
 	});
+
+	const point = (path: number[], offset: number) => ({ anchor: { path, offset }, head: { path, offset } });
+	const remoteSel = (peer: { collab: Collaborator }, id: string) => peer.collab.peers.find((p) => p.peer.id === id)?.state.selection;
+
+	it('keeps a remote caret tracking the text as the local user edits (stable across edits)', () => {
+		const net = createMemoryNetwork({ origin: baseDoc(), latencyMs: 5 });
+		const a = makePeer(net, 'a', baseDoc());
+		const b = makePeer(net, 'b', baseDoc());
+		settle();
+
+		// B parks its caret at offset 3 of block 0; A receives it.
+		b.collab.setPresence({ selection: point([0], 3) });
+		settle();
+		expect(remoteSel(a, 'b')).toEqual(point([0], 3));
+
+		// A inserts two chars at the start of that block. B never re-broadcasts.
+		a.editor.emit((tx) => tx.insertText([0], 0, 'XX'));
+		settle();
+
+		// B's caret on A's side shifted right by 2 to stay over the same text — not frozen at 3.
+		expect(remoteSel(a, 'b')).toEqual(point([0], 5));
+	});
+
+	it("shifts remote carets over a third peer's confirmed edit, without over-shooting the author's own caret", () => {
+		const net = createMemoryNetwork({ origin: baseDoc(), latencyMs: 5 });
+		const a = makePeer(net, 'a', baseDoc());
+		const b = makePeer(net, 'b', baseDoc());
+		const c = makePeer(net, 'c', baseDoc());
+		settle();
+
+		// B and C both park carets at offset 3 of block 0; A receives both.
+		b.collab.setPresence({ selection: point([0], 3) });
+		c.collab.setPresence({ selection: point([0], 3) });
+		settle();
+
+		// C inserts two chars at block 0 and re-broadcasts its own post-edit caret.
+		c.editor.emit((tx) => tx.insertText([0], 0, 'YY'));
+		c.collab.setPresence({ selection: point([0], 5) });
+		settle();
+
+		// B did not move, but C's edit shifted the text under it → its caret tracks to offset 5.
+		expect(remoteSel(a, 'b')).toEqual(point([0], 5));
+		// C authored the edit: A must not re-map C's own ops over C's caret (that would over-shoot to 7).
+		// C's own broadcast (offset 5) is authoritative and preserved regardless of presence/confirm order.
+		expect(remoteSel(a, 'c')).toEqual(point([0], 5));
+	});
+
+	it('drops a remote caret when its block is deleted out from under it', () => {
+		const net = createMemoryNetwork({ origin: baseDoc(), latencyMs: 5 });
+		const a = makePeer(net, 'a', baseDoc());
+		const b = makePeer(net, 'b', baseDoc());
+		settle();
+
+		// B parks its caret inside block 1 ("bravo"); A receives it.
+		b.collab.setPresence({ selection: point([1], 2) });
+		settle();
+		expect(remoteSel(a, 'b')).toEqual(point([1], 2));
+
+		// A removes block 1 — B's caret has no valid home anymore.
+		a.editor.emit((tx) => tx.removeBlock([1]));
+		settle();
+
+		// Dropped to null (hidden) rather than left pointing at the wrong block, until B broadcasts again.
+		expect(remoteSel(a, 'b')).toBeNull();
+	});
 });
 
 describe('Collaborator — late join / delta sync', () => {
