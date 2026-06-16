@@ -1,6 +1,6 @@
 {
   "name": "@plim/ledger",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Plim ledger: record, replay, merge, diff, conflict resolution, and OT rebase of Plim transactions for bring-your-own sync/CRDT engines.",
   "type": "module",
   "main": "./dist/index.js",
