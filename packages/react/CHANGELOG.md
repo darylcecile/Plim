@@ -1,5 +1,14 @@
 # @plim/react
 
+## 0.1.3
+
+### Patch Changes
+
+- Patch bump to keep all @plim packages on the same version for a synchronized release.
+- Updated dependencies
+  - @plim/core@0.1.3
+  - @plim/editor@0.1.3
+
 ## 0.1.2
 
 ### Patch Changes

@@ -120,6 +120,26 @@ function rebaseSelectionOver(sel: Selection, ops: readonly TransactionOp[]): Sel
 	return { anchor: mapPointThrough(sel.anchor, ops), head: mapPointThrough(sel.head, ops) };
 }
 
+/** Thread a remote cursor point through ops, returning `null` if its block was deleted or the op is unmappable. */
+function mapRemotePointThrough(point: CursorPosition, ops: readonly TransactionOp[]): CursorPosition | null {
+	let cur = point;
+	for (const op of ops) {
+		const mapped = rebaseTextPoint(cur.path, cur.offset, op, 'right');
+		if (!mapped) return null;
+		cur = { path: mapped.path, offset: mapped.offset };
+	}
+	return cur;
+}
+
+/** Map a remote selection over concurrent ops; drop it (`null`) if either endpoint's block was deleted. */
+function rebaseRemoteSelectionOver(sel: Selection, ops: readonly TransactionOp[]): Selection | null {
+	if (ops.length === 0) return sel;
+	const anchor = mapRemotePointThrough(sel.anchor, ops);
+	const head = mapRemotePointThrough(sel.head, ops);
+	if (!anchor || !head) return null;
+	return { anchor, head };
+}
+
 /**
  * Makes a single editor a live collaborator on a shared document.
  *
@@ -270,6 +290,10 @@ export class Collaborator {
 		record.seq = this.localSeq;
 		this.pending.push(record);
 		this.broadcastSelection(selection);
+		// The local edit shifts the document under every remote caret; map them over
+		// it so they keep tracking their text as you type (the editor has already
+		// applied this tx, so the clamp targets the post-edit doc).
+		this.rebaseRemoteCursors(() => tx.ops);
 		this.flush();
 		this.emit();
 	}
@@ -394,8 +418,13 @@ export class Collaborator {
 			// concurrent with the REMOTE ops only — our own acked records were already part of its
 			// optimistic base — so rebase pending over just `remote` (dropping any that can no longer be
 			// placed — canonical wins, deterministically) and shift the local caret over the remote ops.
+			const remoteOps = remote.flatMap((r) => r.ops);
 			this.rebasePendingOver(remote, prevConfirmed);
-			this.recomputeEditor(remote.flatMap((r) => r.ops));
+			this.recomputeEditor(remoteOps);
+			// Shift other peers' carets over the same remote ops, but skip ops a peer
+			// authored itself — that peer's own presence broadcast already reflects
+			// them, so re-mapping would over-shoot its caret.
+			this.rebaseRemoteCursors((peer) => remote.filter((r) => r.source !== peer.id).flatMap((r) => r.ops));
 		}
 
 		this.flush();
@@ -428,6 +457,28 @@ export class Collaborator {
 		} finally {
 			this.applyingRemote = false;
 		}
+	}
+
+	/**
+	 * Keep other people's carets tracking the text as the document mutates beneath
+	 * them — the remote-cursor analogue of the local-caret rebase in
+	 * `recomputeEditor`. For each stored remote peer we map its selection over the
+	 * ops `opsFor(peer)` returns (then clamp into the current doc), dropping any
+	 * caret whose block was deleted. `opsFor` is per-peer so the confirmed-batch
+	 * path can exclude the ops a peer authored itself: that peer's own broadcast
+	 * already reflects them, and mapping over them again would over-shoot its
+	 * caret. Must run after the editor doc has advanced so the clamp targets the
+	 * new document.
+	 */
+	private rebaseRemoteCursors(opsFor: (peer: Peer) => readonly TransactionOp[]): void {
+		if (this.presence.size === 0) return;
+		const doc = this.editor.getState().doc;
+		this.presence.mapSelections((sel, peer) => {
+			const ops = opsFor(peer);
+			if (ops.length === 0) return sel;
+			const mapped = rebaseRemoteSelectionOver(sel, ops);
+			return mapped ? clampSelection(mapped, doc) : null;
+		});
 	}
 
 	private emit(): void {
