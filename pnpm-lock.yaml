@@ -190,6 +190,10 @@ importers:
       '@plim/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
+      '@plim/editor':
+        specifier: workspace:*
+        version: link:../editor
 
   packages/markdown:
     dependencies:

@@ -43,6 +43,9 @@
   "dependencies": {
     "@plim/core": "workspace:*"
   },
+  "devDependencies": {
+    "@plim/editor": "workspace:*"
+  },
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty false",

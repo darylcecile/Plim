@@ -249,8 +249,10 @@ export class TransactionLedger {
 
 	/**
 	 * Subscribe an editor so every future committed transaction is recorded.
-	 * Returns a detach function. Undo/redo bypass `dispatch` and so are not
-	 * recorded — only forward edits are. Use `options.filter` to skip
+	 * Returns a detach function. Undo and redo now flow through `dispatch` as
+	 * real transactions carrying inverse ops (undo) / original ops (redo), so
+	 * they fire the transaction listeners and ARE recorded — replay therefore
+	 * stays faithful across undo/redo. Use `options.filter` to skip
 	 * transactions you don't want in the log.
 	 */
 	attach(editor: EditorHandle, options: AttachOptions = {}): () => void {

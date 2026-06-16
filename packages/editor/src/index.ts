@@ -12,11 +12,14 @@ import {
 	PlimDriver,
 	Snapshot,
 	Transaction,
+	type TransactionOp,
 	type Trigger,
 	type ValidationContext,
 	applyTransaction,
 	builders,
+	cloneSelection,
 	evalRule,
+	invertOps,
 	matchKeyboardEvent,
 	newId,
 	processExtension,
@@ -79,13 +82,25 @@ export function deriveEditor(plim: PlimDriver, options: DeriveEditorOptions): Ag
 		const next = applyTransaction(state, tx);
 		state = next;
 		if (tx.meta.addToHistory !== false) {
-			history.push({ stateBefore: before, stateAfter: next, timestamp: Date.now() });
+			const inverse = invertOps(tx.ops, before);
+			history.push({
+				stateBefore: before,
+				stateAfter: next,
+				timestamp: Date.now(),
+				ops: cloneOps(tx.ops),
+				...(inverse ? { inverse } : {}),
+				selectionBefore: before.selection,
+			});
 		}
 		for (const cb of txListeners) cb(tx, state);
 		for (const ext of extensionShapes) {
 			ext.onTransaction?.(tx, ctx);
 		}
 		view?.update(state);
+	}
+
+	function cloneOps(ops: readonly TransactionOp[]): TransactionOp[] {
+		return JSON.parse(JSON.stringify(ops)) as TransactionOp[];
 	}
 
 	function createTransaction(): Transaction {
@@ -226,14 +241,35 @@ export function deriveEditor(plim: PlimDriver, options: DeriveEditorOptions): Ag
 	plim.__setPrimaryHistory({
 		undo: () => {
 			const e = history.popUndo();
-			if (e) {
+			if (!e) return;
+			if (e.inverse) {
+				// Replay the op-based inverse through the normal dispatch path so
+				// `txListeners` fire (an attached ledger records the undo) and the
+				// live document stays the single source of truth.
+				const tx = createTransaction();
+				for (const op of cloneOps(e.inverse)) tx.ops.push(op);
+				tx.setMeta('addToHistory', false);
+				tx.setMeta('history', 'undo');
+				if (e.selectionBefore) tx.setMeta('nextSelection', cloneSelection(e.selectionBefore));
+				tx.commit();
+			} else {
+				// Non-invertible transaction: fall back to snapshot restore so undo
+				// never breaks (the ledger will not record this step).
 				state = e.stateBefore;
 				view?.update(state);
 			}
 		},
 		redo: () => {
 			const e = history.popRedo();
-			if (e) {
+			if (!e) return;
+			if (e.ops) {
+				const tx = createTransaction();
+				for (const op of cloneOps(e.ops)) tx.ops.push(op);
+				tx.setMeta('addToHistory', false);
+				tx.setMeta('history', 'redo');
+				tx.setMeta('nextSelection', cloneSelection(e.stateAfter.selection));
+				tx.commit();
+			} else {
 				state = e.stateAfter;
 				view?.update(state);
 			}

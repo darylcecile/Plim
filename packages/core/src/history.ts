@@ -1,10 +1,22 @@
-import type { EditorState } from './transaction.js';
+import type { EditorState, TransactionOp } from './transaction.js';
+import type { Selection } from './selection.js';
 
 export type HistoryEntry = {
 	stateBefore: EditorState;
 	stateAfter: EditorState;
 	label?: string;
 	timestamp: number;
+	/** The forward ops of the transaction, deep-cloned. Replayed on redo. */
+	ops?: TransactionOp[];
+	/**
+	 * The op-based inverse of the transaction, computed at dispatch time.
+	 * Replayed on undo so undo/redo flow through `dispatch` as real recorded
+	 * transactions. `undefined` when the transaction was not invertible — the
+	 * controller then falls back to a snapshot restore.
+	 */
+	inverse?: TransactionOp[];
+	/** Selection before the transaction; restored as the caret on undo. */
+	selectionBefore?: Selection;
 };
 
 export type HistoryListener = (snapshot: { canUndo: boolean; canRedo: boolean; past: HistoryEntry[]; future: HistoryEntry[] }) => void;

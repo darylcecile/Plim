@@ -313,6 +313,8 @@ A snapshot captures the entire state of the editor, including the content, selec
 
 Where snapshots capture _whole states_ and history captures _undoable steps_, the ledger captures the **stream of committed transactions** as a portable, replayable log. It is the foundation layer for bringing your own sync or CRDT engine: it does not impose a network model or a merge policy, it gives you the primitives (record, replay, merge, diff, conflict detection, rebase) to build one.
 
+Undo and redo are part of that stream. They are dispatched as real transactions carrying inverse ops (undo) or the original ops (redo), so an attached ledger records them alongside forward edits and `replay()` reproduces the source editor's current document faithfully across undo/redo. (A transaction that cannot be op-inverted falls back to a snapshot restore for that single undo, which is not recorded.)
+
 The serialized intermediary is the `LedgerRecord` — a flat, JSON-safe snapshot of one transaction's operations stamped with an `id`, a wall-clock `timestamp`, a logical `lamport` clock, an optional `source`, and a pre-computed id-keyed `touches` conflict surface. Records carry operations, not documents, so they stay small and cheap to ship over the wire.
 
 ```ts

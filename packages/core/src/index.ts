@@ -1,6 +1,7 @@
 export * from './document.js';
 export * from './selection.js';
 export * from './transaction.js';
+export * from './invert.js';
 export * from './triggers.js';
 export * from './validation.js';
 export * from './actions.js';
