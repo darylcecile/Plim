@@ -1,5 +1,13 @@
 # @plim/collaboration
 
+## 0.1.2
+
+### Patch Changes
+
+- Updated dependencies [d733374]
+  - @plim/core@0.1.2
+  - @plim/ledger@0.1.2
+
 ## 0.1.1
 
 ### Patch Changes
