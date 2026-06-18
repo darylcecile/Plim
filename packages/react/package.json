@@ -39,7 +39,8 @@
   },
   "dependencies": {
     "@plim/core": "workspace:*",
-    "@plim/editor": "workspace:*"
+    "@plim/editor": "workspace:*",
+    "@plim/collaboration": "workspace:*"
   },
   "peerDependencies": {
     "react": ">=18",

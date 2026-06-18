@@ -1,7 +1,7 @@
 {
-  "name": "@plim/collaboration",
+  "name": "@plim/transports",
   "version": "0.1.3",
-  "description": "Plim collaboration: fast real-time multi-peer editing (Collaborator, CollabHub, presence) for the Plim block editor.",
+  "description": "Plim transports: tiny, generic duplex-channel primitives (in-memory loopback, BroadcastChannel, reconnecting WebSocket) for syncing any JSON-safe message over any wire.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -9,12 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    },
-    "./comments.css": "./comments.css"
+    }
   },
   "files": [
     "dist",
-    "comments.css",
     "LICENSE",
     "README.md"
   ],
@@ -27,25 +25,20 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/darylcecile/plim.git",
-    "directory": "packages/collaboration"
+    "directory": "packages/transports"
   },
   "keywords": [
     "plim",
-    "editor",
-    "block-editor",
-    "collaboration",
+    "transport",
+    "websocket",
+    "broadcastchannel",
+    "sync",
     "realtime",
-    "presence",
-    "ot",
-    "crdt"
+    "duplex",
+    "channel"
   ],
   "publishConfig": {
     "access": "public"
-  },
-  "dependencies": {
-    "@plim/core": "workspace:*",
-    "@plim/ledger": "workspace:*",
-    "@plim/transports": "workspace:*"
   },
   "scripts": {
     "build": "tsc -b",

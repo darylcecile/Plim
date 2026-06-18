@@ -16,7 +16,8 @@ A Notion-inspired block editor for the web, built as a TypeScript monorepo. Plim
 | --- | --- |
 | [`@plim/core`](./packages/core) | Schema, document model, transactions, validation rules, action/extension/trigger system, history, and the built-in block & mark descriptors. Runtime-agnostic — no DOM. |
 | [`@plim/ledger`](./packages/ledger) | Record, replay, merge, diff, and rebase transactions (`TransactionLedger`, `LedgerRecord`) plus conflict resolution — the bring-your-own sync / CRDT layer. Runtime-agnostic. |
-| [`@plim/collaboration`](./packages/collaboration) | Real-time multi-peer editing on top of the ledger: `Collaborator` (optimistic OT), `CollabHub` (transport-agnostic server half), presence/awareness, and version vectors. |
+| [`@plim/transports`](./packages/transports) | Tiny generic duplex-channel primitives (`Transport<T>`): in-memory loopback + broadcast bus, `BroadcastChannelTransport`, reconnecting `WebSocketTransport`, and `mapTransport` codecs. The wire that collaboration and comments sync over. Zero-dep. |
+| [`@plim/collaboration`](./packages/collaboration) | Real-time multi-peer editing on top of the ledger: `Collaborator` (optimistic OT), `CollabHub` (transport-agnostic server half), presence/awareness, and version vectors — plus **comments & threaded replies** (`commentMark`, observable `CommentStore`, `CommentSync`) with default overridable styling. |
 | [`@plim/markdown`](./packages/markdown) | Parse Markdown into a Plim document (`contentFromMarkdown`, `parseMarkdown`) and serialize back (`contentToMarkdown`). |
 | [`@plim/editor`](./packages/editor) | The view layer. Mounts a Plim document into a `contenteditable`, owns the floating toolbar, the block-handle gutter, paste/clipboard handling, drag-and-drop, and the keyboard pipeline. Ships its own stylesheet. |
 | [`@plim/react`](./packages/react) | React bindings: `<PlimEditor>`, `useEditorHandle()`, slash-command and mention extensions with first-class React components, and a bridge for defining blocks with `toComponent` (real React components persisted into the doc). |
@@ -415,6 +416,29 @@ socket.on('close', () => hub.remove(client));
 ```
 
 See [`examples/collab-kitchen-sink`](./examples/collab-kitchen-sink) for one shared document served over a real WebSocket by a tiny Hono + `CollabHub` backend — open it in two tabs and edit together.
+
+## Comments & replies
+
+Notion-style **comments with threaded replies** (select text → comment → reply → resolve) ship in `@plim/collaboration`. A comment is a `commentMark` in the document, so the highlight rides OT/collab and moves with the text; the thread bodies live out-of-band in an observable, convergent `CommentStore` that syncs over any [`@plim/transports`](./packages/transports) channel.
+
+It works by registering one mark and mounting one component — the editor's selection toolbar gains a 💬 **Comment** button automatically, and clicking a highlight opens its thread:
+
+```tsx
+import { commentMark, CommentStore, CommentSync } from '@plim/collaboration';
+import { BroadcastChannelTransport } from '@plim/transports';
+import { CommentsLayer } from '@plim/react';
+import '@plim/collaboration/comments.css'; // default, overridable styling
+
+// 1. register the mark on your driver:  registeredMarks: [..., commentMark]
+// 2. one store per client (unique actor); optionally sync across tabs/clients:
+const store = new CommentStore({ actor: crypto.randomUUID() });
+new CommentSync(store, new BroadcastChannelTransport('my-doc-comments'));
+
+// 3. mount the layer next to your editor:
+<CommentsLayer editor={handle} store={store} currentUser={{ id: 'me', name: 'You' }} />;
+```
+
+Every layer is replaceable: trigger the composer from your own UI by dispatching `COMMENT_COMPOSE_EVENT`; build a custom panel from the exported `CommentThreadCard` / `CommentCard` / `CommentComposer` / `useComments`; restyle via the `--plim-comment-*` CSS variables; or drive the pure doc helpers (`addCommentMark`, `removeCommentMark`, `findCommentRanges`) and the headless `CommentStore` directly. See the [`@plim/collaboration` README](./packages/collaboration#comments--replies) for the full surface, and [`examples/notion-clone`](./examples/notion-clone) for a wired demo with cross-tab sync.
 
 ## Markdown
 

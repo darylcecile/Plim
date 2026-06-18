@@ -193,6 +193,28 @@ describe('invertOps — per-op round-trips', () => {
 		const ops: TransactionOp[] = [{ kind: 'toggleMark', path: [0], from: 0, to: -1, mark: bold }];
 		expect(roundTrip(before, ops).doc).toEqual(before.doc);
 	});
+
+	it('addMark (with attrs) restores plain text', () => {
+		const before = state(para('b0', 'hello world'));
+		const comment: MarkInstance = { type: 'comment', attrs: { threadId: 't1' } };
+		const ops: TransactionOp[] = [{ kind: 'addMark', path: [0], from: 0, to: 5, mark: comment }];
+		expect(roundTrip(before, ops).doc).toEqual(before.doc);
+	});
+
+	it('removeMark restores the exact prior marks (with attrs)', () => {
+		const comment: MarkInstance = { type: 'comment', attrs: { threadId: 't1' } };
+		// "hello" already carries a comment mark.
+		const before: EditorState = {
+			doc: { type: 'doc', children: [{ id: 'b0', type: 'paragraph', text: [span('hello', [comment]), span(' world')] }] },
+			selection: { anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 0 } },
+		};
+		const ops: TransactionOp[] = [{ kind: 'removeMark', path: [0], from: 0, to: 5, mark: { type: 'comment' } }];
+		// the removal clears the comment...
+		const post = applyAll(before, ops);
+		expect(post.doc.children[0]!.text!.some((s) => s.marks?.some((m) => m.type === 'comment'))).toBe(false);
+		// ...and the inverse restores it (attrs and all).
+		expect(roundTrip(before, ops).doc).toEqual(before.doc);
+	});
 });
 
 describe('invertOps — composite / nested / sequencing', () => {

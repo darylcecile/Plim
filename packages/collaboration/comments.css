@@ -1,0 +1,262 @@
+/*
+ * @plim/collaboration/comments — default, overridable styling for comments.
+ *
+ * Mirrors the editor's conventions: everything is wrapped in an `@layer
+ * plim-comments` so your own un-layered rules always win, and every value is a
+ * CSS custom property you can override at `:root` (or any ancestor) without
+ * touching this file. The variables fall back to the editor's own tokens
+ * (`--accent`, `--text`, …) when present so comments inherit your theme.
+ *
+ * Import once near your editor styles:
+ *   import '@plim/collaboration/comments.css';
+ */
+
+@layer plim-comments {
+	:root {
+		--plim-comment-highlight: rgba(255, 197, 61, 0.32);
+		--plim-comment-highlight-active: rgba(255, 197, 61, 0.6);
+		--plim-comment-underline: rgba(214, 154, 0, 0.9);
+		--plim-comment-resolved-highlight: transparent;
+		--plim-comment-resolved-underline: rgba(55, 53, 47, 0.22);
+
+		--plim-comment-surface: var(--menu-bg, #ffffff);
+		--plim-comment-text: var(--text, rgb(55, 53, 47));
+		--plim-comment-muted: var(--text-muted, rgba(55, 53, 47, 0.5));
+		--plim-comment-faint: var(--text-faint, rgba(55, 53, 47, 0.3));
+		--plim-comment-divider: var(--divider, rgba(55, 53, 47, 0.12));
+		--plim-comment-accent: var(--accent, rgb(35, 131, 226));
+		--plim-comment-radius: 8px;
+		--plim-comment-shadow: var(
+			--menu-shadow,
+			rgba(15, 15, 15, 0.05) 0px 0px 0px 1px,
+			rgba(15, 15, 15, 0.1) 0px 3px 6px,
+			rgba(15, 15, 15, 0.2) 0px 9px 24px
+		);
+		--plim-comment-width: 320px;
+		--plim-comment-font: inherit;
+	}
+
+	/* ---- in-document highlight --------------------------------------------- */
+
+	.plim-comment {
+		background: var(--plim-comment-highlight);
+		border-bottom: 2px solid var(--plim-comment-underline);
+		border-radius: 2px;
+		cursor: pointer;
+		transition: background 120ms ease;
+	}
+
+	.plim-comment:hover,
+	.plim-comment[data-comment-active='true'] {
+		background: var(--plim-comment-highlight-active);
+	}
+
+	/* Resolved threads keep their text but drop the loud highlight. */
+	.plim-comment[data-comment-resolved='true'] {
+		background: var(--plim-comment-resolved-highlight);
+		border-bottom-color: var(--plim-comment-resolved-underline);
+		border-bottom-style: dotted;
+	}
+
+	/* ---- popover shell ------------------------------------------------------ */
+
+	.plim-comments-popover {
+		position: absolute;
+		z-index: 50;
+		width: var(--plim-comment-width);
+		max-width: calc(100vw - 24px);
+		box-sizing: border-box;
+		background: var(--plim-comment-surface);
+		color: var(--plim-comment-text);
+		font: var(--plim-comment-font);
+		font-size: 14px;
+		line-height: 1.45;
+		border-radius: var(--plim-comment-radius);
+		box-shadow: var(--plim-comment-shadow);
+		overflow: hidden;
+	}
+
+	.plim-comment-thread__scroll {
+		max-height: 320px;
+		overflow-y: auto;
+	}
+
+	/* ---- a single comment / reply ------------------------------------------ */
+
+	.plim-comment-card {
+		padding: 12px 14px;
+	}
+
+	.plim-comment-card + .plim-comment-card {
+		border-top: 1px solid var(--plim-comment-divider);
+	}
+
+	.plim-comment-card__head {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-bottom: 4px;
+	}
+
+	.plim-comment-card__avatar {
+		width: 22px;
+		height: 22px;
+		border-radius: 50%;
+		flex: 0 0 auto;
+		display: grid;
+		place-items: center;
+		font-size: 11px;
+		font-weight: 600;
+		color: #fff;
+		background: var(--plim-comment-accent);
+		object-fit: cover;
+	}
+
+	.plim-comment-card__author {
+		font-weight: 600;
+		font-size: 13px;
+	}
+
+	.plim-comment-card__time {
+		color: var(--plim-comment-faint);
+		font-size: 12px;
+	}
+
+	.plim-comment-card__edited {
+		color: var(--plim-comment-faint);
+		font-size: 12px;
+		font-style: italic;
+	}
+
+	.plim-comment-card__body {
+		white-space: pre-wrap;
+		word-wrap: break-word;
+		margin: 0;
+	}
+
+	.plim-comment-card__actions {
+		display: flex;
+		gap: 10px;
+		margin-top: 6px;
+		opacity: 0;
+		transition: opacity 100ms ease;
+	}
+
+	.plim-comment-card:hover .plim-comment-card__actions,
+	.plim-comment-card:focus-within .plim-comment-card__actions {
+		opacity: 1;
+	}
+
+	/* ---- thread header (resolve / close) ----------------------------------- */
+
+	.plim-comment-thread__header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		padding: 8px 14px;
+		border-bottom: 1px solid var(--plim-comment-divider);
+	}
+
+	.plim-comment-thread__title {
+		font-size: 12px;
+		font-weight: 600;
+		letter-spacing: 0.02em;
+		text-transform: uppercase;
+		color: var(--plim-comment-muted);
+	}
+
+	.plim-comment-thread--resolved .plim-comment-thread__title::after {
+		content: ' · resolved';
+		color: var(--plim-comment-faint);
+	}
+
+	/* ---- composer ----------------------------------------------------------- */
+
+	.plim-comment-composer {
+		padding: 10px 14px 12px;
+		border-top: 1px solid var(--plim-comment-divider);
+	}
+
+	.plim-comments-popover > .plim-comment-composer:only-child,
+	.plim-comments-popover > .plim-comment-composer:first-child {
+		border-top: none;
+	}
+
+	.plim-comment-composer__input {
+		width: 100%;
+		box-sizing: border-box;
+		resize: vertical;
+		min-height: 56px;
+		padding: 8px 10px;
+		font: inherit;
+		font-size: 14px;
+		color: var(--plim-comment-text);
+		background: transparent;
+		border: 1px solid var(--plim-comment-divider);
+		border-radius: 6px;
+		outline: none;
+	}
+
+	.plim-comment-composer__input:focus {
+		border-color: var(--plim-comment-accent);
+	}
+
+	.plim-comment-composer__actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 8px;
+		margin-top: 8px;
+	}
+
+	/* ---- buttons ------------------------------------------------------------ */
+
+	.plim-comment-btn {
+		font: inherit;
+		font-size: 13px;
+		font-weight: 500;
+		padding: 5px 12px;
+		border-radius: 6px;
+		border: 1px solid transparent;
+		cursor: pointer;
+		background: transparent;
+		color: var(--plim-comment-text);
+		transition: background 100ms ease, color 100ms ease;
+	}
+
+	.plim-comment-btn:disabled {
+		opacity: 0.4;
+		cursor: default;
+	}
+
+	.plim-comment-btn--primary {
+		background: var(--plim-comment-accent);
+		color: #fff;
+	}
+
+	.plim-comment-btn--primary:not(:disabled):hover {
+		filter: brightness(0.95);
+	}
+
+	.plim-comment-btn--ghost {
+		color: var(--plim-comment-muted);
+	}
+
+	.plim-comment-btn--ghost:not(:disabled):hover {
+		background: var(--plim-comment-divider);
+		color: var(--plim-comment-text);
+	}
+
+	/* ---- comment toolbar button icon spacing ------------------------------- */
+
+	.plim-comment-card__actions .plim-comment-btn {
+		padding: 0;
+		font-size: 12px;
+		color: var(--plim-comment-muted);
+	}
+
+	.plim-comment-card__actions .plim-comment-btn:hover {
+		color: var(--plim-comment-accent);
+		text-decoration: underline;
+	}
+}

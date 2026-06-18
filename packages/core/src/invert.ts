@@ -73,12 +73,13 @@ export function invertOp(op: TransactionOp, before: EditorState): TransactionOp 
 			const insertedLen = op.insert.reduce((n, s) => n + s.text.length, 0);
 			return { kind: 'replaceText', path: clonePath(op.path), from: op.from, to: op.from + insertedLen, insert: removed };
 		}
-		case 'toggleMark': {
-			// `toggleMark` is not self-inverse on partial ranges (re-toggling a
-			// now-fully-marked range removes instead of restoring). Restore the
-			// exact original spans of the affected range from `before`. Text
-			// length is unchanged by a toggle, so offsets carry over to the
-			// post-state unchanged.
+		case 'toggleMark':
+		case 'addMark':
+		case 'removeMark': {
+			// None of the mark ops are self-inverse on partial ranges (re-applying
+			// can add/remove the wrong subset). Restore the exact original spans of
+			// the affected range from `before`. Text length is unchanged by a mark
+			// op, so offsets carry over to the post-state unchanged.
 			const block = getBlockAt(before.doc, op.path);
 			if (!block || !block.text) return null;
 			const len = blockTextLength(block);

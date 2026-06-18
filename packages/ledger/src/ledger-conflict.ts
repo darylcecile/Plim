@@ -66,7 +66,9 @@ export function computeTouches(ops: readonly TransactionOp[], baseDoc: DocumentN
 				if (id) touches.push({ blockId: id, scope: 'text', from: op.from, to: op.to });
 				break;
 			}
-			case 'toggleMark': {
+			case 'toggleMark':
+			case 'addMark':
+			case 'removeMark': {
 				const id = blockIdAt(baseDoc, op.path);
 				if (id) touches.push({ blockId: id, scope: 'marks', from: op.from, to: op.to === -1 ? END : op.to });
 				break;

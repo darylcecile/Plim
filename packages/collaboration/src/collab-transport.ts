@@ -29,6 +29,7 @@ import type { Selection } from '@plim/core';
 import { type EditorState, applyOp } from '@plim/core';
 import { type LedgerRecord } from '@plim/ledger';
 import { rebaseRecord } from '@plim/ledger';
+import type { Transport as GenericTransport } from '@plim/transports';
 import type { Peer, PeerId, PresenceState } from './collab-presence.js';
 
 // ---- version vectors --------------------------------------------------------
@@ -97,12 +98,17 @@ export type CollabMessage =
 	| { type: 'presence'; peer: Peer; state: PresenceState; clock: number }
 	| { type: 'bye'; peerId: PeerId };
 
-/** A bidirectional message channel between one client and the hub. */
-export interface Transport {
-	send(message: CollabMessage): void;
-	onMessage(handler: (message: CollabMessage) => void): () => void;
-	close(): void;
-}
+/**
+ * A bidirectional message channel between one client and the hub.
+ *
+ * This is the collaboration-specific specialization of the generic
+ * `Transport<T>` from `@plim/transports` — `Transport === Transport<CollabMessage>`.
+ * Existing code that writes `implements Transport` keeps working unchanged
+ * (the shape is identical), and any generic `@plim/transports` wire
+ * (`MemoryBus`, `BroadcastChannelTransport`, `WebSocketTransport`) that carries
+ * `CollabMessage` is assignable here for free.
+ */
+export type Transport = GenericTransport<CollabMessage>;
 
 // ---- authority --------------------------------------------------------------
 
