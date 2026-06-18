@@ -1,6 +1,6 @@
 {
   "name": "@plim/transports",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Plim transports: tiny, generic duplex-channel primitives (in-memory loopback, BroadcastChannel, reconnecting WebSocket) for syncing any JSON-safe message over any wire.",
   "type": "module",
   "main": "./dist/index.js",
