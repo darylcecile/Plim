@@ -21,6 +21,9 @@ A Notion-inspired block editor for the web, built as a TypeScript monorepo. Plim
 | [`@plim/markdown`](./packages/markdown) | Parse Markdown into a Plim document (`contentFromMarkdown`, `parseMarkdown`) and serialize back (`contentToMarkdown`). |
 | [`@plim/editor`](./packages/editor) | The view layer. Mounts a Plim document into a `contenteditable`, owns the floating toolbar, the block-handle gutter, paste/clipboard handling, drag-and-drop, and the keyboard pipeline. Ships its own stylesheet. |
 | [`@plim/react`](./packages/react) | React bindings: `<PlimEditor>`, `useEditorHandle()`, slash-command and mention extensions with first-class React components, and a bridge for defining blocks with `toComponent` (real React components persisted into the doc). |
+| [`@plim/html`](./packages/html) | Headless, SSR-safe serializer: render a document model to an HTML string (`serializeToHTML`) with overridable per-block / per-mark renderers and escaped-by-default output. No DOM — runs in Node, edge, email, and SEO pipelines. Optional. |
+| [`@plim/storage`](./packages/storage) | Durable persistence primitives: pluggable `StorageAdapter`s (memory, `localStorage`, IndexedDB, transport) plus debounced snapshot `createAutosave`. The durable counterpart to the ledger/transport sync layer. Optional. |
+| [`@plim/test-utils`](./packages/test-utils) | Runner-agnostic testing helpers: fluent document/mark builders, a headless `createTestEditor` (real driver, no DOM), `applyTx`, and inspectors/assertions for unit-testing your own blocks, marks, and extensions. |
 
 `examples/notion-clone` is a full Vite + React app exercising the four editor-stack packages above — it's the litmus test the whole repo is built against.
 
@@ -463,6 +466,40 @@ const md = contentToMarkdown(parsed, { blocks: [calloutBlock] });
 
 Custom blocks opt in by implementing `fromMarkdown` (consulted before the built-in line parser; first non-null wins) and `toMarkdown` (returns a string or array of lines).
 
+## HTML / SSR
+
+`@plim/html` renders a Plim document model to an HTML **string** with no DOM APIs — for server previews, SEO, transactional emails, and edge runtimes. It's the read-only, server-side counterpart to `@plim/editor`. `serializeToHTML` accepts a `DocumentNode`, `EditorState`, `Snapshot`, or `BlockNode[]`; output is escaped by default (only the `raw_html` block is emitted verbatim — sanitize untrusted input).
+
+```ts
+import { serializeToHTML, type BlockRenderer } from '@plim/html';
+
+// Fragment by default; pass { document: true } for a full <!doctype html> page.
+const fragment = serializeToHTML(snapshot);
+
+// Override or add per-block / per-mark renderers — everything else falls back to the defaults.
+const callout: BlockRenderer = (node, ctx) =>
+  `<aside${ctx.attr('class', ctx.classFor('callout'))}>${ctx.renderInline(node.text)}</aside>`;
+
+const page = serializeToHTML(doc, { document: true, classPrefix: 'plim-', blocks: { callout } });
+```
+
+Unknown blocks render as a neutral `<div data-block-type="…">` (or your `onUnknownBlock`); unknown marks pass their inner HTML through unchanged, so the package stays decoupled from `@plim/collaboration`'s `commentMark` and any custom marks. See the [`@plim/html` README](./packages/html).
+
+## Storage & autosave
+
+`@plim/storage` is the durable counterpart to the sync primitives: it persists serialized `Snapshot` strings behind a tiny `StorageAdapter` and composes them with debounced autosave. Adapters ship for memory, `localStorage`, IndexedDB, and any [`@plim/transports`](./packages/transports) channel (the server-document pattern).
+
+```ts
+import { createAutosave, createLocalStorageAdapter } from '@plim/storage';
+
+const autosave = createAutosave({ editor, adapter: createLocalStorageAdapter(), key: 'doc' });
+
+await autosave.load();   // restore a saved snapshot into the editor
+// Edits now debounce-save automatically: saveNow() bypasses, flush() forces, stop() unsubscribes.
+```
+
+Adapters are string-in/string-out (`load` / `save` / `remove` / optional `keys`), so you can drop in your own backend. See the [`@plim/storage` README](./packages/storage).
+
 ## Examples
 
 [`examples/notion-clone`](./examples/notion-clone) is the reference app — a Notion-style page with the slash menu, @-mentions, inline status badges, custom callout (`toDOM`) and counter (`toComponent`) blocks, syntax-highlighted code blocks, undo/redo, and the full toolbar. Run it with:
@@ -498,6 +535,20 @@ pnpm dev:notion         # run the reference example
 ```
 
 The full implementation history is tracked in [`todo.md`](./todo.md); the API contract lives in [`REQUIREMENTS.md`](./REQUIREMENTS.md).
+
+## Testing
+
+`@plim/test-utils` makes it easy to unit-test your own blocks, marks, and extensions without mounting a browser — it productizes the headless-editor pattern this repo uses across its own suite. You get fluent builders, a real-driver `createTestEditor` (no DOM), `applyTx`, and runner-agnostic inspectors/assertions (works under Vitest, Jest, or `node:test`). Add it as a `devDependency`.
+
+```ts
+import { createTestEditor, doc, paragraph, bold, applyTx, assertPlainText } from '@plim/test-utils';
+
+const editor = createTestEditor({ content: doc(paragraph('Hello ', bold('world'))) });
+applyTx(editor, (tx) => tx.insertText([0], 11, '!'));
+assertPlainText(editor.getState(), 'Hello world!');
+```
+
+Use `createIdFactory` for deterministic ids in snapshot fixtures, and register custom `blocks` / `marks` / `extensions` on `createTestEditor` to exercise them headlessly. See the [`@plim/test-utils` README](./packages/test-utils).
 
 ## Releases
 

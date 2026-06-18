@@ -23,6 +23,9 @@ export default defineConfig({
 			'@plim/react': new URL('./packages/react/src/index.tsx', import.meta.url).pathname,
 			'@plim/transports': new URL('./packages/transports/src/index.ts', import.meta.url).pathname,
 			'@plim/collaboration': new URL('./packages/collaboration/src/index.ts', import.meta.url).pathname,
+			'@plim/test-utils': new URL('./packages/test-utils/src/index.ts', import.meta.url).pathname,
+			'@plim/html': new URL('./packages/html/src/index.ts', import.meta.url).pathname,
+			'@plim/storage': new URL('./packages/storage/src/index.ts', import.meta.url).pathname,
 		},
 	},
 });
