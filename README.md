@@ -16,10 +16,14 @@ A Notion-inspired block editor for the web, built as a TypeScript monorepo. Plim
 | --- | --- |
 | [`@plim/core`](./packages/core) | Schema, document model, transactions, validation rules, action/extension/trigger system, history, and the built-in block & mark descriptors. Runtime-agnostic — no DOM. |
 | [`@plim/ledger`](./packages/ledger) | Record, replay, merge, diff, and rebase transactions (`TransactionLedger`, `LedgerRecord`) plus conflict resolution — the bring-your-own sync / CRDT layer. Runtime-agnostic. |
-| [`@plim/collaboration`](./packages/collaboration) | Real-time multi-peer editing on top of the ledger: `Collaborator` (optimistic OT), `CollabHub` (transport-agnostic server half), presence/awareness, and version vectors. |
+| [`@plim/transports`](./packages/transports) | Tiny generic duplex-channel primitives (`Transport<T>`): in-memory loopback + broadcast bus, `BroadcastChannelTransport`, reconnecting `WebSocketTransport`, and `mapTransport` codecs. The wire that collaboration and comments sync over. Zero-dep. |
+| [`@plim/collaboration`](./packages/collaboration) | Real-time multi-peer editing on top of the ledger: `Collaborator` (optimistic OT), `CollabHub` (transport-agnostic server half), presence/awareness, and version vectors — plus **comments & threaded replies** (`commentMark`, observable `CommentStore`, `CommentSync`) with default overridable styling. |
 | [`@plim/markdown`](./packages/markdown) | Parse Markdown into a Plim document (`contentFromMarkdown`, `parseMarkdown`) and serialize back (`contentToMarkdown`). |
 | [`@plim/editor`](./packages/editor) | The view layer. Mounts a Plim document into a `contenteditable`, owns the floating toolbar, the block-handle gutter, paste/clipboard handling, drag-and-drop, and the keyboard pipeline. Ships its own stylesheet. |
 | [`@plim/react`](./packages/react) | React bindings: `<PlimEditor>`, `useEditorHandle()`, slash-command and mention extensions with first-class React components, and a bridge for defining blocks with `toComponent` (real React components persisted into the doc). |
+| [`@plim/html`](./packages/html) | Headless, SSR-safe serializer: render a document model to an HTML string (`serializeToHTML`) with overridable per-block / per-mark renderers and escaped-by-default output. No DOM — runs in Node, edge, email, and SEO pipelines. Optional. |
+| [`@plim/storage`](./packages/storage) | Durable persistence primitives: pluggable `StorageAdapter`s (memory, `localStorage`, IndexedDB, transport) plus debounced snapshot `createAutosave`. The durable counterpart to the ledger/transport sync layer. Optional. |
+| [`@plim/test-utils`](./packages/test-utils) | Runner-agnostic testing helpers: fluent document/mark builders, a headless `createTestEditor` (real driver, no DOM), `applyTx`, and inspectors/assertions for unit-testing your own blocks, marks, and extensions. |
 
 `examples/notion-clone` is a full Vite + React app exercising the four editor-stack packages above — it's the litmus test the whole repo is built against.
 
@@ -416,6 +420,29 @@ socket.on('close', () => hub.remove(client));
 
 See [`examples/collab-kitchen-sink`](./examples/collab-kitchen-sink) for one shared document served over a real WebSocket by a tiny Hono + `CollabHub` backend — open it in two tabs and edit together.
 
+## Comments & replies
+
+Notion-style **comments with threaded replies** (select text → comment → reply → resolve) ship in `@plim/collaboration`. A comment is a `commentMark` in the document, so the highlight rides OT/collab and moves with the text; the thread bodies live out-of-band in an observable, convergent `CommentStore` that syncs over any [`@plim/transports`](./packages/transports) channel.
+
+It works by registering one mark and mounting one component — the editor's selection toolbar gains a 💬 **Comment** button automatically, and clicking a highlight opens its thread:
+
+```tsx
+import { commentMark, CommentStore, CommentSync } from '@plim/collaboration';
+import { BroadcastChannelTransport } from '@plim/transports';
+import { CommentsLayer } from '@plim/react';
+import '@plim/collaboration/comments.css'; // default, overridable styling
+
+// 1. register the mark on your driver:  registeredMarks: [..., commentMark]
+// 2. one store per client (unique actor); optionally sync across tabs/clients:
+const store = new CommentStore({ actor: crypto.randomUUID() });
+new CommentSync(store, new BroadcastChannelTransport('my-doc-comments'));
+
+// 3. mount the layer next to your editor:
+<CommentsLayer editor={handle} store={store} currentUser={{ id: 'me', name: 'You' }} />;
+```
+
+Every layer is replaceable: trigger the composer from your own UI by dispatching `COMMENT_COMPOSE_EVENT`; build a custom panel from the exported `CommentThreadCard` / `CommentCard` / `CommentComposer` / `useComments`; restyle via the `--plim-comment-*` CSS variables; or drive the pure doc helpers (`addCommentMark`, `removeCommentMark`, `findCommentRanges`) and the headless `CommentStore` directly. See the [`@plim/collaboration` README](./packages/collaboration#comments--replies) for the full surface, and [`examples/notion-clone`](./examples/notion-clone) for a wired demo with cross-tab sync.
+
 ## Markdown
 
 `@plim/markdown` round-trips between Markdown and Plim documents. It understands the built-in block & mark vocabulary (paragraphs, headings, quotes, bulleted/numbered/todo lists, dividers, fenced code, images, plus `**bold**`, `*italic*`, `` `code` ``, `~strike~`, `[link](href)`, `<u>underline</u>`).
@@ -438,6 +465,40 @@ const md = contentToMarkdown(parsed, { blocks: [calloutBlock] });
 ```
 
 Custom blocks opt in by implementing `fromMarkdown` (consulted before the built-in line parser; first non-null wins) and `toMarkdown` (returns a string or array of lines).
+
+## HTML / SSR
+
+`@plim/html` renders a Plim document model to an HTML **string** with no DOM APIs — for server previews, SEO, transactional emails, and edge runtimes. It's the read-only, server-side counterpart to `@plim/editor`. `serializeToHTML` accepts a `DocumentNode`, `EditorState`, `Snapshot`, or `BlockNode[]`; output is escaped by default (only the `raw_html` block is emitted verbatim — sanitize untrusted input).
+
+```ts
+import { serializeToHTML, type BlockRenderer } from '@plim/html';
+
+// Fragment by default; pass { document: true } for a full <!doctype html> page.
+const fragment = serializeToHTML(snapshot);
+
+// Override or add per-block / per-mark renderers — everything else falls back to the defaults.
+const callout: BlockRenderer = (node, ctx) =>
+  `<aside${ctx.attr('class', ctx.classFor('callout'))}>${ctx.renderInline(node.text)}</aside>`;
+
+const page = serializeToHTML(doc, { document: true, classPrefix: 'plim-', blocks: { callout } });
+```
+
+Unknown blocks render as a neutral `<div data-block-type="…">` (or your `onUnknownBlock`); unknown marks pass their inner HTML through unchanged, so the package stays decoupled from `@plim/collaboration`'s `commentMark` and any custom marks. See the [`@plim/html` README](./packages/html).
+
+## Storage & autosave
+
+`@plim/storage` is the durable counterpart to the sync primitives: it persists serialized `Snapshot` strings behind a tiny `StorageAdapter` and composes them with debounced autosave. Adapters ship for memory, `localStorage`, IndexedDB, and any [`@plim/transports`](./packages/transports) channel (the server-document pattern).
+
+```ts
+import { createAutosave, createLocalStorageAdapter } from '@plim/storage';
+
+const autosave = createAutosave({ editor, adapter: createLocalStorageAdapter(), key: 'doc' });
+
+await autosave.load();   // restore a saved snapshot into the editor
+// Edits now debounce-save automatically: saveNow() bypasses, flush() forces, stop() unsubscribes.
+```
+
+Adapters are string-in/string-out (`load` / `save` / `remove` / optional `keys`), so you can drop in your own backend. See the [`@plim/storage` README](./packages/storage).
 
 ## Examples
 
@@ -474,6 +535,20 @@ pnpm dev:notion         # run the reference example
 ```
 
 The full implementation history is tracked in [`todo.md`](./todo.md); the API contract lives in [`REQUIREMENTS.md`](./REQUIREMENTS.md).
+
+## Testing
+
+`@plim/test-utils` makes it easy to unit-test your own blocks, marks, and extensions without mounting a browser — it productizes the headless-editor pattern this repo uses across its own suite. You get fluent builders, a real-driver `createTestEditor` (no DOM), `applyTx`, and runner-agnostic inspectors/assertions (works under Vitest, Jest, or `node:test`). Add it as a `devDependency`.
+
+```ts
+import { createTestEditor, doc, paragraph, bold, applyTx, assertPlainText } from '@plim/test-utils';
+
+const editor = createTestEditor({ content: doc(paragraph('Hello ', bold('world'))) });
+applyTx(editor, (tx) => tx.insertText([0], 11, '!'));
+assertPlainText(editor.getState(), 'Hello world!');
+```
+
+Use `createIdFactory` for deterministic ids in snapshot fixtures, and register custom `blocks` / `marks` / `extensions` on `createTestEditor` to exercise them headlessly. See the [`@plim/test-utils` README](./packages/test-utils).
 
 ## Releases
 

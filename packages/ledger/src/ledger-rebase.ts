@@ -104,6 +104,8 @@ function mapPathThroughOp(path: BlockPath, over: TransactionOp): PathMap {
 			return mapPathMove(path, over.from, over.to);
 		case 'replaceText':
 		case 'toggleMark':
+		case 'addMark':
+		case 'removeMark':
 		case 'setBlockType':
 		case 'setBlockAttrs':
 		case 'setSelection':
@@ -148,6 +150,8 @@ function mapPointThroughOp(path: BlockPath, offset: number, over: TransactionOp,
 			return mapped.type === 'ok' ? { type: 'ok', path: mapped.path, offset } : mapped;
 		}
 		case 'toggleMark':
+		case 'addMark':
+		case 'removeMark':
 		case 'setBlockType':
 		case 'setBlockAttrs':
 		case 'setSelection':
@@ -240,6 +244,27 @@ function effectiveOverOps(overOps: readonly TransactionOp[], baseDoc: DocumentNo
 	return out;
 }
 
+// Thread a mark op's `[from, to)` range through the concurrent ops. Shared by
+// toggleMark/addMark/removeMark: `from` biases right and `to` biases left (so the
+// marked span shrinks to stay within surviving text), the `-1` "to end of block"
+// sentinel is preserved, and the op bails if its text was deleted or split across
+// blocks. `label` only shapes the bail message so each op reads naturally.
+function rebaseMarkRange(
+	label: string,
+	op: { path: BlockPath; from: number; to: number },
+	overOps: readonly TransactionOp[],
+): { type: 'ok'; path: BlockPath; from: number; to: number } | { type: 'bail'; reason: string } {
+	const from = threadPoint(op.path, op.from, overOps, 'right');
+	if (from.type === 'deleted') return { type: 'bail', reason: `${label} targets text removed by the concurrent change` };
+	if (from.type !== 'ok') return { type: 'bail', reason: from.reason };
+	if (op.to === -1) return { type: 'ok', path: from.path, from: from.offset, to: -1 };
+	const to = threadPoint(op.path, op.to, overOps, 'left');
+	if (to.type === 'deleted') return { type: 'bail', reason: `${label} targets text removed by the concurrent change` };
+	if (to.type !== 'ok') return { type: 'bail', reason: to.reason };
+	if (!samePath(from.path, to.path)) return { type: 'bail', reason: `${label} range was split across blocks by a concurrent split` };
+	return { type: 'ok', path: from.path, from: from.offset, to: to.offset };
+}
+
 function rebaseOp(op: TransactionOp, overOps: readonly TransactionOp[]): OpRebase {
 	switch (op.kind) {
 		case 'setSelection': {
@@ -260,17 +285,19 @@ function rebaseOp(op: TransactionOp, overOps: readonly TransactionOp[]): OpRebas
 			return { type: 'ok', op: { kind: 'replaceText', path: from.path, from: from.offset, to: to.offset, insert: op.insert } };
 		}
 		case 'toggleMark': {
-			const from = threadPoint(op.path, op.from, overOps, 'right');
-			if (from.type === 'deleted') return { type: 'bail', reason: 'toggleMark targets text removed by the concurrent change' };
-			if (from.type !== 'ok') return { type: 'bail', reason: from.reason };
-			if (op.to === -1) {
-				return { type: 'ok', op: { kind: 'toggleMark', path: from.path, from: from.offset, to: -1, mark: op.mark } };
-			}
-			const to = threadPoint(op.path, op.to, overOps, 'left');
-			if (to.type === 'deleted') return { type: 'bail', reason: 'toggleMark targets text removed by the concurrent change' };
-			if (to.type !== 'ok') return { type: 'bail', reason: to.reason };
-			if (!samePath(from.path, to.path)) return { type: 'bail', reason: 'toggleMark range was split across blocks by a concurrent split' };
-			return { type: 'ok', op: { kind: 'toggleMark', path: from.path, from: from.offset, to: to.offset, mark: op.mark } };
+			const r = rebaseMarkRange('toggleMark', op, overOps);
+			if (r.type !== 'ok') return r;
+			return { type: 'ok', op: { kind: 'toggleMark', path: r.path, from: r.from, to: r.to, mark: op.mark } };
+		}
+		case 'addMark': {
+			const r = rebaseMarkRange('addMark', op, overOps);
+			if (r.type !== 'ok') return r;
+			return { type: 'ok', op: { kind: 'addMark', path: r.path, from: r.from, to: r.to, mark: op.mark } };
+		}
+		case 'removeMark': {
+			const r = rebaseMarkRange('removeMark', op, overOps);
+			if (r.type !== 'ok') return r;
+			return { type: 'ok', op: { kind: 'removeMark', path: r.path, from: r.from, to: r.to, mark: op.mark } };
 		}
 		case 'splitBlock': {
 			const at = threadPoint(op.path, op.offset, overOps, 'right');

@@ -1,4 +1,5 @@
 @import url("@plim/editor/styles.css");
+@import url("@plim/collaboration/comments.css");
 
 :root {
 	--page-bg: #ffffff;

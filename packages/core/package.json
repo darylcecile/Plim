@@ -1,6 +1,6 @@
 {
   "name": "@plim/core",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Plim core: schema, transactions, validation, and built-in block/mark descriptors for the Plim block editor.",
   "type": "module",
   "main": "./dist/index.js",

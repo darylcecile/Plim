@@ -136,6 +136,81 @@ describe('Transaction', () => {
 	});
 });
 
+describe('addMark / removeMark', () => {
+	it('addMark applies a mark with attrs to a range', () => {
+		const state = makeState('hello world');
+		const tx = new Transaction(state);
+		tx.addMark('comment', { path: [0], from: 0, to: 5 }, { threadId: 't1' });
+		const next = applyTransaction(state, tx);
+		const span = next.doc.children[0]!.text!.find((s) => s.marks?.some((m) => m.type === 'comment'));
+		expect(span?.text).toBe('hello');
+		expect(span?.marks?.find((m) => m.type === 'comment')?.attrs).toEqual({ threadId: 't1' });
+	});
+
+	it('addMark applied twice keeps the mark (does not toggle off)', () => {
+		const state = makeState('hello');
+		const t1 = new Transaction(state);
+		t1.addMark('comment', { path: [0], from: 0, to: 5 }, { threadId: 't1' });
+		const mid = applyTransaction(state, t1);
+		const t2 = new Transaction(mid);
+		t2.addMark('comment', { path: [0], from: 0, to: 5 }, { threadId: 't1' });
+		const next = applyTransaction(mid, t2);
+		const span = next.doc.children[0]!.text!.find((s) => s.marks?.some((m) => m.type === 'comment'));
+		expect(span?.text).toBe('hello');
+	});
+
+	it('a later addMark with different attrs reassigns the overlap', () => {
+		const state = makeState('hello');
+		const t1 = new Transaction(state);
+		t1.addMark('comment', { path: [0], from: 0, to: 5 }, { threadId: 't1' });
+		const mid = applyTransaction(state, t1);
+		const t2 = new Transaction(mid);
+		t2.addMark('comment', { path: [0], from: 0, to: 5 }, { threadId: 't2' });
+		const next = applyTransaction(mid, t2);
+		const span = next.doc.children[0]!.text!.find((s) => s.marks?.some((m) => m.type === 'comment'));
+		expect(span?.marks?.find((m) => m.type === 'comment')?.attrs).toEqual({ threadId: 't2' });
+	});
+
+	it('removeMark removes the mark of a type over a range', () => {
+		const state = makeState('hello world');
+		const t1 = new Transaction(state);
+		t1.addMark('comment', { path: [0], from: 0, to: 11 }, { threadId: 't1' });
+		const mid = applyTransaction(state, t1);
+		const t2 = new Transaction(mid);
+		t2.removeMark('comment', { path: [0], from: 0, to: 5 });
+		const next = applyTransaction(mid, t2);
+		const text = next.doc.children[0]!.text!;
+		// "hello" cleared, " world" still commented
+		const stillMarked = text.filter((s) => s.marks?.some((m) => m.type === 'comment')).map((s) => s.text).join('');
+		expect(stillMarked).toBe(' world');
+	});
+
+	it('removeMark leaves other mark types intact', () => {
+		const state = makeState('hello');
+		const t1 = new Transaction(state);
+		t1.addMark('comment', { path: [0], from: 0, to: 5 }, { threadId: 't1' });
+		t1.toggleMark('bold', { path: [0], from: 0, to: 5 });
+		const mid = applyTransaction(state, t1);
+		const t2 = new Transaction(mid);
+		t2.removeMark('comment', { path: [0], from: 0, to: 5 });
+		const next = applyTransaction(mid, t2);
+		const span = next.doc.children[0]!.text![0]!;
+		expect(span.marks?.some((m) => m.type === 'comment')).toBe(false);
+		expect(span.marks?.some((m) => m.type === 'bold')).toBe(true);
+	});
+
+	it('addMark spans across blocks (selection-form)', () => {
+		const state = makeState('hello', 'world');
+		const tx = new Transaction(state);
+		tx.addMark('comment', { from: { path: [0], offset: 2 }, to: { path: [1], offset: 3 } }, { threadId: 't1' });
+		const next = applyTransaction(state, tx);
+		const first = next.doc.children[0]!.text!.filter((s) => s.marks?.some((m) => m.type === 'comment')).map((s) => s.text).join('');
+		const second = next.doc.children[1]!.text!.filter((s) => s.marks?.some((m) => m.type === 'comment')).map((s) => s.text).join('');
+		expect(first).toBe('llo');
+		expect(second).toBe('wor');
+	});
+});
+
 describe('Structural sharing across transactions', () => {
 	// `withDocChange` deep-clones the doc, mutates, then re-aliases
 	// any subtree whose shape matches the previous version. This

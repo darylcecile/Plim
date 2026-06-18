@@ -9,10 +9,12 @@
     "preview": "vite preview --port 4173"
   },
   "dependencies": {
+    "@plim/collaboration": "workspace:*",
     "@plim/core": "workspace:*",
     "@plim/editor": "workspace:*",
     "@plim/markdown": "workspace:*",
     "@plim/react": "workspace:*",
+    "@plim/transports": "workspace:*",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "sugar-high": "^1.1.0"

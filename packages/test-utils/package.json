@@ -1,0 +1,49 @@
+{
+  "name": "@plim/test-utils",
+  "version": "0.2.0",
+  "description": "Plim test utilities: ergonomic document builders, a headless test editor, transaction helpers, and runner-agnostic assertions for testing custom blocks and marks.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "Daryl Cecile <darylcecile@gmail.com>",
+  "homepage": "https://github.com/darylcecile/plim#readme",
+  "bugs": {
+    "url": "https://github.com/darylcecile/plim/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/darylcecile/plim.git",
+    "directory": "packages/test-utils"
+  },
+  "keywords": [
+    "plim",
+    "test-utils",
+    "testing",
+    "block-editor",
+    "fixtures",
+    "builder"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@plim/core": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "prepublishOnly": "pnpm build"
+  }
+}

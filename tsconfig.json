@@ -3,7 +3,11 @@
   "references": [
     { "path": "./packages/core" },
     { "path": "./packages/ledger" },
+    { "path": "./packages/transports" },
     { "path": "./packages/collaboration" },
+    { "path": "./packages/test-utils" },
+    { "path": "./packages/html" },
+    { "path": "./packages/storage" },
     { "path": "./packages/editor" },
     { "path": "./packages/markdown" },
     { "path": "./packages/react" }

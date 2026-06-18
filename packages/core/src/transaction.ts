@@ -45,7 +45,9 @@ export type TransactionOp =
 	| { kind: 'insertBlock'; path: BlockPath; block: BlockNode }
 	| { kind: 'removeBlock'; path: BlockPath }
 	| { kind: 'moveBlock'; from: BlockPath; to: BlockPath }
-	| { kind: 'toggleMark'; path: BlockPath; from: number; to: number; mark: MarkInstance };
+	| { kind: 'toggleMark'; path: BlockPath; from: number; to: number; mark: MarkInstance }
+	| { kind: 'addMark'; path: BlockPath; from: number; to: number; mark: MarkInstance }
+	| { kind: 'removeMark'; path: BlockPath; from: number; to: number; mark: MarkInstance };
 
 export class Transaction {
 	readonly ops: TransactionOp[] = [];
@@ -121,45 +123,70 @@ export class Transaction {
 	toggleMark(name: string, range: { path: BlockPath; from: number; to: number }, attrs?: Record<string, unknown>): this;
 	toggleMark(name: string, range: any, attrs?: Record<string, unknown>): this {
 		const mark: MarkInstance = attrs ? { type: name, attrs } : { type: name };
+		for (const r of this.markRanges(range)) this.ops.push({ kind: 'toggleMark', path: r.path, from: r.from, to: r.to, mark });
+		return this;
+	}
+
+	/**
+	 * Add a mark over a range *unconditionally* (unlike {@link toggleMark}, which
+	 * removes the mark when the range is already fully marked). This is what
+	 * range-keyed annotations such as comments want: applying a comment must never
+	 * accidentally toggle an existing one off. A character holds at most one mark
+	 * of a given `type` — adding a mark whose attrs differ (e.g. a new comment
+	 * thread over already-commented text) replaces the prior one on the overlap.
+	 */
+	addMark(name: string, range: { from: { path: BlockPath; offset: number }; to: { path: BlockPath; offset: number } }, attrs?: Record<string, unknown>): this;
+	addMark(name: string, range: { path: BlockPath; from: number; to: number }, attrs?: Record<string, unknown>): this;
+	addMark(name: string, range: any, attrs?: Record<string, unknown>): this {
+		const mark: MarkInstance = attrs ? { type: name, attrs } : { type: name };
+		for (const r of this.markRanges(range)) this.ops.push({ kind: 'addMark', path: r.path, from: r.from, to: r.to, mark });
+		return this;
+	}
+
+	/**
+	 * Remove every mark of `type` over a range (attrs are ignored — a character
+	 * carries at most one mark per type). Pair with a doc walk that targets only
+	 * the runs belonging to one annotation to remove a single comment thread.
+	 */
+	removeMark(name: string, range: { from: { path: BlockPath; offset: number }; to: { path: BlockPath; offset: number } }, attrs?: Record<string, unknown>): this;
+	removeMark(name: string, range: { path: BlockPath; from: number; to: number }, attrs?: Record<string, unknown>): this;
+	removeMark(name: string, range: any, attrs?: Record<string, unknown>): this {
+		const mark: MarkInstance = attrs ? { type: name, attrs } : { type: name };
+		for (const r of this.markRanges(range)) this.ops.push({ kind: 'removeMark', path: r.path, from: r.from, to: r.to, mark });
+		return this;
+	}
+
+	// Resolve a single- or cross-block mark range into one `{path, from, to}` per
+	// affected block. Shared by toggleMark/addMark/removeMark so the cross-block
+	// expansion (with the `to: -1` "to end of block" sentinel) lives in one place.
+	private markRanges(range: any): Array<{ path: BlockPath; from: number; to: number }> {
+		const out: Array<{ path: BlockPath; from: number; to: number }> = [];
 		if ('path' in range) {
 			// Normalize: callers may pass an unordered range (e.g. when the
 			// selection is backward and from/to come straight from anchor/head).
-			const from = Math.min(range.from, range.to);
-			const to = Math.max(range.from, range.to);
-			this.ops.push({ kind: 'toggleMark', path: range.path, from, to, mark });
-		} else {
-			// toggle across selection (single-block path supported, multi-block path expanded by applier)
-			const fromP = range.from.path as BlockPath;
-			const toP = range.to.path as BlockPath;
-			if (samePath(fromP, toP)) {
-				const from = Math.min(range.from.offset, range.to.offset);
-				const to = Math.max(range.from.offset, range.to.offset);
-				this.ops.push({ kind: 'toggleMark', path: fromP, from, to, mark });
-			} else {
-				// cross-block: applier will expand to multiple blocks based on selection at apply time
-				// for now, store the head/anchor path-pair and let the applier resolve it
-				const ordered = comparePaths(fromP, toP) <= 0 ? { f: range.from, t: range.to } : { f: range.to, t: range.from };
-				// Encode as multiple ops at apply-time would require knowing the doc; we instead expand here lazily via a helper.
-				this.ops.push({
-					kind: 'toggleMark',
-					path: ordered.f.path,
-					from: ordered.f.offset,
-					to: -1, // sentinel: to end of block
-					mark,
-				});
-				// middle blocks + last block need doc snapshot; we encode them as additional toggleMark ops by walking the doc now
-				let cur = nextBlockPath(this.state.doc, ordered.f.path);
-				while (cur && comparePaths(cur, ordered.t.path) < 0) {
-					const blk = getBlockAt(this.state.doc, cur);
-					if (blk?.text) {
-						this.ops.push({ kind: 'toggleMark', path: cur, from: 0, to: -1, mark });
-					}
-					cur = nextBlockPath(this.state.doc, cur);
-				}
-				this.ops.push({ kind: 'toggleMark', path: ordered.t.path, from: 0, to: ordered.t.offset, mark });
-			}
+			out.push({ path: range.path, from: Math.min(range.from, range.to), to: Math.max(range.from, range.to) });
+			return out;
 		}
-		return this;
+		const fromP = range.from.path as BlockPath;
+		const toP = range.to.path as BlockPath;
+		if (samePath(fromP, toP)) {
+			out.push({ path: fromP, from: Math.min(range.from.offset, range.to.offset), to: Math.max(range.from.offset, range.to.offset) });
+			return out;
+		}
+		// cross-block: the first block runs from the start offset to its end
+		// (sentinel -1), every fully covered middle block is 0..end, and the last
+		// block runs 0..end offset. Middle blocks are walked against the current
+		// doc snapshot.
+		const ordered = comparePaths(fromP, toP) <= 0 ? { f: range.from, t: range.to } : { f: range.to, t: range.from };
+		out.push({ path: ordered.f.path, from: ordered.f.offset, to: -1 });
+		let cur = nextBlockPath(this.state.doc, ordered.f.path);
+		while (cur && comparePaths(cur, ordered.t.path) < 0) {
+			const blk = getBlockAt(this.state.doc, cur);
+			if (blk?.text) out.push({ path: cur, from: 0, to: -1 });
+			cur = nextBlockPath(this.state.doc, cur);
+		}
+		out.push({ path: ordered.t.path, from: 0, to: ordered.t.offset });
+		return out;
 	}
 
 	private committed = false;
@@ -310,6 +337,26 @@ export function applyOp(state: EditorState, op: TransactionOp): EditorState {
 				const to = op.to === -1 ? len : op.to;
 				const isOn = hasMark(block.text, op.from, to, op.mark.type);
 				block.text = applyMarkToRange(block.text, op.from, to, op.mark, isOn ? 'remove' : 'add');
+			});
+			return { doc, selection: state.selection };
+		}
+		case 'addMark': {
+			const doc = withDocChange(state.doc, (root) => {
+				const block = getMutBlock(root, op.path);
+				if (!block || !block.text) return;
+				const len = blockTextLength(block);
+				const to = op.to === -1 ? len : op.to;
+				block.text = applyMarkToRange(block.text, op.from, to, op.mark, 'add');
+			});
+			return { doc, selection: state.selection };
+		}
+		case 'removeMark': {
+			const doc = withDocChange(state.doc, (root) => {
+				const block = getMutBlock(root, op.path);
+				if (!block || !block.text) return;
+				const len = blockTextLength(block);
+				const to = op.to === -1 ? len : op.to;
+				block.text = applyMarkToRange(block.text, op.from, to, op.mark, 'remove');
 			});
 			return { doc, selection: state.selection };
 		}

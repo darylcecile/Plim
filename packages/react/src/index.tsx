@@ -391,3 +391,17 @@ export {
 	type MentionMenuProps,
 	type MentionExtensionOptions,
 } from './extensions/mention.js';
+
+export {
+	CommentsLayer,
+	CommentThreadCard,
+	CommentCard,
+	CommentComposer,
+	useComments,
+	currentSelectionRect,
+	formatRelativeTime,
+	type CommentsLayerProps,
+	type CommentThreadCardProps,
+	type CommentCardProps,
+	type CommentComposerProps,
+} from './comments.js';

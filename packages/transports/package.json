@@ -1,0 +1,48 @@
+{
+  "name": "@plim/transports",
+  "version": "0.2.0",
+  "description": "Plim transports: tiny, generic duplex-channel primitives (in-memory loopback, BroadcastChannel, reconnecting WebSocket) for syncing any JSON-safe message over any wire.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "Daryl Cecile <darylcecile@gmail.com>",
+  "homepage": "https://github.com/darylcecile/plim#readme",
+  "bugs": {
+    "url": "https://github.com/darylcecile/plim/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/darylcecile/plim.git",
+    "directory": "packages/transports"
+  },
+  "keywords": [
+    "plim",
+    "transport",
+    "websocket",
+    "broadcastchannel",
+    "sync",
+    "realtime",
+    "duplex",
+    "channel"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "prepublishOnly": "pnpm build"
+  }
+}

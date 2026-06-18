@@ -26,7 +26,16 @@ import {
 } from '@plim/core';
 import { contentFromMarkdown, contentToMarkdown } from '@plim/markdown';
 import {
+	CommentStore,
+	CommentSync,
+	commentMark,
+	type CommentAuthor,
+	type CommentMessage,
+} from '@plim/collaboration';
+import { BroadcastChannelTransport } from '@plim/transports';
+import {
 	DEFAULT_SLASH_ITEMS,
+	CommentsLayer,
 	MentionMenu,
 	PlimEditor,
 	SlashCommandMenu,
@@ -44,7 +53,7 @@ import { StatusBadgeMenu, statusBadgeExtension } from './statusBadge.js';
 const plim = new PlimDriver({
 	theme: 'light',
 	extensions: [slashCommandExtension(), mentionExtension(), statusBadgeExtension()],
-	registeredMarks: [boldMark, italicMark, underlineMark, strikethroughMark, codeMark, linkMark, highlightMark],
+	registeredMarks: [boldMark, italicMark, underlineMark, strikethroughMark, codeMark, linkMark, highlightMark, commentMark],
 	registeredBlocks: [
 		paragraphBlock,
 		headingBlock,
@@ -143,6 +152,27 @@ const plim = new PlimDriver({
 			priority: 10,
 		}),
 	],
+});
+
+// ---- Comments & replies -------------------------------------------------
+// One store holds every thread; the in-document `commentMark` (registered in
+// the driver above) anchors each highlight so it rides the editor's collab/OT
+// for free. A BroadcastChannelTransport + CommentSync propagate threads to any
+// other open tab of this demo — open two tabs and comment to see it live.
+const currentUser: CommentAuthor = { id: 'me', name: 'You', color: '#2383e2' };
+const commentStore = new CommentStore({ actor: `tab-${Math.random().toString(36).slice(2, 8)}` });
+const commentTransport = new BroadcastChannelTransport<CommentMessage>('plim-notion-clone-comments');
+new CommentSync(commentStore, commentTransport);
+
+// Seed one thread so the page loads with a live, clickable highlight. The
+// `threadId` is referenced by the `comment` mark in the document below.
+const seededThread = commentStore.createThread({
+	author: { id: 'alice', name: 'Alice Anderson', color: '#e0794b' },
+	body: 'Love this — should we make it the tagline?',
+});
+commentStore.addComment(seededThread.threadId, {
+	author: { id: 'ben', name: 'Ben Becker', color: '#7c8b3f' },
+	body: 'Agreed. The highlight even survives edits to the surrounding text.',
 });
 
 const baseContent = contentFromMarkdown(
@@ -254,6 +284,26 @@ const initialContent = {
 				{ text: '.' },
 			],
 		},
+		{
+			type: 'heading' as const,
+			id: newId(),
+			attrs: { level: 2 },
+			text: [{ text: 'Comments & replies' }],
+		},
+		{
+			type: 'paragraph' as const,
+			id: newId(),
+			text: [
+				{ text: 'Select any text and the formatting toolbar appears — click the ' },
+				{ text: '💬', marks: [{ type: 'code' }] },
+				{ text: ' to start a thread. ' },
+				{
+					text: 'This phrase already has a comment',
+					marks: [{ type: 'comment', attrs: { threadId: seededThread.threadId } }],
+				},
+				{ text: ' — click the highlight to read it, reply, resolve, or delete.' },
+			],
+		},
 	],
 };
 
@@ -356,6 +406,7 @@ export function App() {
 			<SlashCommandMenu editor={handle} items={slashItems} />
 			<MentionMenu editor={handle} searchUsers={fakeAsyncUserSearch} />
 			<StatusBadgeMenu editor={handle} />
+			<CommentsLayer editor={handle} store={commentStore} currentUser={currentUser} />
 			{toast !== null ? <div className="export-toast">{toast}</div> : null}
 		</div>
 	);

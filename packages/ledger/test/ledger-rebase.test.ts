@@ -236,3 +236,41 @@ describe('rebaseRecords', () => {
 		expect(rebased[0]!.ops[0]).toMatchObject({ kind: 'replaceText', path: [2] });
 	});
 });
+
+describe('rebaseRecord — mark edits (addMark / removeMark)', () => {
+it('shifts an addMark range past a concurrent earlier insertion so it stays on the same text', () => {
+const base = makeState('hello world');
+const over = record(base, (tx) => tx.insertText([0], 0, 'XX'), { id: 'over' });
+// comment the word "world" → offsets [6,11)
+const r = record(base, (tx) => tx.addMark('comment', { path: [0], from: 6, to: 11 }, { threadId: 't1' }), { id: 'r' });
+const rebased = rebaseRecord(r, over, base.doc);
+expect(rebased.ok).toBe(true);
+if (!rebased.ok) return;
+// "XX" prepended pushes the range to [8,13)
+expect(rebased.record.ops[0]).toMatchObject({ kind: 'addMark', path: [0], from: 8, to: 13 });
+const out = applyLedgerRecord(applyLedgerRecord(base, over), rebased.record);
+const commented = out.doc.children[0]!.text!.filter((s) => s.marks?.some((m) => m.type === 'comment')).map((s) => s.text).join('');
+expect(commented).toBe('world');
+});
+
+it('preserves the mark op kind and attrs through rebase', () => {
+const base = makeState('hello world');
+const over = record(base, (tx) => tx.insertText([0], 2, 'X'), { id: 'over' });
+const r = record(base, (tx) => tx.removeMark('comment', { path: [0], from: 0, to: 5 }), { id: 'r' });
+const rebased = rebaseRecord(r, over, base.doc);
+expect(rebased.ok).toBe(true);
+if (!rebased.ok) return;
+// "X" inserted inside the range pushes the end out by one: [0,6)
+expect(rebased.record.ops[0]).toMatchObject({ kind: 'removeMark', path: [0], from: 0, to: 6 });
+});
+
+it('bails when a concurrent split tears a comment range across two blocks', () => {
+const base = makeState('hello world');
+const over = record(base, (tx) => tx.splitBlock([0], 5), { id: 'over' });
+const r = record(base, (tx) => tx.addMark('comment', { path: [0], from: 3, to: 8 }, { threadId: 't1' }), { id: 'r' });
+const rebased = rebaseRecord(r, over, base.doc);
+expect(rebased.ok).toBe(false);
+if (rebased.ok) return;
+expect(rebased.reason).toMatch(/split/i);
+});
+});

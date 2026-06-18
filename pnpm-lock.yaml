@@ -124,6 +124,9 @@ importers:
 
   examples/notion-clone:
     dependencies:
+      '@plim/collaboration':
+        specifier: workspace:*
+        version: link:../../packages/collaboration
       '@plim/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -136,6 +139,9 @@ importers:
       '@plim/react':
         specifier: workspace:*
         version: link:../../packages/react
+      '@plim/transports':
+        specifier: workspace:*
+        version: link:../../packages/transports
       react:
         specifier: ^18.3.0
         version: 18.3.1
@@ -170,6 +176,9 @@ importers:
       '@plim/ledger':
         specifier: workspace:*
         version: link:../ledger
+      '@plim/transports':
+        specifier: workspace:*
+        version: link:../transports
 
   packages/core: {}
 
@@ -184,6 +193,12 @@ importers:
       '@plim/markdown':
         specifier: workspace:*
         version: link:../markdown
+
+  packages/html:
+    dependencies:
+      '@plim/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/ledger:
     dependencies:
@@ -203,6 +218,9 @@ importers:
 
   packages/react:
     dependencies:
+      '@plim/collaboration':
+        specifier: workspace:*
+        version: link:../collaboration
       '@plim/core':
         specifier: workspace:*
         version: link:../core
@@ -222,6 +240,23 @@ importers:
       react-dom:
         specifier: ^18.3.0
         version: 18.3.1(react@18.3.1)
+
+  packages/storage:
+    dependencies:
+      '@plim/core':
+        specifier: workspace:*
+        version: link:../core
+      '@plim/transports':
+        specifier: workspace:*
+        version: link:../transports
+
+  packages/test-utils:
+    dependencies:
+      '@plim/core':
+        specifier: workspace:*
+        version: link:../core
+
+  packages/transports: {}
 
 packages:
 
