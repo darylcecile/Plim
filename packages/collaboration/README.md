@@ -60,9 +60,21 @@ That's the whole feature: register the mark, mount the layer. Selecting text sho
 
 See [`examples/notion-clone`](https://github.com/darylcecile/plim/tree/main/examples/notion-clone) for a full wiring with cross-tab sync.
 
-## Documentation
+## API surface
 
-See the [Plim repository](https://github.com/darylcecile/plim) for the full API reference and examples.
+- **Real-time editing** — `Collaborator`, `CollaboratorOptions`, `CollabStatus`, `createMemoryNetwork` / `MemoryNetwork`.
+- **Server half** — `CollabHub`, `HubClient`, `InMemoryAuthority`, `SubmitResult`.
+- **Presence** — `PresenceTracker`, `Peer`, `PeerPresence`, `PresenceState`.
+- **Version vectors** — `versionVectorOf`, `mergeVersionVectors`, `recordsAfter`, `coversRecord`, `VersionVector`.
+- **Comments** — `commentMark`, `CommentStore`, `CommentSync` / `createCommentSync`, the doc helpers (`addCommentMark`, `removeCommentMark`, `findCommentRanges`, `commentMarkRanges`, `commentThreadIdsInSelection`, `allCommentThreadIds`), and the `COMMENT_COMPOSE_EVENT` / `COMMENT_MARK_NAME` / `COMMENT_THREAD_ATTR` constants.
+
+## Where to go next
+
+- **The sync primitives underneath** — [`@plim/ledger`](https://github.com/darylcecile/plim/tree/main/packages/ledger).
+- **The wire** — [`@plim/transports`](https://github.com/darylcecile/plim/tree/main/packages/transports).
+- **Comments UI** — [`@plim/react`](https://github.com/darylcecile/plim/tree/main/packages/react) (`CommentsLayer` and friends).
+- **Full API contract** — [`REQUIREMENTS.md`](https://github.com/darylcecile/plim/blob/main/REQUIREMENTS.md#collaboration-api).
+- **Live demo** — [`examples/collab-kitchen-sink`](https://github.com/darylcecile/plim/tree/main/examples/collab-kitchen-sink).
 
 ## License
 

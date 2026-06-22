@@ -28,6 +28,12 @@ pnpm add @plim/transports
 - **`WebSocketTransport<T>`** — a reconnecting JSON WebSocket client. Buffers `send`s while offline, flushes on (re)connect, exponential backoff, and an `onStatus` hook. Works in the browser and in Node (pass a `WebSocket` implementation).
 - **`mapTransport(inner, encode, decode)`** — adapt a `Transport<A>` into a `Transport<B>` with a codec (e.g. wrap/compress/namespace messages).
 
+## Where to go next
+
+- **Collaboration** — [`@plim/collaboration`](https://github.com/darylcecile/plim/tree/main/packages/collaboration) syncs over these transports.
+- **Persistence** — [`@plim/storage`](https://github.com/darylcecile/plim/tree/main/packages/storage)'s `createTransportAdapter` saves through one.
+- **Sync log** — [`@plim/ledger`](https://github.com/darylcecile/plim/tree/main/packages/ledger).
+
 ## License
 
 See the [LICENSE](./LICENSE) file in this package.
