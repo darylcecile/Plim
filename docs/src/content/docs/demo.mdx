@@ -1,0 +1,47 @@
+---
+title: Live demo
+description: Try Plim live - an interactive Notion-style block editor running in your browser.
+template: splash
+---
+
+import { LinkButton } from '@astrojs/starlight/components';
+
+Try Plim right here. The editor below is the
+[`examples/notion-clone`](https://github.com/darylcecile/plim/tree/main/examples/notion-clone)
+app - a small Notion-style client built on `@plim/react` - deployed to Vercel and embedded
+live. Type `/` for the slash menu, select text for the floating toolbar, and drag the block
+handle in the gutter to reorder.
+
+<div
+  style={{
+    position: 'relative',
+    width: '100%',
+    height: '80vh',
+    minHeight: '600px',
+    border: '1px solid var(--sl-color-gray-5)',
+    borderRadius: '0.5rem',
+    overflow: 'hidden',
+    boxShadow: 'var(--sl-shadow-md)',
+    background: 'var(--sl-color-bg)',
+  }}
+>
+  <iframe
+    src="https://plim-editor.vercel.app/"
+    title="Plim live demo - Notion clone editor"
+    loading="lazy"
+    allow="clipboard-read; clipboard-write"
+    style={{ width: '100%', height: '100%', border: '0', display: 'block' }}
+  />
+</div>
+
+<p style={{ marginTop: '1rem', textAlign: 'center' }}>
+  <LinkButton href="https://plim-editor.vercel.app/" icon="external" variant="secondary">
+    Open the demo in a new tab
+  </LinkButton>
+</p>
+
+:::note
+The demo runs entirely in your browser - edits are local to your session and are not saved
+anywhere. Reload to start fresh. Want to build something like this? Start with the
+[Quickstart](/guides/quickstart/).
+:::
