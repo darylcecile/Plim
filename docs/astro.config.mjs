@@ -70,6 +70,11 @@ export default defineConfig({
       plugins: typeDocPlugins,
       sidebar: [
         {
+          label: 'Live demo',
+          link: '/demo/',
+          badge: { text: 'Live', variant: 'success' },
+        },
+        {
           label: 'Guides',
           items: [
             { label: 'Introduction', link: '/guides/introduction/' },
