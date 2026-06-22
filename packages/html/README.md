@@ -1,6 +1,14 @@
 # @plim/html
 
-`@plim/html` is a headless, SSR-safe serializer for turning a Plim document model into an HTML string. It uses no DOM APIs, so it can run in Node, edge runtimes, server previews, SEO rendering, and email pipelines.
+`@plim/html` is a headless, SSR-safe serializer for turning a [Plim](https://github.com/darylcecile/plim) document model into an HTML string. It uses no DOM APIs, so it can run in Node, edge runtimes, server previews, SEO rendering, and email pipelines. It is the read-only, server-side counterpart to [`@plim/editor`](https://github.com/darylcecile/plim/tree/main/packages/editor), and is **optional**.
+
+## Install
+
+```sh
+pnpm add @plim/html @plim/core
+```
+
+## Usage
 
 ```ts
 import { serializeToHTML } from '@plim/html';
@@ -37,3 +45,21 @@ All text and attribute values are escaped by default, including links, image att
 ## Tables
 
 Core only defines the `table` block name. This package supports `attrs.rows` as arrays/cell objects when present, otherwise it treats table `children` as rows and each row's `children` as cells as a best-effort structural representation.
+
+## API
+
+- `serializeToHTML(input, options?)` — `input` is a `DocumentNode`, `EditorState`, `Snapshot`, or `BlockNode[]`; `options` includes `document`, `classPrefix`, `blocks`, `marks`, and `onUnknownBlock`.
+- `defaultBlockRenderers` / `defaultMarkRenderers` — the built-in renderer maps, exported so you can extend rather than replace them.
+- `toDocumentNode(input)` — normalize any accepted input to a `DocumentNode`.
+- `escape(value)` / `attr(name, value)` — the escaping helpers also available on the render context as `ctx.escape` / `ctx.attr`.
+- Types: `BlockRenderer`, `MarkRenderer`, `RenderContext`, `HTMLInput`, `HTMLSerializerOptions`.
+
+## Where to go next
+
+- **Document model** — [`@plim/core`](https://github.com/darylcecile/plim/tree/main/packages/core).
+- **Markdown round-tripping** — [`@plim/markdown`](https://github.com/darylcecile/plim/tree/main/packages/markdown).
+- **Full API contract** — [`REQUIREMENTS.md`](https://github.com/darylcecile/plim/blob/main/REQUIREMENTS.md).
+
+## License
+
+See the [LICENSE](./LICENSE) file in this package.
