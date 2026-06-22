@@ -24,7 +24,10 @@
     "build:collab": "pnpm --filter @plim/example-collab-kitchen-sink build",
     "changeset": "changeset",
     "version": "changeset version",
-    "release": "pnpm -r --filter='@plim/*' --filter='!@plim/example-*' build && changeset publish"
+    "release": "pnpm -r --filter='@plim/*' --filter='!@plim/example-*' --filter='!@plim/docs' build && changeset publish",
+    "docs:dev": "pnpm --filter @plim/docs dev",
+    "docs:build": "pnpm --filter @plim/docs build",
+    "docs:preview": "pnpm --filter @plim/docs preview"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.0",
