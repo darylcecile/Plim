@@ -1,0 +1,75 @@
+---
+title: Plim
+description: A Notion-inspired block editor for the web - a framework-agnostic TypeScript monorepo.
+template: splash
+hero:
+  tagline: A Notion-inspired block editor for the web. A framework-agnostic core, a DOM view layer, a Markdown parser/serializer, and React bindings - small, composable, and built to embed in your own product.
+  actions:
+    - text: Get started
+      link: /guides/introduction/
+      icon: right-arrow
+      variant: primary
+    - text: API reference
+      link: /api/core/
+      icon: open-book
+      variant: minimal
+    - text: View on GitHub
+      link: https://github.com/darylcecile/plim
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## What is Plim?
+
+Plim is a Notion-inspired block editor built as a TypeScript monorepo. It ships a
+framework-agnostic core, a DOM view layer, a Markdown parser/serializer, and React
+bindings - all small, composable, and designed to be embedded in your own product.
+
+:::note[Status]
+Pre-1.0 (`0.0.x`). The public API is mostly stable but may shift before `1.0`.
+:::
+
+<CardGrid stagger>
+  <Card title="Framework-agnostic" icon="puzzle">
+    The core has no DOM dependency. Bring your own view layer, or use the bundled
+    DOM and React ones.
+  </Card>
+  <Card title="Composable packages" icon="open-book">
+    Ten focused packages - take only the layers you need, from schema to
+    collaboration.
+  </Card>
+  <Card title="Sync built in" icon="random">
+    A serializable transaction ledger, OT-based collaboration, comments, and
+    durable storage primitives.
+  </Card>
+  <Card title="Typed end to end" icon="seti:typescript">
+    Strict TypeScript throughout, with an auto-generated API reference that never
+    drifts from source.
+  </Card>
+</CardGrid>
+
+## Packages
+
+| Package | Description |
+| --- | --- |
+| [`@plim/core`](/api/core/) | Schema, document model, transactions, validation rules, action/extension/trigger system, history, and the built-in block & mark descriptors. Runtime-agnostic - no DOM. |
+| [`@plim/ledger`](/api/ledger/) | Record, replay, merge, diff, and rebase transactions plus conflict resolution - the bring-your-own sync / CRDT layer. Runtime-agnostic. |
+| [`@plim/transports`](/api/transports/) | Tiny generic duplex-channel primitives: in-memory loopback + broadcast bus, `BroadcastChannelTransport`, reconnecting `WebSocketTransport`, and `mapTransport` codecs. Zero-dep. |
+| [`@plim/collaboration`](/api/collaboration/) | Real-time multi-peer editing on top of the ledger, presence/awareness, and version vectors - plus comments & threaded replies. |
+| [`@plim/markdown`](/api/markdown/) | Parse Markdown into a Plim document and serialize back. |
+| [`@plim/editor`](/api/editor/) | The view layer. Mounts a Plim document into a `contenteditable`, owns the floating toolbar, block-handle gutter, clipboard, drag-and-drop, and the keyboard pipeline. Ships its own stylesheet. |
+| [`@plim/react`](/api/react/) | React bindings: `<PlimEditor>`, `useEditorHandle()`, slash-command and mention extensions, and a bridge for defining blocks with `toComponent`. |
+| [`@plim/html`](/api/html/) | Headless, SSR-safe serializer: render a document model to an HTML string with overridable renderers and escaped-by-default output. Optional. |
+| [`@plim/storage`](/api/storage/) | Durable persistence primitives: pluggable `StorageAdapter`s (memory, `localStorage`, IndexedDB, transport) plus debounced snapshot autosave. Optional. |
+| [`@plim/test-utils`](/api/test-utils/) | Runner-agnostic testing helpers: fluent document/mark builders, a headless `createTestEditor`, `applyTx`, and inspectors/assertions. |
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="Installation" href="/guides/installation/" description="Add Plim to your project and import the editor stylesheet." />
+  <LinkCard title="Quickstart" href="/guides/quickstart/" description="Mount an editor in React or vanilla JS in a few lines." />
+  <LinkCard title="Custom blocks" href="/guides/custom-blocks/" description="Define your own block types with DOM or React renderers." />
+  <LinkCard title="Collaboration" href="/guides/collaboration/" description="Real-time multi-peer editing with optimistic OT." />
+</CardGrid>

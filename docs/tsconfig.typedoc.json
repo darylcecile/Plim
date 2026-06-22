@@ -1,0 +1,31 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "incremental": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@plim/core": ["../packages/core/src/index.ts"],
+      "@plim/editor": ["../packages/editor/src/index.ts"],
+      "@plim/editor/styles.css": ["../packages/editor/src/index.ts"],
+      "@plim/react": ["../packages/react/src/index.tsx"],
+      "@plim/markdown": ["../packages/markdown/src/index.ts"],
+      "@plim/html": ["../packages/html/src/index.ts"],
+      "@plim/ledger": ["../packages/ledger/src/index.ts"],
+      "@plim/transports": ["../packages/transports/src/index.ts"],
+      "@plim/collaboration": ["../packages/collaboration/src/index.ts"],
+      "@plim/collaboration/comments.css": ["../packages/collaboration/src/index.ts"],
+      "@plim/storage": ["../packages/storage/src/index.ts"],
+      "@plim/test-utils": ["../packages/test-utils/src/index.ts"]
+    }
+  },
+  "include": [
+    "../packages/*/src/**/*.ts",
+    "../packages/*/src/**/*.tsx"
+  ]
+}
