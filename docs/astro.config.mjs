@@ -4,7 +4,7 @@ import { defineConfig } from 'astro/config';
 import { createStarlightTypeDocPlugin } from 'starlight-typedoc';
 
 /**
- * The 10 published `@plim/*` library packages, in a sensible reading order.
+ * The 11 published `@plim/*` library packages, in a sensible reading order.
  * Each entry becomes its own auto-generated API Reference section, produced by a
  * dedicated `starlight-typedoc` plugin instance so the packages never share a
  * TypeDoc run (and therefore never bleed symbols into one another).
@@ -14,6 +14,7 @@ const apiPackages = [
   { name: 'editor', label: '@plim/editor', entry: '../packages/editor/src/index.ts' },
   { name: 'react', label: '@plim/react', entry: '../packages/react/src/index.tsx' },
   { name: 'markdown', label: '@plim/markdown', entry: '../packages/markdown/src/index.ts' },
+  { name: 'mojis', label: '@plim/mojis', entry: '../packages/mojis/src/index.ts' },
   { name: 'html', label: '@plim/html', entry: '../packages/html/src/index.ts' },
   { name: 'ledger', label: '@plim/ledger', entry: '../packages/ledger/src/index.ts' },
   { name: 'transports', label: '@plim/transports', entry: '../packages/transports/src/index.ts' },
@@ -84,6 +85,7 @@ export default defineConfig({
             { label: 'Custom marks', link: '/guides/custom-marks/' },
             { label: 'Actions & triggers', link: '/guides/actions-and-triggers/' },
             { label: 'Extensions', link: '/guides/extensions/' },
+            { label: 'Mojis (custom emoji)', link: '/guides/mojis/' },
             { label: 'History', link: '/guides/history/' },
             { label: 'Snapshots', link: '/guides/snapshots/' },
             { label: 'Ledger & sync', link: '/guides/ledger-and-sync/' },
