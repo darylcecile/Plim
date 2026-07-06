@@ -1,5 +1,21 @@
 # @plim/react
 
+## 0.3.0
+
+### Minor Changes
+
+- Align all `@plim` package versions with a minor bump so every published package
+  stays in lockstep at the same version, including the new `@plim/mojis` package.
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies [30ad81e]
+- Updated dependencies [94b47dd]
+  - @plim/collaboration@0.3.0
+  - @plim/core@0.3.0
+  - @plim/editor@0.3.0
+
 ## 0.2.0
 
 ### Minor Changes

@@ -1,6 +1,6 @@
 {
   "name": "@plim/test-utils",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Plim test utilities: ergonomic document builders, a headless test editor, transaction helpers, and runner-agnostic assertions for testing custom blocks and marks.",
   "type": "module",
   "main": "./dist/index.js",

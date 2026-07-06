@@ -1,6 +1,6 @@
 {
   "name": "@plim/mojis",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Plim mojis: Slackmoji-style custom inline emoji rendered live from :slug: shortcodes for the Plim block editor.",
   "type": "module",
   "main": "./dist/index.js",

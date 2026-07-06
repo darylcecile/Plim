@@ -1,29 +1,21 @@
 # @plim/mojis
 
-## 0.2.0
+## 0.3.0
 
 ### Minor Changes
 
-- Initial release of `@plim/mojis`: a Slackmoji-style extension for the Plim
-  block editor that renders custom inline emoji ("mojis") live from `:slug:`
-  shortcodes.
-  - Live conversion while typing or pasting (only known/resolvable slugs
-    convert, so `10:30:` and `http://` are never touched).
-  - Pluggable resolver so applications can register their own mojis, backed by
-    either a native emoji glyph or an image URL.
-  - Async (dynamic) resolution via `resolveAsync` for workspaces with hundreds
-    of custom emojis that can't be hardcoded: unknown slugs are looked up
-    remotely without blocking typing, then converted in place once the fetch
-    settles. Results are cached (positive and negative) and in-flight fetches
-    de-duplicated, so each slug is fetched at most once (rejected fetches are
-    left uncached so a later edit retries). The cache is also exported as
-    `createMojiCache` for standalone use.
-  - Copy-as-slug: copying a moji writes the `:slug:` shortcode to the clipboard
-    as markdown (e.g. `Hello 🌑` → `Hello :moon:`).
-  - Text-like cursor behaviour: a moji behaves like an ordinary run of text —
-    the caret rests before and after it, it highlights natively inside a
-    selection, and there is no focus ring. A single Backspace or forward Delete
-    removes the whole emoji grapheme (so multi-code-unit glyphs aren't split).
-    Image mojis render their picture as a foreground overlay above an invisible
-    but full-width placeholder character, so the selection highlight shows
-    behind them — through any transparent areas — exactly like a native glyph.
+- 30ad81e: Add `@plim/mojis` — a Slackmoji-style custom inline emoji ("moji") plugin — plus the general, non-breaking editor primitives it needed.
+
+  - **`@plim/mojis`** (new): a framework-agnostic editor extension that renders custom emoji from `:slug:` shortcodes. Shortcodes convert **live** as you type or paste, resolve through a built-in default set or your own `resolver`/`mojis` definitions (native emoji glyph _or_ image URL), and behave like **ordinary text** for cursor movement and selection — the caret rests before/after a moji and it highlights natively, with no focus ring — while a single Backspace/Delete removes the whole emoji grapheme. For workspaces with hundreds of custom emojis that can't be hardcoded, an async `resolveAsync` option resolves unknown slugs on demand (à la Slack loading its emoji list lazily): lookups never block typing, results are cached (positive _and_ negative) and de-duplicated so each slug is fetched at most once, and the pending shortcode converts in place once the fetch settles. **Copying** a moji yields its `:slug:` shortcode as markdown/plain text (e.g. `Hello 🌑` → `Hello :moon:`). Register it with `mojiExtension({ mojis, resolver, resolveAsync })`; ships with `mojis.css`.
+
+  The package builds on three additive enhancements to the core stack (no existing APIs change):
+
+  - **`@plim/core`** — `MarkDescriptor` gains an optional `toMarkdown(payload)` hook so a mark can define its own markdown serialization.
+  - **`@plim/markdown`** — the serializer honors a mark's `toMarkdown` hook; `contentToMarkdown` / `serializeInline` / `serializeSpan` now thread an optional resolved `marks` list.
+  - **`@plim/editor`** — clipboard copy/cut pass the registered `marks` through to the markdown writer, and a same-block **copy** is routed through the markdown serializer (as an inline-only paragraph, so no block prefixes leak) when a selected span carries a mark whose descriptor defines `toMarkdown`. Otherwise copy stays native, preserving existing behaviour.
+
+### Patch Changes
+
+- Updated dependencies [30ad81e]
+- Updated dependencies [94b47dd]
+  - @plim/core@0.3.0
