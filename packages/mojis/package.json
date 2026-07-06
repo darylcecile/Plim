@@ -1,7 +1,7 @@
 {
-  "name": "@plim/editor",
+  "name": "@plim/mojis",
   "version": "0.3.0",
-  "description": "Plim editor: the view layer that mounts a Plim document into a contenteditable, with paste handling, selection, drag-and-drop, and the floating toolbar.",
+  "description": "Plim mojis: Slackmoji-style custom inline emoji rendered live from :slug: shortcodes for the Plim block editor.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -10,12 +10,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./styles.css": {
-      "import": "./dist/styles.css"
-    }
+    "./mojis.css": "./mojis.css"
   },
   "files": [
     "dist",
+    "mojis.css",
     "LICENSE",
     "README.md"
   ],
@@ -28,27 +27,26 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/darylcecile/plim.git",
-    "directory": "packages/editor"
+    "directory": "packages/mojis"
   },
   "keywords": [
     "plim",
     "editor",
     "block-editor",
-    "rich-text",
-    "wysiwyg",
-    "notion",
-    "contenteditable"
+    "emoji",
+    "moji",
+    "slackmoji",
+    "shortcode",
+    "extension"
   ],
   "publishConfig": {
     "access": "public"
   },
   "dependencies": {
-    "@darylcecile/sanitizer": "^0.0.2",
-    "@plim/core": "workspace:*",
-    "@plim/markdown": "workspace:*"
+    "@plim/core": "workspace:*"
   },
   "scripts": {
-    "build": "tsc -b && cp src/styles.css dist/styles.css",
+    "build": "tsc -b",
     "typecheck": "tsc -b --pretty false",
     "prepublishOnly": "pnpm build"
   }

@@ -1,6 +1,6 @@
 {
   "name": "@plim/collaboration",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Plim collaboration: fast real-time multi-peer editing (Collaborator, CollabHub, presence) for the Plim block editor.",
   "type": "module",
   "main": "./dist/index.js",

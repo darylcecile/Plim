@@ -1,0 +1,59 @@
+/*
+ * @plim/mojis — styles for inline custom emoji ("mojis").
+ *
+ * Import once in your app:
+ *   import '@plim/mojis/mojis.css';
+ *
+ * A moji renders as an ordinary marked text span — no focus ring, no atomic
+ * selection. The mark's `toDOM` returns an (initially empty) wrapper; the
+ * editor then appends the span's text node as a *direct child*. For
+ * native-glyph mojis the text node is the emoji itself: it shows through and
+ * highlights natively when selected, just like any other character. For image
+ * mojis the text node is a single U+2003 EM SPACE — an invisible, ~1em-wide
+ * character that provides a real, highlightable cell — and the image is painted
+ * on top of it as a foreground `::before` overlay.
+ */
+
+.plim-moji {
+	/* Keep a moji glyph from breaking across lines mid-character. */
+	white-space: nowrap;
+}
+
+/* Image-backed mojis. The injected U+2003 EM SPACE placeholder stays in the
+ * normal text flow: it is invisible but has a real ~1em advance, so when the
+ * moji is inside a selection the browser paints the `::selection` highlight
+ * behind it — exactly like a native glyph. The image is drawn on top via a
+ * `::before` overlay with an explicit em size (an absolutely-positioned box
+ * relative to the surrounding font), so it scales with the text and paints
+ * *above* the selection highlight (z-index) rather than beneath it. Because the
+ * overlay is a pseudo-element background (not an <img>), it receives no native
+ * selection tint of its own, and the highlight shows through any transparent
+ * parts of the image. Copy/export read the slug from attrs, so the placeholder
+ * never leaks. */
+.plim-moji--image {
+	position: relative;
+	/* The EM SPACE is whitespace (no ink), but be explicit in case a font
+	 * renders a visible glyph for it. */
+	color: transparent;
+	/* Stays display:inline (the span default) so the placeholder's selection
+	 * highlight covers the whole cell, like real text. */
+}
+
+.plim-moji--image::before {
+	content: "";
+	position: absolute;
+	left: 0;
+	top: 50%;
+	width: 1em;
+	height: 1em;
+	transform: translateY(-50%);
+	/* Paint above the placeholder's text-selection highlight (in-flow text
+	 * paints below positioned descendants with a positive z-index). */
+	z-index: 1;
+	background-image: var(--plim-moji-src);
+	background-repeat: no-repeat;
+	background-position: center center;
+	background-size: contain;
+	/* Let clicks/drags fall through to the text underneath. */
+	pointer-events: none;
+}

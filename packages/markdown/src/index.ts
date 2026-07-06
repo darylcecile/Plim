@@ -1,4 +1,4 @@
-import type { BlockDescriptor, BlockMarkdownContext, BlockMarkdownParseContext, BlockNode, BlockPayload, DocumentNode, MarkInstance, TextSpan } from '@plim/core';
+import type { BlockDescriptor, BlockMarkdownContext, BlockMarkdownParseContext, BlockNode, BlockPayload, DocumentNode, MarkDescriptor, MarkInstance, TextSpan } from '@plim/core';
 import { newId, normalizeText } from '@plim/core';
 
 // Inline parsing: handles **bold**, *italic*, `code`, ~strike~, and [text](url).
@@ -226,12 +226,23 @@ function escapeInlineText(text: string): string {
 	return text.replace(/([\\`*~\[\]])/g, '\\$1');
 }
 
-function serializeSpan(span: TextSpan): string {
+function serializeSpan(span: TextSpan, marks?: MarkDescriptor[]): string {
 	let text = escapeInlineText(span.text);
-	const marks = (span.marks ?? []).slice().sort(
+	const spanMarks = (span.marks ?? []).slice().sort(
 		(a, b) => (MARK_PRECEDENCE[b.type] ?? 99) - (MARK_PRECEDENCE[a.type] ?? 99),
 	);
-	for (const mark of marks) {
+	for (const mark of spanMarks) {
+		// A registered mark descriptor with a `toMarkdown` hook wins over the
+		// built-in handling below — this is how custom inline marks (e.g. a
+		// `moji` mark → `:slug:`) round-trip through the clipboard/export
+		// instead of being dropped. The hook receives the inner text produced
+		// so far so wrapping-style marks can decorate it; atomic marks like
+		// moji simply ignore it and return their shortcode.
+		const desc = marks?.find((d) => d.name === mark.type);
+		if (desc?.toMarkdown) {
+			text = desc.toMarkdown({ type: mark.type, attrs: mark.attrs ?? {}, text, content: null });
+			continue;
+		}
 		switch (mark.type) {
 			case 'bold':
 				text = `**${text}**`;
@@ -260,18 +271,18 @@ function serializeSpan(span: TextSpan): string {
 				break;
 			}
 			default:
-				// Unknown mark — keep the text but drop the mark. Custom
-				// marks needing markdown serialization should be handled by
-				// the descriptor at the block level via `toMarkdown` (which
-				// calls `serializeInline` and can intercept beforehand).
+				// Unknown mark — keep the text but drop the mark. Custom marks
+				// that need markdown serialization should register a descriptor
+				// with a `toMarkdown` hook (handled above) or, at the block
+				// level, via the block descriptor's `toMarkdown`.
 				break;
 		}
 	}
 	return text;
 }
 
-function serializeInline(spans: TextSpan[]): string {
-	return spans.map(serializeSpan).join('');
+function serializeInline(spans: TextSpan[], marks?: MarkDescriptor[]): string {
+	return spans.map((s) => serializeSpan(s, marks)).join('');
 }
 
 function blockToPayload(block: BlockNode): BlockPayload {
@@ -286,8 +297,8 @@ function blockToPayload(block: BlockNode): BlockPayload {
 	};
 }
 
-function builtinToMarkdown(block: BlockNode, depth: number): string[] | null {
-	const inline = serializeInline(block.text ?? []);
+function builtinToMarkdown(block: BlockNode, depth: number, marks?: MarkDescriptor[]): string[] | null {
+	const inline = serializeInline(block.text ?? [], marks);
 	switch (block.type) {
 		case 'paragraph':
 			return [inline];
@@ -348,16 +359,21 @@ function walkBlock(
 	depth: number,
 	numberedIndex: number | null,
 	descriptors: BlockDescriptor[] | undefined,
+	marks: MarkDescriptor[] | undefined,
 ): string[] {
 	const out: string[] = [];
 	let lines: string[] | null = null;
 	const desc = descriptors?.find((d) => d.name === block.type);
 	if (desc?.toMarkdown) {
-		const ctx: BlockMarkdownContext = { serializeInline, spans: block.text ?? [], depth };
+		const ctx: BlockMarkdownContext = {
+			serializeInline: (spans) => serializeInline(spans, marks),
+			spans: block.text ?? [],
+			depth,
+		};
 		const result = desc.toMarkdown(blockToPayload(block), ctx);
 		lines = Array.isArray(result) ? result : [result];
 	} else {
-		lines = builtinToMarkdown(block, depth);
+		lines = builtinToMarkdown(block, depth, marks);
 		// Override numbered list index when known.
 		if (lines && block.type === 'numbered_list_item' && numberedIndex != null && lines[0]) {
 			lines[0] = lines[0].replace(/^1\./, `${numberedIndex}.`);
@@ -365,26 +381,31 @@ function walkBlock(
 	}
 	if (lines == null) {
 		// Last-resort fallback: plain inline text.
-		lines = [serializeInline(block.text ?? [])];
+		lines = [serializeInline(block.text ?? [], marks)];
 	}
 	for (const line of lines) out.push(indentLine(line, depth));
 	if (block.children && block.children.length) {
-		out.push(...walkBlocks(block.children, depth + 1, descriptors));
+		out.push(...walkBlocks(block.children, depth + 1, descriptors, marks));
 	}
 	return out;
 }
 
-function walkBlocks(blocks: BlockNode[], depth: number, descriptors: BlockDescriptor[] | undefined): string[] {
+function walkBlocks(
+	blocks: BlockNode[],
+	depth: number,
+	descriptors: BlockDescriptor[] | undefined,
+	marks: MarkDescriptor[] | undefined,
+): string[] {
 	const out: string[] = [];
 	let numberedRun = 0;
 	for (let i = 0; i < blocks.length; i++) {
 		const block = blocks[i]!;
 		if (block.type === 'numbered_list_item') {
 			numberedRun += 1;
-			out.push(...walkBlock(block, depth, numberedRun, descriptors));
+			out.push(...walkBlock(block, depth, numberedRun, descriptors, marks));
 		} else {
 			numberedRun = 0;
-			out.push(...walkBlock(block, depth, null, descriptors));
+			out.push(...walkBlock(block, depth, null, descriptors, marks));
 		}
 	}
 	return out;
@@ -393,15 +414,18 @@ function walkBlocks(blocks: BlockNode[], depth: number, descriptors: BlockDescri
 /**
  * Serialize a `DocumentNode` (or block array) to markdown. Custom block
  * descriptors with `toMarkdown` are honored; built-in types use commonmark-
- * flavoured output that round-trips through `contentFromMarkdown`. Blocks
- * are joined with single newlines (block-level boundaries); insert a blank
- * line between paragraphs explicitly via empty `paragraph` blocks if you
+ * flavoured output that round-trips through `contentFromMarkdown`. Custom
+ * *inline* marks are serialized via their descriptor's `toMarkdown` hook when
+ * the matching descriptor is passed in `options.marks` (e.g. a `moji` mark →
+ * `:slug:`); otherwise unknown marks are dropped and their text preserved.
+ * Blocks are joined with single newlines (block-level boundaries); insert a
+ * blank line between paragraphs explicitly via empty `paragraph` blocks if you
  * want commonmark-style paragraph spacing.
  */
 export function contentToMarkdown(
 	doc: DocumentNode | BlockNode[],
-	options?: { blocks?: BlockDescriptor[] },
+	options?: { blocks?: BlockDescriptor[]; marks?: MarkDescriptor[] },
 ): string {
 	const blocks = Array.isArray(doc) ? doc : doc.children;
-	return walkBlocks(blocks, 0, options?.blocks).join('\n');
+	return walkBlocks(blocks, 0, options?.blocks, options?.marks).join('\n');
 }

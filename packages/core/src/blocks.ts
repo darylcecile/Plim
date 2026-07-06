@@ -214,6 +214,24 @@ export type MarkDescriptor = {
 	toDOM?: (payload: MarkPayload) => HTMLElement;
 	toComponent?: (payload: MarkPayload) => unknown;
 	/**
+	 * Serialize a span carrying this mark to inline markdown. Receives the
+	 * mark payload — `payload.text` is the inner text produced so far (after
+	 * marks of lower precedence have been applied), and `payload.attrs` the
+	 * mark's attributes — and returns the replacement markdown string.
+	 *
+	 * This is the inline-mark analogue of a block descriptor's `toMarkdown`.
+	 * It lets custom marks round-trip through the clipboard / markdown export
+	 * instead of being silently dropped (the default for unknown marks). For
+	 * example a `moji` mark returns `:slug:` so copying an inline emoji yields
+	 * its shortcode. When a same-block text selection containing such a mark
+	 * is copied, the editor routes the copy through the markdown serializer
+	 * (rather than the browser's native text copy) so the hook actually fires.
+	 *
+	 * Return the `text` unchanged (or omit the hook) to keep the default
+	 * behaviour of preserving the text and dropping the mark.
+	 */
+	toMarkdown?: (payload: MarkPayload) => string;
+	/**
 	 * Items this mark contributes to the floating selection toolbar. If
 	 * omitted, the mark has no toolbar presence. The common case is a
 	 * single toggle item; multiple items are supported for marks with

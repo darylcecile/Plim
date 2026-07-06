@@ -1091,27 +1091,44 @@ export function mountView(opts: ViewOptions): View {
 				slice = r.blocks;
 				scope = 'cross-range';
 				rangeInfo = { start: r.start, end: r.end };
-			} else if (isCut) {
-				// Same-block range cut: collapsed selections have nothing to do;
-				// non-collapsed selections fall through to the in-block delete
-				// path below. We still want to write markdown for the in-block
-				// content so external apps receive the marked-up text.
+			} else {
+				// Same-block text range. Collapsed selections have nothing to
+				// copy/cut. For a non-collapsed range:
+				//  - Cut always writes markdown for the in-block content (so
+				//    external apps receive the marked-up text) and falls through
+				//    to the in-block delete path below.
+				//  - Copy normally stays *native* — that keeps inline-only
+				//    fidelity and avoids surprise block prefixes (`> ` for a
+				//    quote when only a few words were selected). The exception:
+				//    the sliced spans carry a mark whose descriptor defines a
+				//    markdown serializer (e.g. a `moji` mark → `:slug:`). Native
+				//    copy would emit the rendered glyph/image and lose the
+				//    shortcode, so we route the copy through the markdown
+				//    serializer too — as an inline-only paragraph so no block
+				//    prefix leaks (honoring the no-surprise-prefix intent).
 				const sel = state.selection;
-				if (!(pathsEqual(sel.anchor.path, sel.head.path) && sel.anchor.offset === sel.head.offset)) {
+				const collapsed = pathsEqual(sel.anchor.path, sel.head.path) && sel.anchor.offset === sel.head.offset;
+				if (!collapsed) {
 					const block = blockAt(state.doc.children, sel.head.path);
 					if (block?.text) {
 						const fromOff = Math.min(sel.anchor.offset, sel.head.offset);
 						const toOff = Math.max(sel.anchor.offset, sel.head.offset);
-						const clone: BlockNode = { id: newId('b'), type: block.type, text: sliceTextSpansLocal(block.text, fromOff, toOff) };
-						if (block.attrs) clone.attrs = { ...block.attrs };
-						slice = [clone];
-						scope = 'same-block';
+						const spans = sliceTextSpansLocal(block.text, fromOff, toOff);
+						if (isCut) {
+							const clone: BlockNode = { id: newId('b'), type: block.type, text: spans };
+							if (block.attrs) clone.attrs = { ...block.attrs };
+							slice = [clone];
+							scope = 'same-block';
+						} else if (spansHaveMarkdownMark(spans, opts.marks)) {
+							slice = [{ id: newId('b'), type: 'paragraph', text: spans }];
+							scope = 'same-block';
+						}
 					}
 				}
 			}
 		}
 		if (!slice || !scope) return;
-		writeClipboardMarkdown(ev, slice, opts.blocks);
+		writeClipboardMarkdown(ev, slice, opts.blocks, opts.marks);
 		ev.preventDefault();
 		if (!isCut) return;
 		if (scope === 'block-set') {
@@ -1121,6 +1138,16 @@ export function mountView(opts: ViewOptions): View {
 		} else if (scope === 'cross-range' && rangeInfo) {
 			deleteCrossBlockRange(rangeInfo.start, rangeInfo.end);
 		}
+	}
+	function spansHaveMarkdownMark(spans: TextSpan[], markDescs: MarkDescriptor[]): boolean {
+		for (const s of spans) {
+			if (!s.marks) continue;
+			for (const m of s.marks) {
+				const desc = markDescs.find((d) => d.name === m.type);
+				if (desc?.toMarkdown) return true;
+			}
+		}
+		return false;
 	}
 	function sliceTextSpansLocal(spans: TextSpan[], from: number, to: number): TextSpan[] {
 		if (from >= to) return [];

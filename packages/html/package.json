@@ -1,6 +1,6 @@
 {
   "name": "@plim/html",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Plim HTML: headless, SSR-safe serialization of Plim documents to HTML, with built-in renderers for every block and mark plus an overridable registry for custom content.",
   "type": "module",
   "main": "./dist/index.js",

@@ -14,6 +14,7 @@ export default defineConfig({
 			'@plim/collaboration': new URL('./packages/collaboration/src/index.ts', import.meta.url).pathname,
 			'@plim/editor': new URL('./packages/editor/src/index.ts', import.meta.url).pathname,
 			'@plim/markdown': new URL('./packages/markdown/src/index.ts', import.meta.url).pathname,
+			'@plim/mojis': new URL('./packages/mojis/src/index.ts', import.meta.url).pathname,
 			'@plim/test-utils': new URL('./packages/test-utils/src/index.ts', import.meta.url).pathname,
 			'@plim/html': new URL('./packages/html/src/index.ts', import.meta.url).pathname,
 			'@plim/storage': new URL('./packages/storage/src/index.ts', import.meta.url).pathname,
