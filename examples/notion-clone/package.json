@@ -13,6 +13,7 @@
     "@plim/core": "workspace:*",
     "@plim/editor": "workspace:*",
     "@plim/markdown": "workspace:*",
+    "@plim/mojis": "workspace:*",
     "@plim/react": "workspace:*",
     "@plim/transports": "workspace:*",
     "react": "^18.3.0",

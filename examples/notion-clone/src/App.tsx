@@ -49,10 +49,78 @@ import {
 import { calloutBlock, counterBlock, type CalloutTone } from './customBlocks.js';
 import { codeBlock } from './codeBlock.js';
 import { StatusBadgeMenu, statusBadgeExtension } from './statusBadge.js';
+import { mojiExtension, mojiSpan, type MojiDefinition } from '@plim/mojis';
+
+// A self-contained (offline) custom image moji for the demo — a rounded purple
+// badge outline with a "P" on a *transparent* background, mirroring real
+// Slackmoji-style images (which are typically transparent PNGs). The transparent
+// background lets the text-selection highlight show through behind the moji,
+// just like a native emoji glyph. Real apps would point `src` at their own
+// uploaded images or a workspace emoji registry.
+const PLIM_MOJI_SRC =
+	"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='2' y='2' width='20' height='20' rx='6' fill='none' stroke='%236c5ce7' stroke-width='2'/><text x='12' y='17' font-size='14' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%236c5ce7'>P</text></svg>";
+
+// ── Simulated remote custom-emoji registry ──────────────────────────────────
+// A Slack-style workspace has *hundreds* of custom emojis served from a
+// backend/CDN — far too many to hardcode into the editor. Instead the app hands
+// @plim/mojis an async `resolveAsync(slug)` that looks a slug up remotely, and
+// the package caches the answer so each `:slug:` is fetched at most once (even
+// while you type many different ones). Below we fake that backend with an
+// in-memory map + artificial latency; a real app would `await fetch(...)`.
+
+// A tiny transparent-background SVG "badge" data-URI for a generated moji.
+function mojiBadge(text: string, color: string): string {
+	const t = encodeURIComponent(text);
+	return (
+		"data:image/svg+xml;utf8," +
+		`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'>` +
+		`<rect x='2' y='2' width='20' height='20' rx='6' fill='none' stroke='${color}' stroke-width='2'/>` +
+		`<text x='12' y='17' font-size='11' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='${color}'>${t}</text>` +
+		`</svg>`
+	);
+}
+
+const REMOTE_MOJI_REGISTRY: Map<string, MojiDefinition> = (() => {
+	const registry = new Map<string, MojiDefinition>();
+	// The workspace logo — a custom image moji on a transparent background.
+	registry.set('plim', { slug: 'plim', src: PLIM_MOJI_SRC, label: 'Plim' });
+	// A handful of friendly named custom emojis.
+	const named: Array<[string, string, string]> = [
+		['parrot', 'P', '%232ecc71'],
+		['shipit', 'S', '%23e67e22'],
+		['boom', 'B', '%23e74c3c'],
+		['sparkle', '*', '%239b59b6'],
+	];
+	for (const [slug, glyph, color] of named) registry.set(slug, { slug, src: mojiBadge(glyph, color), label: slug });
+	// …plus a few hundred generated ones (`custom_1` … `custom_300`) to show the
+	// resolver scales without any of them being hardcoded in the editor config.
+	const palette = ['%236c5ce7', '%2300b894', '%230984e3', '%23d63031', '%23e17055', '%23e84393'];
+	for (let i = 1; i <= 300; i++) {
+		const slug = `custom_${i}`;
+		registry.set(slug, { slug, src: mojiBadge(String(i), palette[i % palette.length]!), label: slug });
+	}
+	return registry;
+})();
+
+// The async resolver handed to the editor. Simulates a network round-trip; a
+// real app would `await fetch('/api/emoji/' + slug)` here. @plim/mojis caches
+// each result (positive and negative) so a slug is only ever fetched once.
+async function resolveMojiFromRegistry(slug: string): Promise<MojiDefinition | null> {
+	await new Promise((resolve) => setTimeout(resolve, 200));
+	return REMOTE_MOJI_REGISTRY.get(slug) ?? null;
+}
 
 const plim = new PlimDriver({
 	theme: 'light',
-	extensions: [slashCommandExtension(), mentionExtension(), statusBadgeExtension()],
+	extensions: [
+		slashCommandExtension(),
+		mentionExtension(),
+		statusBadgeExtension(),
+		// Native-emoji shortcodes (`:smile:`, `:moon:`, …) resolve instantly
+		// from the built-in defaults; unknown slugs are resolved dynamically
+		// against the (simulated) remote workspace registry above.
+		mojiExtension({ resolveAsync: resolveMojiFromRegistry }),
+	],
 	registeredMarks: [boldMark, italicMark, underlineMark, strikethroughMark, codeMark, linkMark, highlightMark, commentMark],
 	registeredBlocks: [
 		paragraphBlock,
@@ -282,6 +350,44 @@ const initialContent = {
 				{ text: ', deprecate v1 API ' },
 				{ text: 'Cancelled', marks: [{ type: 'status', attrs: { status: 'cancelled' } }] },
 				{ text: '.' },
+			],
+		},
+		{
+			type: 'heading' as const,
+			id: newId(),
+			attrs: { level: 2 },
+			text: [{ text: 'Custom emoji (mojis)' }],
+		},
+		{
+			type: 'paragraph' as const,
+			id: newId(),
+			text: [
+				{ text: 'Type a shortcode like ' },
+				{ text: ':smile:', marks: [{ type: 'code' }] },
+				{ text: ', ' },
+				{ text: ':moon:', marks: [{ type: 'code' }] },
+				{ text: ' or ' },
+				{ text: ':rocket:', marks: [{ type: 'code' }] },
+				{ text: ' and it converts live as you finish the closing colon. Custom emoji resolve dynamically from a (simulated) remote workspace registry — try ' },
+				{ text: ':plim:', marks: [{ type: 'code' }] },
+				{ text: ' (a custom image moji), ' },
+				{ text: ':parrot:', marks: [{ type: 'code' }] },
+				{ text: ' or ' },
+				{ text: ':custom_42:', marks: [{ type: 'code' }] },
+				{ text: '. There is no hardcoded list — each slug is fetched once and cached.' },
+			],
+		},
+		{
+			type: 'paragraph' as const,
+			id: newId(),
+			text: [
+				{ text: 'Already rendered: ' },
+				mojiSpan({ slug: 'moon', char: '🌑' }),
+				{ text: ' and a custom image ' },
+				mojiSpan({ slug: 'plim', src: PLIM_MOJI_SRC }),
+				{ text: '. Select this line and copy it — mojis paste back as their ' },
+				{ text: ':slug:', marks: [{ type: 'code' }] },
+				{ text: ' shortcodes.' },
 			],
 		},
 		{

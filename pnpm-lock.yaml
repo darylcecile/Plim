@@ -157,6 +157,9 @@ importers:
       '@plim/markdown':
         specifier: workspace:*
         version: link:../../packages/markdown
+      '@plim/mojis':
+        specifier: workspace:*
+        version: link:../../packages/mojis
       '@plim/react':
         specifier: workspace:*
         version: link:../../packages/react
@@ -232,6 +235,12 @@ importers:
         version: link:../editor
 
   packages/markdown:
+    dependencies:
+      '@plim/core':
+        specifier: workspace:*
+        version: link:../core
+
+  packages/mojis:
     dependencies:
       '@plim/core':
         specifier: workspace:*

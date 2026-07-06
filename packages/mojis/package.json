@@ -1,0 +1,53 @@
+{
+  "name": "@plim/mojis",
+  "version": "0.2.0",
+  "description": "Plim mojis: Slackmoji-style custom inline emoji rendered live from :slug: shortcodes for the Plim block editor.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./mojis.css": "./mojis.css"
+  },
+  "files": [
+    "dist",
+    "mojis.css",
+    "LICENSE",
+    "README.md"
+  ],
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "Daryl Cecile <darylcecile@gmail.com>",
+  "homepage": "https://github.com/darylcecile/plim#readme",
+  "bugs": {
+    "url": "https://github.com/darylcecile/plim/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/darylcecile/plim.git",
+    "directory": "packages/mojis"
+  },
+  "keywords": [
+    "plim",
+    "editor",
+    "block-editor",
+    "emoji",
+    "moji",
+    "slackmoji",
+    "shortcode",
+    "extension"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@plim/core": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "prepublishOnly": "pnpm build"
+  }
+}

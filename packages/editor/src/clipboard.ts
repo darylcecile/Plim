@@ -21,6 +21,7 @@ import {
 	type BlockDescriptor,
 	type BlockNode,
 	type DocumentNode,
+	type MarkDescriptor,
 	type Selection as PSelection,
 	type TextSpan,
 	comparePaths,
@@ -156,9 +157,17 @@ export function sliceFromTextRange(doc: DocumentNode, sel: PSelection): { blocks
 export const PLIM_CLIPBOARD_MIME = 'application/x-plim';
 export const PLIM_CLIPBOARD_VERSION = 1;
 
-export function writeClipboardMarkdown(ev: ClipboardEvent, blocks: BlockNode[], descs: BlockDescriptor[]): boolean {
+export function writeClipboardMarkdown(
+	ev: ClipboardEvent,
+	blocks: BlockNode[],
+	descs: BlockDescriptor[],
+	markDescs?: MarkDescriptor[],
+): boolean {
 	if (!ev.clipboardData) return false;
-	const md = contentToMarkdown({ type: 'doc', children: blocks }, { blocks: descs });
+	const md = contentToMarkdown(
+		{ type: 'doc', children: blocks },
+		markDescs ? { blocks: descs, marks: markDescs } : { blocks: descs },
+	);
 	ev.clipboardData.setData('text/plain', md);
 	ev.clipboardData.setData('text/markdown', md);
 	// Lossless plim-native channel. Wrap in a versioned envelope so we can
