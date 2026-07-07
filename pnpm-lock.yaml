@@ -154,6 +154,9 @@ importers:
       '@plim/editor':
         specifier: workspace:*
         version: link:../../packages/editor
+      '@plim/html':
+        specifier: workspace:*
+        version: link:../../packages/html
       '@plim/markdown':
         specifier: workspace:*
         version: link:../../packages/markdown

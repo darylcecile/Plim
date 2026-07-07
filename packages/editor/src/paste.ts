@@ -223,6 +223,40 @@ function pathsEqual(a: BlockPath, b: BlockPath): boolean {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Single-block ("input box") paste.
+//
+// A stripped-down input box (see `singleBlock` in the view) must never grow
+// extra blocks, so it can't use `pastePlainText` (which splits on blank lines)
+// or the markdown/HTML/native pipelines (which insert block structure).
+// Instead we flatten the clipboard's plain text into the current block: every
+// newline — single or blank-line — survives as a soft break, matching how a
+// chat composer treats a multi-line paste.
+export function pasteSingleBlock(text: string, ctx: ActionContext): boolean {
+	const sel = ctx.state.selection;
+	if (!sel) return false;
+	// Single-block mode guarantees anchor/head share the sole block's path;
+	// bail defensively if that invariant is ever violated so we never corrupt
+	// the doc by writing across a phantom block boundary.
+	if (!pathsEqual(sel.anchor.path, sel.head.path)) return false;
+	const normalised = text.replace(/\r\n?/g, '\n');
+	const path = sel.head.path;
+	const fromOff = Math.min(sel.anchor.offset, sel.head.offset);
+	const toOff = Math.max(sel.anchor.offset, sel.head.offset);
+	const tx = ctx.createTransaction();
+	if (fromOff !== toOff) {
+		tx.replaceRange(path, fromOff, toOff, normalised ? [{ text: normalised }] : []);
+	} else if (normalised) {
+		tx.insertText(path, fromOff, normalised);
+	} else {
+		return false;
+	}
+	const end = fromOff + normalised.length;
+	tx.setSelection({ anchor: { path, offset: end }, head: { path, offset: end } });
+	tx.commit();
+	return true;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Phase 2 — markdown auto-detect.
 //
 // We don't try to be clever: a paste is "markdown-ish" only when it contains

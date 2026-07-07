@@ -26,7 +26,7 @@ import {
 } from '@plim/core';
 import { mountView, type View, type ViewOptions } from './view.js';
 import { runBuiltInBeforeAction, runBuiltInKey } from './builtin-actions.js';
-import { pastePlainText, pasteMarkdown, pasteHtml, pastePlimNative, pasteUrlOnSelection, looksLikeMarkdown, type PasteData } from './paste.js';
+import { pastePlainText, pasteMarkdown, pasteHtml, pastePlimNative, pasteUrlOnSelection, pasteSingleBlock, looksLikeMarkdown, type PasteData } from './paste.js';
 
 export type ContainerAdapter = {
 	resolve(): HTMLElement | null;
@@ -46,6 +46,18 @@ export type DeriveEditorOptions = {
 	// and the descriptor. The implementation is expected to mount/update its
 	// component tree into `host` (e.g., via `react-dom`'s `createRoot`).
 	renderReactBlock?: (host: HTMLElement, payload: BlockPayload, desc: BlockDescriptor) => void;
+	// Single-block ("input box") mode. Suppresses block handles, prevents Enter
+	// from splitting into new blocks, and keeps paste within the single block.
+	// Inline marks, markdown input rules, slash commands, mentions and mojis
+	// all keep working. See `@plim/react`'s `PlimInputBox` for the React wrapper.
+	singleBlock?: boolean;
+	// Placeholder text shown while the (single) block is empty. Only rendered
+	// in `singleBlock` mode.
+	placeholder?: string;
+	// Called on a plain Enter (no Shift) in `singleBlock` mode. Return `true`
+	// to consume the keystroke (e.g. after submitting); return falsy to insert
+	// a soft line break instead. Ignored outside single-block mode.
+	onEnter?: () => boolean | void;
 };
 
 export type AgnosticEditor = EditorHandle & {
@@ -224,6 +236,9 @@ export function deriveEditor(plim: PlimDriver, options: DeriveEditorOptions): Ag
 				onBeforeInput: handleBeforeInput,
 				onPaste: handlePaste,
 				...(options.renderReactBlock ? { renderReactBlock: options.renderReactBlock } : {}),
+				...(options.singleBlock ? { singleBlock: true } : {}),
+				...(options.placeholder != null ? { placeholder: options.placeholder } : {}),
+				...(options.onEnter ? { onEnter: options.onEnter } : {}),
 			};
 			view = mountView(viewOptions);
 			view.update(state);
@@ -419,6 +434,15 @@ export function deriveEditor(plim: PlimDriver, options: DeriveEditorOptions): Ag
 			if (!ext.transformPaste) continue;
 			const handled = ext.transformPaste(data, ctx);
 			if (handled === true) return true;
+		}
+		// Single-block ("input box") mode: never insert block structure. After
+		// giving extensions their turn above (so mojis/mentions can still
+		// transform a pasted payload), flatten the plain text into the current
+		// block. Returning here short-circuits the native/URL/HTML/markdown/
+		// plaintext phases below, all of which can create extra blocks.
+		if (options.singleBlock) {
+			if (data.text) return pasteSingleBlock(data.text, ctx);
+			return false;
 		}
 		// Phase 0 — Plim-native lossless. Set by `clipboard.ts` whenever the
 		// copy source is another plim editor. Preserves block types/attrs/

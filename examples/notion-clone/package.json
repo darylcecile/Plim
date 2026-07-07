@@ -12,6 +12,7 @@
     "@plim/collaboration": "workspace:*",
     "@plim/core": "workspace:*",
     "@plim/editor": "workspace:*",
+    "@plim/html": "workspace:*",
     "@plim/markdown": "workspace:*",
     "@plim/mojis": "workspace:*",
     "@plim/react": "workspace:*",
