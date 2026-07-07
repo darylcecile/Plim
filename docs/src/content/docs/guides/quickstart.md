@@ -83,6 +83,8 @@ editor.mount();
 
 ## Next steps
 
+- Need a chat or comment composer instead of a full document? Reach for the
+  [single-block input box](/guides/input-box/).
 - Add your own [custom blocks](/guides/custom-blocks/) and
   [custom marks](/guides/custom-marks/).
 - Wire keyboard shortcuts and menus with

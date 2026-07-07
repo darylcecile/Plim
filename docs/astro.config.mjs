@@ -81,6 +81,7 @@ export default defineConfig({
             { label: 'Introduction', link: '/guides/introduction/' },
             { label: 'Installation', link: '/guides/installation/' },
             { label: 'Quickstart', link: '/guides/quickstart/' },
+            { label: 'Input box (single-block)', link: '/guides/input-box/' },
             { label: 'Custom blocks', link: '/guides/custom-blocks/' },
             { label: 'Custom marks', link: '/guides/custom-marks/' },
             { label: 'Actions & triggers', link: '/guides/actions-and-triggers/' },
