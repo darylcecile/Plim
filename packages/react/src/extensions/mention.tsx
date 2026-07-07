@@ -3,7 +3,7 @@ import { defineAction, defineExtension, mentionMark, triggers } from '@plim/core
 import type { BlockNode, TextSpan, ValidationContext } from '@plim/core';
 import type { EditorHandle } from '../index.js';
 import { ActionPanel } from '../index.js';
-import { currentBlockAnchor, currentCaretRect } from './slash-command.js';
+import { currentBlockAnchor, currentCaretRect, singleBlockInputBox } from './slash-command.js';
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Mention extension
@@ -304,6 +304,10 @@ export function MentionMenu(props: MentionMenuProps): React.ReactElement | null 
 	// leave the menu stranded after a scroll. Falls back to the snapshot
 	// rect if the block element is unreachable (e.g. detached mid-flow).
 	const anchorFn = (): DOMRect | null => {
+		// Inside a single-block input, anchor to the whole box so a flipped menu
+		// clears the composer instead of covering the caret (see singleBlockInputBox).
+		const box = singleBlockInputBox(state.anchor);
+		if (box) return box.getBoundingClientRect();
 		if (state.anchor) {
 			const r = state.anchor.getBoundingClientRect();
 			return new DOMRect(r.left + state.caretOffsetX, r.top + state.caretOffsetBottom, 0, 0);

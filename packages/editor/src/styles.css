@@ -201,6 +201,46 @@
 		content: "Type code…";
 	}
 
+	/* Single-block "input box" (PlimInputBox).
+	 *
+	 * Placeholder shows whenever the sole block is empty — focused or not,
+	 * like a chat composer's "Message #channel" hint. `attr(data-placeholder)`
+	 * pulls the text the view set from the `placeholder` option. Declared after
+	 * the default placeholders so it wins the equal-specificity tie for the
+	 * paragraph case (otherwise "Type '/' for commands" would show through), and
+	 * it deliberately omits the `[data-caret-active]` qualifier the defaults use
+	 * so the hint persists while the box is blurred. */
+	.plim-editor--single .plim-block[data-empty="true"] [data-block-content="true"]::before {
+		content: attr(data-placeholder);
+		color: var(--text-faint);
+		pointer-events: none;
+		position: absolute;
+		white-space: nowrap;
+	}
+
+	/* Opt-in chat-composer chrome. `PlimInputBox` doesn't add this class itself;
+	 * apply it via the component's `className` to get a bordered, rounded,
+	 * comfortably-padded box that focuses with an accent ring — a sensible
+	 * Slack-style default consumers can override or ignore. */
+	.plim-input-box {
+		border: 1px solid var(--border, rgba(0, 0, 0, 0.15));
+		border-radius: 8px;
+		padding: 8px 12px;
+		background: var(--bg, #fff);
+		transition: border-color 120ms ease, box-shadow 120ms ease;
+	}
+
+	.plim-input-box:focus-within {
+		border-color: var(--accent, #2383e2);
+		box-shadow: 0 0 0 1px var(--accent, #2383e2);
+	}
+
+	/* The single block fills the composer without the editor's block rhythm. */
+	.plim-input-box .plim-editor--single .plim-block {
+		margin: 0;
+		padding: 0;
+	}
+
 	/* Headings */
 	.plim-block-heading {
 		margin-top: 1.4em;

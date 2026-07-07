@@ -23,8 +23,11 @@ import {
 	triggers,
 	underlineMark,
 	boldMark,
+	type DocumentNode,
+	type EditorState,
 } from '@plim/core';
 import { contentFromMarkdown, contentToMarkdown } from '@plim/markdown';
+import { serializeToHTML, type MarkRenderer } from '@plim/html';
 import {
 	CommentStore,
 	CommentSync,
@@ -38,6 +41,7 @@ import {
 	CommentsLayer,
 	MentionMenu,
 	PlimEditor,
+	PlimInputBox,
 	SlashCommandMenu,
 	mentionExtension,
 	slashCommandExtension,
@@ -221,6 +225,89 @@ const plim = new PlimDriver({
 		}),
 	],
 });
+
+// ── Slack-style message composer (PlimInputBox) ─────────────────────────────
+// A *second*, independent driver powering the chat input at the bottom of the
+// page. It's deliberately "stripped down": no collab/comments, no ledger, no
+// transport — just the inline editing extensions that make sense in a single
+// message: slash commands, mentions and mojis, plus the usual inline marks and
+// markdown input rules. A separate driver (not the `plim` one above) is
+// required because each mounted editor owns its own history/undo stack.
+const markToggle = (name: string, mark: string, shortcut: string) =>
+	defineAction(name, {
+		trigger: triggers.keyboard.shortcut(shortcut),
+		triggerValidationRules: ({ and }) => and(['selectionNotEmpty', 'blockSupportsDecoration']),
+		perform: async (state, ctx) => {
+			const sel = state.selection;
+			const tx = ctx.createTransaction();
+			tx.toggleMark(mark, { from: sel.anchor, to: sel.head });
+			tx.commit();
+		},
+	});
+
+const chatPlim = new PlimDriver({
+	theme: 'light',
+	extensions: [
+		slashCommandExtension(),
+		mentionExtension(),
+		mojiExtension({ resolveAsync: resolveMojiFromRegistry }),
+	],
+	registeredMarks: [boldMark, italicMark, underlineMark, strikethroughMark, codeMark, linkMark, highlightMark],
+	registeredBlocks: [
+		paragraphBlock,
+		headingBlock,
+		bulletedListBlock,
+		numberedListBlock,
+		todoListBlock,
+		quoteBlock,
+		codeBlock,
+	],
+	registeredActions: [
+		markToggle('bold', 'bold', 'Mod+b'),
+		markToggle('italic', 'italic', 'Mod+i'),
+		markToggle('underline', 'underline', 'Mod+u'),
+		markToggle('strikethrough', 'strikethrough', 'Mod+Shift+s'),
+		markToggle('inlineCode', 'code', 'Mod+e'),
+		defineAction('undo', {
+			trigger: triggers.keyboard.shortcut('Mod+z'),
+			perform: async () => {
+				chatPlim.getHistory().undo();
+			},
+			priority: 10,
+		}),
+		defineAction('redo', {
+			trigger: [triggers.keyboard.shortcut('Mod+Shift+z'), triggers.keyboard.shortcut('Mod+y')],
+			perform: async () => {
+				chatPlim.getHistory().redo();
+			},
+			priority: 10,
+		}),
+	],
+});
+
+// Renders a moji mark to HTML for the read-only message list, mirroring
+// `mojiMark.toDOM` from @plim/mojis so submitted mojis look identical to the
+// live editor (the `plim-moji` classes are styled by mojis.css). @plim/html's
+// default renderers cover bold/italic/underline/strike/code/link/highlight and
+// mentions; moji is the one project-specific mark we add here.
+const mojiHtmlRenderer: MarkRenderer = (inner, mark, ctx) => {
+	const slug = String(mark.attrs?.slug ?? '');
+	const src = mark.attrs?.src ? String(mark.attrs.src) : '';
+	const cls = src ? 'plim-moji plim-moji--image' : 'plim-moji';
+	const style = src ? ctx.attr('style', `--plim-moji-src:url("${src.replace(/["\\]/g, '\\$&')}")`) : '';
+	return (
+		`<span${ctx.attr('class', cls)}${ctx.attr('data-moji-slug', slug)}` +
+		`${ctx.attr('title', `:${slug}:`)} role="img"${ctx.attr('aria-label', `:${slug}:`)}${style}>${inner}</span>`
+	);
+};
+
+// Serialize a submitted message document to display HTML. Text is escaped by
+// @plim/html, so the `dangerouslySetInnerHTML` sink below is safe from user
+// input. The output is wrapped in `.plim-editor` by the render layer so the
+// editor's scoped mark styles (e.g. `.plim-editor .plim-mention`) apply.
+function renderMessageHtml(doc: DocumentNode): string {
+	return serializeToHTML(doc, { marks: { moji: mojiHtmlRenderer } });
+}
 
 // ---- Comments & replies -------------------------------------------------
 // One store holds every thread; the in-document `commentMark` (registered in
@@ -466,14 +553,33 @@ const customSlashItems: readonly SlashCommandItem[] = [
 
 const slashItems: readonly SlashCommandItem[] = [...DEFAULT_SLASH_ITEMS, ...customSlashItems];
 
+// Slash items for the chat composer. Curated to block-type formatting only
+// (text/headings/lists/quote/code) — items that map cleanly onto a single
+// message. We deliberately skip block types that don't make sense inline in a
+// one-block composer (divider/image/embed/raw HTML/table/toggle) and any custom
+// `apply` items.
+const CHAT_SLASH_IDS = new Set(['paragraph', 'h1', 'h2', 'h3', 'bulleted', 'numbered', 'todo', 'quote', 'code']);
+const chatSlashItems: readonly SlashCommandItem[] = DEFAULT_SLASH_ITEMS.filter((item) => CHAT_SLASH_IDS.has(item.id));
+
+type ChatMessage = { id: string; html: string };
+
 export function App() {
 	const handle = useEditorHandle();
+	const chatHandle = useEditorHandle();
+	const [messages, setMessages] = React.useState<ChatMessage[]>([]);
 	const [toast, setToast] = React.useState<string | null>(null);
 	const toastTimer = React.useRef<number | null>(null);
 	const showToast = React.useCallback((message: string) => {
 		setToast(message);
 		if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
 		toastTimer.current = window.setTimeout(() => setToast(null), 2000);
+	}, []);
+
+	// A submitted message is frozen to HTML and appended to the list. The
+	// PlimInputBox clears + refocuses itself after submit (clearOnSubmit
+	// default), so this handler only has to record the message.
+	const handleChatSubmit = React.useCallback((state: EditorState) => {
+		setMessages((prev) => [...prev, { id: newId(), html: renderMessageHtml(state.doc) }]);
 	}, []);
 
 	// Declarative listener for the `exportMarkdown` async event fired by
@@ -513,6 +619,55 @@ export function App() {
 			<MentionMenu editor={handle} searchUsers={fakeAsyncUserSearch} />
 			<StatusBadgeMenu editor={handle} />
 			<CommentsLayer editor={handle} store={commentStore} currentUser={currentUser} />
+
+			{/* ── Slack-style composer powered by <PlimInputBox> ───────────── */}
+			<section className="chat" aria-label="Message composer demo">
+				<div className="chat-header">
+					<span className="chat-channel"># general</span>
+					<span className="chat-hint">
+						PlimInputBox — a single-block editor. Try <kbd>/</kbd>, <kbd>@</kbd>, <code>:smile:</code>,
+						markdown (<code>**bold**</code>). <kbd>Enter</kbd> sends · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline.
+					</span>
+				</div>
+				<div className="chat-messages">
+					{messages.length === 0 ? (
+						<div className="chat-empty">No messages yet — say hello 👋</div>
+					) : (
+						messages.map((m) => (
+							<div className="chat-message" key={m.id}>
+								<div className="chat-avatar" aria-hidden="true">
+									🙂
+								</div>
+								<div className="chat-body">
+									<div className="chat-meta">
+										<span className="chat-author">You</span>
+										<span className="chat-time">now</span>
+									</div>
+									{/* Serialized (escaped) message HTML; wrapped in .plim-editor so
+									    the editor's scoped mark styles apply. */}
+									<div
+										className="chat-text plim-editor"
+										// eslint-disable-next-line react/no-danger
+										dangerouslySetInnerHTML={{ __html: m.html }}
+									/>
+								</div>
+							</div>
+						))
+					)}
+				</div>
+				<div className="chat-composer">
+					<PlimInputBox
+						plim={chatPlim}
+						handle={chatHandle}
+						className="plim-input-box"
+						placeholder="Message #general"
+						onSubmit={handleChatSubmit}
+					/>
+					<SlashCommandMenu editor={chatHandle} items={chatSlashItems} />
+					<MentionMenu editor={chatHandle} searchUsers={fakeAsyncUserSearch} />
+				</div>
+			</section>
+
 			{toast !== null ? <div className="export-toast">{toast}</div> : null}
 		</div>
 	);

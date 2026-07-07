@@ -187,7 +187,7 @@ export function SlashCommandMenu(props: SlashCommandMenuProps): React.ReactEleme
 	return (
 		<ActionPanel
 			open
-			anchor={() => (state.anchor ?? state.caretRect) as Element | DOMRect | null}
+			anchor={() => (singleBlockInputBox(state.anchor) ?? state.anchor ?? state.caretRect) as Element | DOMRect | null}
 			placement="bottom-start"
 			onClose={() => {
 				state.resolve(null);
@@ -313,4 +313,23 @@ export function currentBlockAnchor(): Element | null {
 	if (!node) return null;
 	const el = node instanceof Element ? node : node.parentElement;
 	return el?.closest('[data-block-id]') ?? null;
+}
+
+/**
+ * When the caret sits inside a single-block input (`PlimInputBox`, which mounts
+ * a `.plim-editor--single` view), pop-up menus should anchor to the whole input
+ * box rather than the caret glyph. A composer is typically pinned to the bottom
+ * of its container, so `ActionPanel` flips the menu above the anchor — and a
+ * caret anchor puts the flipped menu's bottom edge *inside* the box, covering
+ * the text being typed. Anchoring to the box makes the flipped menu clear the
+ * entire composer (Slack-style); multi-block editors keep their caret anchor.
+ *
+ * Returns the opt-in `.plim-input-box` chrome wrapper when present (so the menu
+ * also clears its border/padding), else the `.plim-editor--single` view root,
+ * else `null` when not inside a single-block input.
+ */
+export function singleBlockInputBox(anchor: Element | null): Element | null {
+	const single = anchor?.closest('.plim-editor--single') ?? null;
+	if (!single) return null;
+	return single.closest('.plim-input-box') ?? single;
 }

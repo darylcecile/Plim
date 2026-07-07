@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { ActionContext, BlockDescriptor, BlockPayload, EditorState, PlimDriver, Snapshot, Transaction } from '@plim/core';
+import type { ActionContext, BlockDescriptor, BlockPayload, DocumentNode, EditorState, PlimDriver, Snapshot, Transaction } from '@plim/core';
+import { blockTextLength, newId } from '@plim/core';
 import { type AgnosticEditor, attachContainer, deriveEditor } from '@plim/editor';
 
 export type AsyncEventHandler<T = unknown> = (
@@ -142,6 +143,181 @@ export function PlimEditor(props: PlimEditorProps): React.ReactElement {
 	}, [props.plim]);
 
 	// Keep readonly in sync without remounting
+	React.useEffect(() => {
+		const view = editorRef.current?.view;
+		if (!view) return;
+		view.root.setAttribute('contenteditable', props.readonly ? 'false' : 'true');
+	}, [props.readonly]);
+
+	return <div ref={containerRef} className={props.className} style={props.style} />;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// <PlimInputBox />
+//
+// A stripped-down, single-block editor for chat/comment-style composers (think
+// the Slack message box). It shares the exact keystroke pipeline as PlimEditor
+// — so inline marks, markdown input rules, slash commands, mentions and mojis
+// all work — but the view runs in `singleBlock` mode: no `+`/drag block
+// handles, and Enter never splits into new blocks.
+//
+// Enter behaviour (chat-style):
+//   - `submitOnEnter` (default true): Enter submits, Shift+Enter inserts a soft
+//     newline.
+//   - `submitOnEnter={false}`: Enter inserts a soft newline (no submit on Enter).
+//   - Cmd/Ctrl+Enter always submits, regardless of `submitOnEnter`.
+//
+// `onSubmit` receives the current EditorState; empty input never submits. When
+// `clearOnSubmit` (default true) the box resets to a single empty paragraph and
+// re-focuses after a submit.
+//
+// Collab/ledger/transport are intentionally out of scope: they attach to the
+// PlimDriver by the consumer, so a plain driver here is simply "stripped down".
+
+export type PlimInputBoxProps = {
+	plim: PlimDriver;
+	handle?: EditorHandle;
+	initialContent?: DocumentNode;
+	readonly?: boolean;
+	autoFocus?: boolean;
+	/** Placeholder shown while the input is empty. Applied at mount. */
+	placeholder?: string;
+	/** Enter submits (Shift+Enter → newline). Default true. */
+	submitOnEnter?: boolean;
+	/** Clear the input and re-focus after a successful submit. Default true. */
+	clearOnSubmit?: boolean;
+	/** Called with the current state when the user submits (never for empty input). */
+	onSubmit?: (state: EditorState) => void;
+	onTransaction?: (tx: Transaction, state: EditorState) => void;
+	whenReady?: () => void;
+	asyncEventListeners?: AsyncListenerRegistration[];
+	className?: string;
+	style?: React.CSSProperties;
+};
+
+// True when the doc is a single text block with no inline content. Mentions and
+// mojis are marks on real text runs, so a lone `:smile:` or `@user` counts as
+// non-empty (blockTextLength > 0) and will still submit.
+function isInputEmpty(state: EditorState): boolean {
+	const children = state.doc.children;
+	if (children.length !== 1) return false;
+	const only = children[0];
+	if (!only) return true;
+	if (only.children && only.children.length > 0) return false;
+	return blockTextLength(only) === 0;
+}
+
+function freshInputState(): EditorState {
+	return {
+		doc: { type: 'doc', children: [{ id: newId(), type: 'paragraph', text: [] }] },
+		selection: { anchor: { path: [0], offset: 0 }, head: { path: [0], offset: 0 } },
+	};
+}
+
+export function PlimInputBox(props: PlimInputBoxProps): React.ReactElement {
+	const containerRef = React.useRef<HTMLDivElement | null>(null);
+	const editorRef = React.useRef<AgnosticEditor | null>(null);
+
+	// Latest-value refs so the (mount-once) deriveEditor closure and the
+	// container keydown listener never read stale props.
+	const onSubmitRef = React.useRef(props.onSubmit);
+	onSubmitRef.current = props.onSubmit;
+	const submitOnEnterRef = React.useRef(props.submitOnEnter ?? true);
+	submitOnEnterRef.current = props.submitOnEnter ?? true;
+	const clearOnSubmitRef = React.useRef(props.clearOnSubmit ?? true);
+	clearOnSubmitRef.current = props.clearOnSubmit ?? true;
+
+	// Stable submit routine (reads refs). Returns true when a submit fired.
+	const submit = React.useCallback((): boolean => {
+		const editor = editorRef.current;
+		if (!editor) return false;
+		const state = editor.getState();
+		if (isInputEmpty(state)) return false;
+		onSubmitRef.current?.(state);
+		if (clearOnSubmitRef.current) {
+			editor.setState(freshInputState());
+			editor.view?.focus();
+		}
+		return true;
+	}, []);
+
+	React.useEffect(() => {
+		if (!containerRef.current) return;
+		const roots = new Map<HTMLElement, Root>();
+		const renderReactBlock = (host: HTMLElement, payload: BlockPayload, desc: BlockDescriptor) => {
+			let root = roots.get(host);
+			if (!root) {
+				root = createRoot(host);
+				roots.set(host, root);
+			}
+			const node = desc.toComponent?.(payload) as React.ReactNode;
+			root.render(<>{node}</>);
+		};
+		const editor = deriveEditor(props.plim, {
+			containerAdapter: attachContainer(() => containerRef.current),
+			...(props.initialContent ? { initialContent: props.initialContent } : {}),
+			readonly: props.readonly ?? false,
+			autoFocus: props.autoFocus ?? false,
+			renderReactBlock,
+			singleBlock: true,
+			...(props.placeholder != null ? { placeholder: props.placeholder } : {}),
+			// Plain Enter: submit when submitOnEnter, else fall through to a soft
+			// line break (return falsy). Returning true consumes the keystroke so
+			// an empty submit doesn't leave a stray newline behind.
+			onEnter: () => {
+				if (!submitOnEnterRef.current) return false;
+				submit();
+				return true;
+			},
+		});
+		editorRef.current = editor;
+		if (props.handle) (props.handle as unknown as { __set: (e: AgnosticEditor | null) => void }).__set(editor);
+		const offTx = props.onTransaction ? editor.onTransaction(props.onTransaction) : undefined;
+		if (props.whenReady) editor.whenReady(props.whenReady);
+		const offReap = editor.onTransaction(() => {
+			queueMicrotask(() => {
+				for (const [host, root] of roots) {
+					if (!host.isConnected) {
+						root.unmount();
+						roots.delete(host);
+					}
+				}
+			});
+		});
+		const offs: Array<() => void> = [];
+		for (const reg of props.asyncEventListeners ?? []) {
+			offs.push(editor.onAsyncEvent(reg.name, reg.handler));
+		}
+		// Cmd/Ctrl+Enter always submits, independent of submitOnEnter. Handled at
+		// the container in the capture phase so it beats the view's beforeinput
+		// and any open menu; preventDefault stops a competing newline insert.
+		const el = containerRef.current;
+		const onKeyDown = (e: KeyboardEvent) => {
+			if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+				e.preventDefault();
+				e.stopPropagation();
+				submit();
+			}
+		};
+		el.addEventListener('keydown', onKeyDown, true);
+		return () => {
+			el.removeEventListener('keydown', onKeyDown, true);
+			offTx?.();
+			offReap();
+			for (const off of offs) off();
+			editor.destroy();
+			const pending = Array.from(roots.values());
+			roots.clear();
+			queueMicrotask(() => {
+				for (const r of pending) r.unmount();
+			});
+			editorRef.current = null;
+			if (props.handle) (props.handle as unknown as { __set: (e: AgnosticEditor | null) => void }).__set(null);
+		};
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [props.plim]);
+
+	// Keep readonly in sync without remounting.
 	React.useEffect(() => {
 		const view = editorRef.current?.view;
 		if (!view) return;

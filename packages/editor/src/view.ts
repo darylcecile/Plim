@@ -44,6 +44,22 @@ export type ViewOptions = {
 	// render so the consumer can mount/update its component tree. The view
 	// itself remains framework-agnostic.
 	renderReactBlock?: (host: HTMLElement, payload: BlockPayload, desc: BlockDescriptor) => void;
+	// Single-block ("input box") mode. When true the view renders as a
+	// stripped-down chat-style input: block handles (the `+` add button and
+	// the `⋮⋮` drag grip) are suppressed and a plain Enter never splits the
+	// block into a new one (see `onEnter`). Everything else — inline marks,
+	// markdown input rules, slash commands, mentions, mojis — keeps working.
+	singleBlock?: boolean;
+	// Placeholder text shown while the (single) block is empty. Rendered via a
+	// `data-placeholder` attribute on the block-content element + a CSS
+	// `::before` rule scoped to `.plim-editor--single`.
+	placeholder?: string;
+	// Called on a plain Enter (no Shift) while in `singleBlock` mode. Return
+	// `true` to signal the keystroke was fully handled (e.g. the input was
+	// submitted) so the view does nothing further; return a falsy value to
+	// fall back to inserting a soft line break so the box can stay multi-line.
+	// Ignored outside single-block mode.
+	onEnter?: () => boolean | void;
 };
 
 export type View = {
@@ -108,11 +124,13 @@ function atomicAncestor(node: Node, boundary: HTMLElement): HTMLElement | null {
 
 export function mountView(opts: ViewOptions): View {
 	const root = document.createElement('div');
-	root.className = 'plim-editor';
+	root.className = opts.singleBlock ? 'plim-editor plim-editor--single' : 'plim-editor';
 	root.setAttribute('contenteditable', opts.readonly ? 'false' : 'true');
 	root.setAttribute('spellcheck', 'true');
 	root.setAttribute('role', 'textbox');
-	root.setAttribute('aria-multiline', 'true');
+	// A single-block input holds one logical line-of-thought (though it may
+	// wrap and carry soft breaks), so it advertises as a single-line textbox.
+	root.setAttribute('aria-multiline', opts.singleBlock ? 'false' : 'true');
 	(root.style as CSSStyleDeclaration).outline = 'none';
 	opts.container.appendChild(root);
 
@@ -1674,7 +1692,9 @@ type BlockRenderStash = {
 };
 
 function ensureBlockHandles(el: HTMLElement, opts: ViewOptions) {
-	if (opts.readonly) return;
+	// Read-only editors and single-block ("input box") mode both render
+	// without the gutter affordances (the `+` add button and `⋮⋮` drag grip).
+	if (opts.readonly || opts.singleBlock) return;
 	let group = el.querySelector(':scope > .plim-block-handles') as HTMLElement | null;
 	if (!group) {
 		group = document.createElement('div');
@@ -1948,6 +1968,14 @@ function ensureContentChild(el: HTMLElement, node: BlockNode, opts: ViewOptions)
 		else el.appendChild(content);
 	}
 	renderTextSpans(content, node.text ?? [], opts.marks);
+	// In single-block ("input box") mode the caller may supply placeholder
+	// text; expose it on the content element so the CSS `::before` rule can
+	// surface it while the block is empty.
+	if (opts.singleBlock && opts.placeholder != null) {
+		if (content.getAttribute('data-placeholder') !== opts.placeholder) {
+			content.setAttribute('data-placeholder', opts.placeholder);
+		}
+	}
 	if (!node.text || node.text.length === 0) {
 		el.setAttribute('data-empty', 'true');
 	} else {
@@ -2972,6 +3000,17 @@ function pathForBlockId(blocks: BlockNode[], id: string, parent: number[] = []):
 function handleInsertParagraph(opts: ViewOptions) {
 	const state = opts.getState();
 	const sel = state.selection;
+	// Single-block ("input box") mode never splits into a new block. A plain
+	// Enter is first offered to `onEnter` (e.g. to submit the input); if that
+	// doesn't claim the keystroke we fall back to a soft line break so the
+	// box can still hold multi-line content. Shift+Enter routes through
+	// `handleInsertLineBreak` directly (see the beforeinput handler) and so
+	// never reaches here.
+	if (opts.singleBlock) {
+		const handled = opts.onEnter?.();
+		if (handled !== true) handleInsertLineBreak(opts);
+		return;
+	}
 	// Look up the descriptor for the current block to honor `continueAs`:
 	// "structural" blocks (callouts, quotes-as-callout-style, dividers,
 	// images) should not propagate themselves on Enter — the right-hand
